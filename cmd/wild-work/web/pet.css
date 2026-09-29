@@ -1,0 +1,112 @@
+/* pet.css — 桌宠（形象由原图拆层得到 5 张 PNG，全画布同坐标叠加）
+   只动两处：黑色眼珠（平移=眼神、纵向压扁=眨眼）与橙色腮红（不透明度/缩放）。
+   刻意不参与任何栅格布局：fixed 定位，不推挤 .container 内容。 */
+
+.pet {
+  position: fixed; bottom: 0; right: 0; z-index: 120;
+  width: 128px; height: 128px;
+  /* 动画变量由 pet.js 逐帧写入 */
+  --ex: 0px; --ey: 0px;   /* 眼珠位移（眼神） */
+  --eb: 1;                /* 眼珠纵向缩放（眨眼） */
+  --bo: 1;                /* 腮红不透明度 */
+  --bs: 1;                /* 腮红缩放 */
+  --tilt: 0deg;           /* 整体倾斜 */
+  pointer-events: none;
+  transition: filter .5s ease;
+}
+.pet.hidden { display: none; }
+
+/* 停靠侧：靠左用原图，靠右水平镜像 —— 原画的身体是从左/下出框的，
+   必须让出框边贴住对应的窗口边，否则看起来像从屏幕里侧滑出来 */
+.pet.dock-left { left: 0; right: auto; }
+.pet.dock-right { right: 0; left: auto; }
+.pet-art { position: absolute; inset: 0; }
+.pet.dock-right .pet-art { transform: scaleX(-1); }
+
+.pet-stage {
+  position: relative; width: 100%; height: 100%;
+  pointer-events: auto; cursor: grab;
+  animation: pet-breathe 4.2s ease-in-out infinite;
+  transform-origin: 50% 90%;
+  touch-action: none;
+}
+.pet-stage.dragging { cursor: grabbing; animation-play-state: paused; }
+
+.pet-layer {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  user-select: none; -webkit-user-drag: none; pointer-events: none;
+}
+
+/* 眼珠：先平移（眼神）再纵向压扁（眨眼），压扁轴心必须落在各自眼珠中心，
+   否则双眼一高一低会绕画布中心乱飞。数值来自拆层脚本实测质心。 */
+.pet-eye { transform: translate3d(var(--ex), var(--ey), 0) scaleY(var(--eb)); will-change: transform; }
+#petEyeL { transform-origin: 33.03% 43.26%; }
+#petEyeR { transform-origin: 58.62% 52.60%; }
+
+.pet-blush { opacity: var(--bo); transform: scale(var(--bs)); will-change: opacity, transform; }
+#petBlushL { transform-origin: 20.07% 51.48%; }
+#petBlushR { transform-origin: 64.61% 67.27%; }
+
+@keyframes pet-breathe {
+  0%, 100% { transform: rotate(var(--tilt)) translateY(0) scale(1); }
+  50%      { transform: rotate(var(--tilt)) translateY(-1.6%) scale(1.014); }
+}
+@keyframes pet-work {
+  0%, 100% { transform: rotate(var(--tilt)) translateY(0); }
+  50%      { transform: rotate(var(--tilt)) translateY(1.2%) scale(1.006); }
+}
+@keyframes pet-hop {
+  0%, 100% { transform: rotate(var(--tilt)) translateY(0) scale(1); }
+  30%      { transform: rotate(var(--tilt)) translateY(-14%) scale(1.05); }
+  60%      { transform: rotate(var(--tilt)) translateY(0) scale(.97); }
+}
+@keyframes pet-shake {
+  0%, 100% { transform: rotate(var(--tilt)) translateX(0); }
+  25%      { transform: rotate(calc(var(--tilt) - 2deg)) translateX(-2.5%); }
+  75%      { transform: rotate(calc(var(--tilt) + 2deg)) translateX(2.5%); }
+}
+@keyframes pet-poke {
+  0%, 100% { transform: rotate(var(--tilt)) scale(1); }
+  40%      { transform: rotate(var(--tilt)) scale(.9, 1.08); }
+  70%      { transform: rotate(var(--tilt)) scale(1.06, .94); }
+}
+
+/* ---------- 状态表现 ---------- */
+.pet[data-state="working"] .pet-stage { animation: pet-work .5s ease-in-out infinite; }
+.pet[data-state="happy"]   .pet-stage { animation: pet-hop .62s cubic-bezier(.22,1,.36,1) 2; }
+.pet[data-state="urgent"]  .pet-stage { animation: pet-shake .34s linear infinite; }
+.pet[data-state="asleep"]  .pet-stage { animation-duration: 7.5s; }
+.pet[data-state="stale"]   .pet-stage { animation-duration: 5.5s; }
+.pet[data-state="error"]   { filter: grayscale(.72) brightness(.88); }
+.pet.poked .pet-stage { animation: pet-poke .4s ease-out; }
+
+/* 暗色下给一层贴地阴影，避免纯色块浮在黑底上发飘 */
+@media (prefers-color-scheme: dark) {
+  .pet-stage { filter: drop-shadow(0 8px 20px rgba(0, 0, 0, .55)); }
+}
+/* Paper：象牙纸面上饱和度压低一点，避免驼色与纸色互相抢 */
+html[data-theme="paper"] .pet-stage { filter: saturate(.82) contrast(.95) drop-shadow(0 4px 10px rgba(20, 20, 19, .12)); }
+
+/* ---------- 角标（mini）：只缩尺寸，停靠侧与 bottom 由 JS 的行内样式决定 ---------- */
+.pet.mini { width: 46px; height: 46px; }
+
+/* ---------- 点击浮层：朝屏幕内侧展开 ---------- */
+.pet-pop {
+  position: absolute; bottom: calc(100% + 6px); right: 0;
+  width: 214px; padding: 11px 13px; pointer-events: auto;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--card-hairline); border-radius: 16px;
+  box-shadow: var(--shadow-modal); font-size: 12px; line-height: 1.65;
+}
+.pet-pop b { font-weight: 600; }
+.pet-pop .pp-row { display: flex; justify-content: space-between; gap: 10px; }
+.pet-pop .pp-k { color: var(--muted); }
+.pet-pop .pp-v { font-variant-numeric: tabular-nums; }
+.pet-pop .pp-reason { color: var(--muted); margin-top: 4px; }
+.pet-pop .pp-actions { display: flex; gap: 6px; margin-top: 8px; }
+.pet.dock-left .pet-pop { right: auto; left: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-stage { animation: none !important; filter: none; }
+  .pet-eye, .pet-blush { transition: none; }
+}

@@ -46,3 +46,6 @@ cmd/wild-work/web_design_backup/
 cmd/wild-work/web_upstream_v2.5.2/
 build/clawd-theme/
 build/clawd-theme_cangshu.zip
+
+# 上游带过来的 GitHub Actions 流程：本分叉不跑 CI，产物仍按 AGENTS.md §8 本地交叉编译
+.github/

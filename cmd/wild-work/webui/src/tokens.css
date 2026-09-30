@@ -1,0 +1,254 @@
+/* 设计 token 层（阶段 2）
+   原则：
+   1. 每个 token 先声明 sRGB hex（值逐字取自 web/style.css，一个都没改），再用
+      @supports (color: oklch()) 覆盖为等值 OKLCH。老 WebView2（Chromium<111）走 hex，
+      新浏览器走 OKLCH，两者渲染结果必须一致 —— 由 tools/verify-tokens.mjs 在浏览器里比对。
+   2. 只重述「不透明纯色」。rgba 类 token（--card-bg / --hairline / --chip-bg / 阴影）
+      保持原样：它们语义是「在某背景上合成」，转成 oklab 带 alpha 会改变混合行为，
+      属视觉变更而非记法变更，本阶段不做。
+   3. 三套主题逐一对账：:root / prefers-color-scheme: dark / html[data-theme="paper"]。
+      paper 的纸质噪点、学术衬线标题、去玻璃拟态全部保留。
+   4. 暗色不通过 tailwind 的 class 机制，沿用现有「OS 媒体查询 + data-theme 手动覆盖」，
+      两者不并存（tailwind.config.js 里 darkMode 不参与本套 token）。
+   OKLCH 数值由 tools/derive-tokens.mjs 生成，非手写。 */
+
+:root {
+  /* ---- 中性与语义色：hex 兜底 ---- */
+  --bg: #f5f5f7;
+  --text: #1d1d1f;
+  --muted: #6e6e73;
+  --accent: #0071e3;
+  --accent-hover: #0077ed;
+  --danger: #d70015;
+  --ok: #00884f;
+  --warn: #b25000;
+  --green: #30d158;
+
+  /* ---- 中性灰阶（Apple 冷灰，hue 恒 286.2）：OKLCH 记法下是一条等距 L 阶梯 ---- */
+  --neutral-hue: 286.2;
+
+  /* ---- 玻璃/合成类：保持 rgba 原样 ---- */
+  --card-bg: rgba(255, 255, 255, 0.72);
+  --card-hairline: rgba(0, 0, 0, 0.08);
+  --glass-nav: rgba(245, 245, 247, 0.72);
+  --chip-bg: rgba(0, 113, 227, 0.08);
+  --chip-border: rgba(0, 113, 227, 0.22);
+  --code-bg: rgba(0, 0, 0, 0.05);
+  --hairline: rgba(0, 0, 0, 0.1);
+  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.06);
+  --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.22);
+
+  /* ---- 渠道专色 ---- */
+  --wb: #0071e3;
+  --trae: #0891b2;
+  --qoder: #7c3aed;
+  --wbai: #0d9488;
+  --traecode: #2563eb;
+  --qodercn: #6d28d9;
+  --qodercom: #b45309;
+  --qwenwork: #0e7490;
+  --glm: #1d4ed8;
+  --oczen: #475569;
+}
+
+@supports (color: oklch()) {
+  :root {
+    --bg: oklch(0.9707 0.0027 286.35);
+    --text: oklch(0.2316 0.0038 286.1);
+    --muted: oklch(0.5399 0.0077 286.14);
+    --accent: oklch(0.5629 0.1933 256.16);
+    --accent-hover: oklch(0.5831 0.1989 255.97);
+    --danger: oklch(0.5529 0.2255 27.27);
+    --ok: oklch(0.551 0.1339 155.91);
+    --warn: oklch(0.5474 0.1471 48.89);
+    --green: oklch(0.7556 0.2082 146.98);
+    --wb: oklch(0.5629 0.1933 256.16);
+    --trae: oklch(0.6089 0.1109 221.72);
+    --qoder: oklch(0.5413 0.2466 293.01);
+    --wbai: oklch(0.6002 0.1038 184.7);
+    --traecode: oklch(0.5461 0.2152 262.88);
+    --qodercn: oklch(0.4907 0.2412 292.58);
+    --qodercom: oklch(0.5553 0.1455 49);
+    --qwenwork: oklch(0.5198 0.0936 223.13);
+    --glm: oklch(0.4882 0.2172 264.38);
+    --oczen: oklch(0.4455 0.0374 257.28);
+  }
+}
+
+/* ---------- 暗色：跟随系统 ---------- */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #000;
+    --text: #f5f5f7;
+    --muted: #a1a1a6;
+    --accent: #2997ff;
+    --accent-hover: #4aa8ff;
+    --danger: #ff453a;
+    --ok: #30d158;
+    --warn: #ff9f0a;
+
+    --card-bg: rgba(255, 255, 255, 0.055);
+    --card-hairline: rgba(255, 255, 255, 0.12);
+    --glass-nav: rgba(0, 0, 0, 0.55);
+    --chip-bg: rgba(41, 151, 255, 0.12);
+    --chip-border: rgba(41, 151, 255, 0.28);
+    --code-bg: rgba(255, 255, 255, 0.08);
+    --hairline: rgba(255, 255, 255, 0.12);
+    --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4);
+    --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.6);
+
+    --wb: #2997ff;
+    --trae: #32ade6;
+    --qoder: #9d7bff;
+    --wbai: #2dd4bf;
+    --traecode: #60a5fa;
+    --qodercn: #a78bfa;
+    --qodercom: #f59e0b;
+    --qwenwork: #22d3ee;
+    --glm: #60a5fa;
+    --oczen: #94a3b8;
+  }
+
+  @supports (color: oklch()) {
+    :root {
+      --bg: oklch(0 0 0);
+      --text: oklch(0.9707 0.0027 286.35);
+      --muted: oklch(0.7105 0.0072 286.22);
+      --accent: oklch(0.669 0.1808 251.84);
+      --accent-hover: oklch(0.7146 0.1551 249.43);
+      --danger: oklch(0.6633 0.2236 28.29);
+      --ok: oklch(0.7556 0.2082 146.98);
+      --warn: oklch(0.7824 0.1711 67.22);
+      --wb: oklch(0.669 0.1808 251.84);
+      --trae: oklch(0.7068 0.1327 233.88);
+      --qoder: oklch(0.6759 0.1885 292.5);
+      --wbai: oklch(0.7845 0.1325 181.91);
+      --traecode: oklch(0.7137 0.1434 254.62);
+      --qodercn: oklch(0.709 0.1592 293.54);
+      --qodercom: oklch(0.7686 0.1647 70.08);
+      --qwenwork: oklch(0.7971 0.1339 211.53);
+      --glm: oklch(0.7137 0.1434 254.62);
+      --oczen: oklch(0.7107 0.0351 256.79);
+    }
+  }
+}
+
+/* ---------- Paper：象牙纸 + 墨黑 ---------- */
+html[data-theme="paper"] {
+  --bg: #faf9f5;
+  --text: #141413;
+  --muted: #5e5d59;
+  --accent: #141413;
+  --accent-hover: #3d3d3a;
+  --danger: #b0403a;
+  --ok: #5f7f4f;
+  --warn: #b25e10;
+  --green: #788c5d;
+
+  /* paper 是平印：不透明卡片 + 1px 暖灰描边，不用 rgba 合成 */
+  --card-bg: #ffffff;
+  --card-hairline: #e8e6dc;
+  --glass-nav: rgba(250, 249, 245, 0.88);
+  --chip-bg: #f0eee6;
+  --chip-border: #dedcd1;
+  --code-bg: #f0eee6;
+  --hairline: #dedcd1;
+  --shadow-card: none;
+  --shadow-modal: 0 20px 50px rgba(20, 20, 19, 0.16);
+
+  --wb: #6a9bcc;
+  --trae: #788c5d;
+  --qoder: #918bd6;
+  --wbai: #5f8c85;
+  --traecode: #6a7fb8;
+  --qodercn: #7d76c4;
+  --qodercom: #a06a3c;
+  --qwenwork: #5d8a99;
+  --glm: #4a6fa5;
+  --oczen: #8a8a84;
+}
+
+@supports (color: oklch()) {
+  html[data-theme="paper"] {
+    --bg: oklch(0.9818 0.0054 95.1);
+    --text: oklch(0.1908 0.002 106.59);
+    --muted: oklch(0.478 0.0064 95.19);
+    --accent: oklch(0.1908 0.002 106.59);
+    --accent-hover: oklch(0.359 0.0051 106.65);
+    --danger: oklch(0.5266 0.1475 26.46);
+    --ok: oklch(0.5591 0.08 135.67);
+    --warn: oklch(0.5703 0.135 55.35);
+    --green: oklch(0.6118 0.0713 127.12);
+    --card-bg: oklch(1 0 0);
+    --card-hairline: oklch(0.9237 0.0135 97.45);
+    --chip-bg: oklch(0.9372 0.0103 96.02);
+    --chip-border: oklch(0.893 0.015 98.31);
+    --code-bg: oklch(0.9372 0.0103 96.02);
+    --hairline: oklch(0.893 0.015 98.31);
+    --wb: oklch(0.6742 0.0901 249.29);
+    --trae: oklch(0.6118 0.0713 127.12);
+    --qoder: oklch(0.6719 0.1097 286.71);
+    --wbai: oklch(0.6053 0.0504 183.88);
+    --traecode: oklch(0.6035 0.0907 268.17);
+    --qodercn: oklch(0.6055 0.1167 286.47);
+    --qodercom: oklch(0.572 0.0928 59.76);
+    --qwenwork: oklch(0.6065 0.054 220.83);
+    --glm: oklch(0.5383 0.0952 257.76);
+    --oczen: oklch(0.6316 0.0088 106.65);
+  }
+}
+
+/* 纸面纤维：一次性实时生成的 feTurbulence 噪点，5% 不透明度，零图片资源 */
+html[data-theme="paper"] body {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' seed='7'/%3E%3CfeColorMatrix type='luminanceToAlpha'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23g)' opacity='.05'/%3E%3C/svg%3E");
+}
+/* 去玻璃拟态：纸质是平印，不透明卡片 + 1px 暖灰描边 */
+html[data-theme="paper"] .topbar,
+html[data-theme="paper"] .acct-card,
+html[data-theme="paper"] .ucard,
+html[data-theme="paper"] .toast {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+/* 学术衬线标题（系统字体栈，无外链） */
+html[data-theme="paper"] .section-head h2,
+html[data-theme="paper"] .modal-title {
+  font-family: Georgia, "Times New Roman", "Noto Serif SC", "Songti SC", "SimSun", serif;
+  letter-spacing: 0;
+}
+/* 扫光标题中段改用陶土色（accent 已是墨色，扫不出层次） */
+html[data-theme="paper"] .shiny {
+  background-image: linear-gradient(100deg, var(--text) 40%, #d97757 50%, var(--text) 60%);
+}
+
+/* ---------- display 字号阶梯 ----------
+   负字距随字号递增（大字收得更多），Apple 式 tight display tracking。 */
+:root {
+  --text-72: 4.5rem;   /* 72 */
+  --text-56: 3.5rem;   /* 56 */
+  --text-48: 3rem;     /* 48 */
+  --text-36: 2.25rem;  /* 36 */
+  --text-28: 1.75rem;  /* 28 */
+  --text-22: 1.375rem; /* 22 */
+  --text-18: 1.125rem; /* 18 */
+  --text-16: 1rem;     /* 16 */
+  --text-14: 0.875rem; /* 14 */
+  --text-12: 0.75rem;  /* 12 */
+  --text-11: 0.6875rem;/* 11 */
+
+  --tracking-72: -0.037em;
+  --tracking-56: -0.033em;
+  --tracking-48: -0.03em;
+  --tracking-36: -0.026em;
+  --tracking-28: -0.022em;
+  --tracking-22: -0.018em;
+  --tracking-18: -0.014em;
+  --tracking-16: -0.01em;
+  --tracking-14: -0.006em;
+  --tracking-12: 0;
+  --tracking-11: 0;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro SC", "SF Pro Text",
+    "Helvetica Neue", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+}

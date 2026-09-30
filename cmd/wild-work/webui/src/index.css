@@ -1,15 +1,56 @@
-@tailwind base;
+/* 骨架期样式：只用 tokens.css 的自定义属性，不写死色值。
+   阶段 3 移植各区块时沿用同一约束。 */
 @tailwind components;
 @tailwind utilities;
 
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+
 .shell {
-  font-family: system-ui, sans-serif;
   max-width: 900px;
   margin: 2rem auto;
+  padding: 0 1rem;
+}
+.shell h1 {
+  font-size: var(--text-28);
+  letter-spacing: var(--tracking-28);
+  font-weight: 700;
+}
+.shell p {
+  font-size: var(--text-14);
+  letter-spacing: var(--tracking-14);
+  color: var(--muted);
 }
 .err {
-  color: #b3261e;
+  color: var(--danger);
+  font-size: var(--text-14);
+}
+.login {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  max-width: 420px;
+  margin: 4rem auto;
 }
 .login input {
-  padding: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--card-bg);
+  color: var(--text);
+  font: inherit;
+}
+.login button {
+  padding: 0.4rem 0.9rem;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+.login button:hover {
+  background: var(--accent-hover);
 }

@@ -3,6 +3,15 @@ dist/
 cmd/wild-work/rsrc_windows_amd64.syso
 cmd/wild-work/icon.ico
 
+# 前端重构（阶段 1 起）：
+#   webui/          React 源码 —— 入库（FEATURES.md 等），但依赖不入库
+#   webui/node_modules/  107 MB，绝不入库
+#   web-app/        vite 产物 = go:embed 目标，绝不入库（可由 npm build 复现）
+# 注意：//go:embed all:web-app 只收 web-app/，工程若被误建进 embed 目录会把依赖打进 exe，
+# 由 internal/app/web_contract_test.go 的守卫测试兜底。
+cmd/wild-work/webui/node_modules/
+cmd/wild-work/web-app/
+
 # 运行时数据（含敏感凭据）
 data/
 auths/

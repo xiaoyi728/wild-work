@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.shell {
+  font-family: system-ui, sans-serif;
+  max-width: 900px;
+  margin: 2rem auto;
+}
+.err {
+  color: #b3261e;
+}
+.login input {
+  padding: 0.4rem;
+}

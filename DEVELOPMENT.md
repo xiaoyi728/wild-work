@@ -6,7 +6,7 @@
 ## 0. 项目速览
 
 - **是什么**：多平台（Win/mac/Linux）系统托盘 daemon + 浏览器 Web UI 的多渠道账号聚合工具。单进程 = HTTP 代理 + 调度器 + 托盘 + 静态 Web UI。
-- **技术栈**：Go 1.25+ / energye/systray（托盘）/ 纯静态前端 HTML/CSS/JS（go:embed 无构建链）/ 无 wails/WebView2。
+- **技术栈**：Go 1.25+ / energye/systray（托盘）/ 前端 Vite 7 + React 18 + HashRouter 7 + Tailwind 3 （echarts 4.3.0 按需内置，不走 CDN）/ 无 wails/WebView2。**AGENTS.md 决议 R5 已于 2026-09-30 由所有者签核改写**，原「纯静态无构建链」不再适用。
 - **模块**：`wild-work`（go.mod module name）。
 - **平台**：Windows（完整）、macOS（代码已写，需 cgo 编译）、Linux（无头模式 `--no-tray`）。
 - **数据文件**：`config.json`（配置）、`auths/<kind>-*.json`（凭证，勿外泄）、`data/state-<kind>.json`（冷却/签到状态）、`data/app.log`（日志）、`data/pricing-cache.json`（费率缓存）。
@@ -15,7 +15,10 @@
 
 ```
 cmd/wild-work/main.go         # daemon 入口：装配各渠道 Runtime → 启动 HTTP → 调度器 → 托盘/无头
-cmd/wild-work/web/             # 纯静态 Web UI（index.html / app.js / style.css）
+cmd/wild-work/webui/           # React 源码（Vite 工程；node_modules 在此，不 embed）
+cmd/wild-work/webui/FEATURES.md # 移植核对单：114 个 DOM id + 10 弹层 + 桌宠 + 业务逻辑清单
+cmd/wild-work/web-app/         # vite 产物 = go:embed 目标（npm build 生成，不入库，留 .gitkeep 占位）
+cmd/wild-work/web/             # 上游 vanilla 面板，**不参与 embed**，仅作下次融合的 diff 基准
 cmd/genicon/                   # 图标生成（纯 Go）
 internal/
 ├── app/app.go                 # 业务编排：HTTP 管理 API + 登录流程 + 费率缓存 + 日志
@@ -352,3 +355,36 @@ GOOS=windows CGO_ENABLED=0 go build -ldflags "-H windowsgui" -o dist/wild-work.e
    QoderCN/QoderCOM 渠道已带该字段，思考正常，不受影响；
 5. **`config.example.json` 与 `config.Default()` 必须同步**。
 6. **定价缓存文件**：`data/pricing-cache.json`，首次启动从静态兜底开始，添加账号后自动拉取。
+
+---
+
+## 前端构建与闸门（2026-09-30 起）
+
+```bash
+# 改了 webui/ 下任何源码都必须先出产物，再 go build；
+# 只 go build 不会报错——embed 的是 web-app/ 产物目录，源码改了没重编就是旧面板。
+npm --prefix cmd/wild-work/webui install --no-audit --no-fund
+npm --prefix cmd/wild-work/webui run build
+go build ./... && go vet ./... && go test ./internal/app/
+```
+
+**目录分工是这条链路上唯一的生死线**：`webui/`（源码，含 107 MB node_modules）与
+`web-app/`（产物，embed 目标）必须分开。`//go:embed all:` 会把目录下**所有**文件收进二进制，
+`all:` 前缀连 `_`/`.` 开头的也收 —— 工程建错目录 exe 会直接暴涨 107 MB 且无人报警。
+`internal/app/web_contract_test.go` 的 `TestEmbeddedWebAppHasNoNodeModules` 兜这一条；
+构建后也可以用 `python3 -c "b=open('dist/wild-work-linux','rb').read();print(b.count(b'node_modules'))"`
+复核，**期望值恒为 0**。
+
+四道闸门（全在 `internal/app/`，`go test ./internal/app/` 覆盖）：
+
+| 测试 | 管什么 | 为什么会红 |
+|---|---|---|
+| `TestPanelAPIRouteContract` | 端点集合双向核对 | React 臆造/漏实现端点；或上游新增端点而面板没接（白名单需显式加一行） |
+| `TestDOMIdParity` | 114 个 DOM id 集合差 | 某个功能整块没移植（`echartsCdn` 有意豁免） |
+| `TestStateFieldContract` 等 | 响应**字段**在场性 | Go 改名/删字段，面板会静默少一列、少个「待刷新」标记 |
+| `TestChannelColorsExistInAllThreeThemes` 等 | 三主题渠道色 + 禁 tailwind `dark:` | 新渠道漏配某主题 → 该主题下按钮失色；两套主题机制并存 → paper 不跟色 |
+
+`go test ./...` 有一处**已知上游缺陷**会失败：`internal/cdp` 的 `TestWriteDoesNotHangClose`
+（纯上游 master 同样复现，非本仓引入），见 AGENTS.md §10 L4。
+
+开发期看 React 面板：`/next/`（根路径 `/` 仍是 vanilla 生产面板，两者共用同一 daemon 与同一份鉴权会话）。

@@ -30,7 +30,7 @@ Wild-Work 是 WorkBuddy（国内版+国际版）/TraeWork/Qoder 多渠道账号�
 | R2 | ~~托盘提供「刷新积分」菜单~~ **已移除**。刷新积分改为 Web UI 面板操作 | 托盘菜单精简为：打开主界面 / 查看日志 / 退出 |
 | R3 | 托盘固定菜单项：**打开主界面 / 查看日志 / 退出** | 双击托盘 = 打开主界面；不再弹"已启动"提示框 |
 | R4 | **管理 API 采用 cookie 会话鉴权**（2026-09-24 修订原「不设鉴权」） | 新增 `config.admin_password`（默认缺失 = 不鉴权，向前兼容）；**监听非环回地址时强制要求设置**（启动层 fatal + `SetListen` 拒绝），否则局域网任何设备可无凭据访问面板/退出程序。会话实现见 `internal/app/session.go`：token 随机 + 内存态（只存 SHA-256），HttpOnly + SameSite=Lax cookie，7 天滑动续期，改密码即失效，登录失败 5 次/IP 锁定 5 分钟。`/api/auth/*` 不鉴权，其余 `/api/*` 走守卫；OpenAI 侧 `api_key` 不受影响 |
-| R5 | **Web UI 用纯静态 HTML/CSS/JS**（无前端编译链） | `go:embed` 打进单文件；实用 + 大众审美即可 |
+| R5 | **Web UI 用 Vite+React 编译，产物 `go:embed` 进单文件**（**2026-09-30 所有者签核推翻原「纯静态、无前端编译链」**） | 原决议全文：「Web UI 用纯静态 HTML/CSS/JS（无前端编译链），go:embed 打进单文件」。推翻理由与签核记录见 `docs/前端React重构架构计划.md` §0；同次签核还定了「echarts 内置、不再走 CDN」。**源码在 `cmd/wild-work/webui/`（不 embed），产物在 `cmd/wild-work/web-app/`（embed 目标）** —— 混用会把 107 MB 的 node_modules 打进 exe，有测试兜底。上游 vanilla 代码留在 `cmd/wild-work/web/` 不参与 embed，作为下次融合的 diff 基准。**迁移期两份同时 embed**：根路径 `/` 服务 vanilla（生产在用），React 挂 `/next/`；阶段 3 收尾后把 React 提到 `/` 并移除 vanilla 引用（见 §10 L6）。 |
 | R6 | 托盘库：**保留 energye/systray**（已跨平台 Win/mac/Linux） | 各菜单项使用不同颜色纯 Go 生成图标，无需外部图标文件 |
 | R7 | **移除 wails / WebView2 全部依赖** | 省内存与运行时；平台能力封装进 `internal/platform`（build tag 拆分） |
 | R8 | daemon 单进程：一个 `http.Server` 同时服务 OpenAI 端点 + 管理 API + 静态 UI | 沿用 server 现有 ServeMux 扩展 |
@@ -182,7 +182,7 @@ POST /api/quit                     # 退出程序
 
 ## 6. 关键不变量（改动前必读）
 
-0. **每次代码变更后必须本地重新构建 `dist/wild-work.exe`**（见 §8）。
+0. **每次代码变更后必须本地重新构建 `dist/wild-work.exe`**（见 §8）。改了 `cmd/wild-work/webui/` 下任何前端源码，必须先 `npm --prefix cmd/wild-work/webui run build` 再 go build —— 否则 exe 里是旧面板，且**不会有任何报错**（embed 的是产物目录，不是源码）。
    `dist/` 在 `.gitignore` 中，CI 只产出带平台后缀的 `wild-work-<os>-<arch>`，
    **不会**生成 `dist/wild-work.exe`——该文件只能手动构建。
    不重建会导致：本地运行的二进制与源码不一致（例如改了版本号但仍显示旧版本）。
@@ -269,6 +269,10 @@ POST /api/quit                     # 退出程序
 > 标准流程：`go build ./... && go vet ./... && go test ./...` 全绿后再构建。
 
 ```bash
+# 前端产物（改了 webui/ 源码必做；产物落 cmd/wild-work/web-app/，被 embed）
+npm --prefix cmd/wild-work/webui install --no-audit --no-fund   # 首次或依赖变更
+npm --prefix cmd/wild-work/webui run build                       # 出 web-app/
+
 # Windows（本机直接构建，或 WSL 交叉编译）
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-H windowsgui" -o dist/wild-work.exe ./cmd/wild-work
 
@@ -330,6 +334,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 > 本节只描述**本地独有**的约定与偏离；上游决议 R1–R35 一律照上游采纳，不在此重复。
 
 ### L1 前端：功能层 / 视觉层分离
+> ⚠️ **2026-09-30 起，本节的 `web/` 指 `cmd/wild-work/web/`，它已不参与 embed**，只作为上游 vanilla 的 diff 基准存在（见 L6）。真正在跑的前端是 `webui/` → `web-app/`。
+> 本节各条仍是**读上游改动、决定移植到什么行为**的依据；不再是要直接编辑的活代码。
 - `web/app.js` 的**功能层以上游为准**，本地只保留视觉层补丁（约 165 行）：`Pet.sync`、
   `Anim.countUp` + `creditsShown` 起点、卡片入场 `card-enter`、`glow-alert`、
   `creditsText()` 的 `credit-main|credit-unit|credit-meta` 结构、渠道费率**弹层** `openFees|closeFees`。
@@ -355,6 +361,13 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 - 2026-09-29 完成一次融合：上游 `4b99557d`（本地旧基线）→ `master`（**v2.5.4**），23 提交 / 79 文件。
 - 真实冲突面只有 6 个文件：`cmd/wild-work/main.go`、`web/{app.js,index.html,style.css}`、
   `internal/app/app.go`、`internal/server/handler.go`。其余 73 个是纯新增或本地未碰，整文件采纳。
+- **React 化之后（阶段 3 收尾）本节的形态变了**：上游仍改它的 `web/*`，而本仓 `web/` 只是基准。
+  融合流程因此变成 **三步**，而不是三方合并：
+  1. 上游 vanilla 照旧落进 `cmd/wild-work/web/`（保持基准与上游一致，diff 才有意义）；
+  2. 用 `git diff <旧基准> -- cmd/wild-work/web/` 得到上游**功能改动清单**（不是内容合并，是行为清单）；
+  3. 逐条移植进 `cmd/wild-work/webui/src/`，每改完一片跑 `TestDOMIdParity` +
+     `TestPanelAPIRouteContract` + `TestStateFieldContract`：端点少了、字段少了、id 少了都会报。
+  `main.go` / `app.go` / `handler.go` 仍走 `git merge-file` 三方合并，不受影响。
 - ⚠️ **上游把 `web/app.js` 从 CRLF 转成了 LF**，直接 `diff` 会显示整文件重写（+1454/−1211），
   真实内容差仅 265 行。比对任何 web 文件都必须带 `--strip-trailing-cr`，否则会误判为「上游重写了前端」。
 - 本目录**不是 git 仓库**，且 `github.com:443` 不通（仅 `api.github.com` / `codeload.github.com` 可达）：
@@ -385,3 +398,24 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 ### L5 生产配置约束
 `config.json` 与 `dist/config.json` 的 `listen.host` 是局域网地址（非环回）→ R4 要求
 `admin_password` 非空且 ≥8 字符，**否则 daemon 启动即 fatal**。改回 `127.0.0.1` 则可不设。
+
+### L6 React 迁移：当前状态与收尾清单
+- 计划与实测记录：`docs/前端React重构架构计划.md`（本地文档，受 `docs/*` 白名单制保护不入库）。
+- **闸门**（`internal/app/`）：`web_contract_test.go` 端点级双向契约 + `TestDOMIdParity`（114 个 DOM id
+  集合差，`echartsCdn` 白名单）+ `node_modules` 不得进 `web-app/` 的守卫；
+  `web_field_contract_test.go` 字段级契约（`/api/state` 36 个字段路径，反射 + 内联 map 源码扫描）；
+  `web_theme_tokens_test.go` 三主题渠道色对账 + 禁止 tailwind `dark:` 变体。
+  **这些闸门的价值在于能变红**，均已做过负向验证（改一个 id 名、删一行 `CH_VAR` 映射都会报精确位置）。
+- **迁移期双份 embed**：`/` = vanilla（生产在用），`/next/` = React。Go 侧改动是
+  `main.go`（embed 两路 + `fs.Sub` 两次）与 `server.Config.WebUINext` + 一段挂载块，**不碰业务代码**。
+- 收尾清单（阶段 3 完成后执行，一次做完）：
+  1. `vite.config.js` 的 `base` 从 `'/next/'` 改回 `'/'`；
+  2. `main.go` embed 去掉 `all:web`、`fs.Sub` 只留 `web-app`，`handler.go` 删 `WebUINext` 与 `/next/` 挂载；
+  3. exe 回落约 245 KB（实测迁移期 +3.52% → 收尾后 +1.96%）；
+  4. `cmd/wild-work/web/` 保留但加 README 说明「上游参考基准，不参与 embed」；
+  5. 更新本文 §5/§4 中引用 vanilla 面板行为的小节。
+- **已知有意行为差异**（不是 bug，别再"修回去"）：
+  - `echartsCdn` 这个 id 消失（echarts 改 npm 按需引入，不再有 CDN `<script>`，L4 记的无 SRI 隐患随之消除）；
+  - `creditTip` 由 vanilla 的运行期 `createElement` 变成 JSX 常驻节点；
+  - 首屏总量 vanilla 995,000 B（含 CDN echarts 751,806 B）vs React 756,036 B ⇒ −24.0%，
+    但**本地传输 +210.9%**——echarts 从网络搬进二进制的必然代价，换来断网可用与 3~10s CDN 卡顿消失。

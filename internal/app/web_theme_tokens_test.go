@@ -10,6 +10,7 @@ package app
 // 若在这里硬编码一份 10 个的正则，新渠道只会悄悄掉进 --accent 兜底而无人报警。
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -147,4 +148,37 @@ func TestChannelColorsExistInAllThreeThemes(t *testing.T) {
 		}
 	}
 	t.Logf("三主题渠道色对账通过：%d 个渠道在 light/dark/paper 各一份", len(panelChannels()))
+}
+
+// TestNoTailwindDarkVariants 是「主题机制二选一，不并存」的落实。
+// tailwind 的 dark: 变体要么按 class 要么按 media，与本仓「OS 媒体查询 + data-theme=paper」
+// 并存时，paper 主题无法映射到 dark:，会出现「dark: 生效但 paper 不跟」的静默错位。
+// darkMode:false 挡不住（tailwind 自己警告它已等同 media），所以直接扫源码。
+func TestNoTailwindDarkVariants(t *testing.T) {
+	root := filepath.Join("..", "..", "cmd", "wild-work", "webui", "src")
+	var hits []string
+	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		switch filepath.Ext(p) {
+		case ".jsx", ".js", ".css":
+		default:
+			return nil
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return nil
+		}
+		for i, line := range strings.Split(string(b), "\n") {
+			// 只看类名字符串里的 dark:，注释里提到不算违规
+			if regexp.MustCompile(`className="[^"]*\bdark:[^"]*"`).MatchString(line) {
+				hits = append(hits, fmt.Sprintf("%s:%d", strings.TrimPrefix(p, root+string(os.PathSeparator)), i+1))
+			}
+		}
+		return nil
+	})
+	if len(hits) > 0 {
+		t.Errorf("源码里出现 tailwind dark: 变体 %v —— 主题只能有一套机制，请改用 tokens.css 的 CSS 变量", hits)
+	}
 }

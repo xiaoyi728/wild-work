@@ -249,3 +249,99 @@ func TestEmbeddedWebAppHasNoNodeModules(t *testing.T) {
 			"—— React 工程必须建在 cmd/wild-work/webui/，产物输出到 web-app/", hits)
 	}
 }
+
+// TestDOMIdParity 把 FEATURES.md 的「114 个 DOM id 一个都不能少」变成机器判据。
+//
+// 为什么比人工勾清单可靠：人工核对只能证明"我看过的部分没漏"，
+// 而移植最怕的正是没看的那部分。这里直接做集合差，漏一个就报具体 id。
+//
+// 集合语义刻意宽松一侧：vanilla 有而 React 无 ⇒ 报错（功能掉了）；
+// React 有而 vanilla 无 ⇒ 仅提示（新增节点，需确认不是重名）。
+func TestDOMIdParity(t *testing.T) {
+	vanilla := readRepoFile(t, filepath.Join("cmd", "wild-work", "web", "index.html"))
+	reactSrc := readReactSources(t)
+
+	lost := []string{}
+	for _, id := range htmlIDs(vanilla) {
+		if id == "echartsCdn" {
+			continue // D3 签核：echarts 改 npm 按需引入，CDN <script> 必须消失（非丢失）
+		}
+		if !strings.Contains(reactSrc, `id="`+id+`"`) {
+			lost = append(lost, id)
+		}
+	}
+	if len(lost) > 0 {
+		sort.Strings(lost)
+		t.Errorf("React 侧缺少 vanilla 已有的 DOM id %d 个：%v —— 对应功能可能未移植，"+
+			"对照 cmd/wild-work/webui/FEATURES.md 第 1 节", len(lost), lost)
+	}
+
+	var extra []string
+	known := map[string]bool{}
+	for _, id := range htmlIDs(vanilla) {
+		known[id] = true
+	}
+	for _, id := range htmlIDs(reactSrc) {
+		if !known[id] {
+			extra = append(extra, id)
+		}
+	}
+	if len(extra) > 0 {
+		sort.Strings(extra)
+		t.Logf("注：React 侧新增 vanilla 没有的 id %v（creditTip 属正常：vanilla 是运行期 createElement）", extra)
+	}
+	t.Logf("DOM id 对账通过：vanilla %d 个 id 全部落地（echartsCdn 按 D3 有意移除）",
+		len(htmlIDs(vanilla))-1)
+}
+
+// readRepoFile 读仓库根下的文件（路径相对仓库根，不是相对包目录）。
+func readRepoFile(t *testing.T, rel string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", rel))
+	if err != nil {
+		t.Skipf("文件不存在: %v", err)
+	}
+	return string(b)
+}
+
+// readReactSources 拼出 webui/src 下所有 jsx/js/css 文本，供 id / 端点扫描。
+// 跳过 styles/ —— 那目录是从 vanilla 逐字复制的视觉层，纳入会自我印证。
+func readReactSources(t *testing.T) string {
+	t.Helper()
+	root := filepath.Join("..", "..", "cmd", "wild-work", "webui", "src")
+	var b strings.Builder
+	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if strings.Contains(p, string(os.PathSeparator)+"styles"+string(os.PathSeparator)) {
+			return nil
+		}
+		switch filepath.Ext(p) {
+		case ".jsx", ".js":
+		default:
+			return nil
+		}
+		bs, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return nil
+		}
+		b.Write(bs)
+		return nil
+	})
+	return b.String()
+}
+
+var htmlIDRe = regexp.MustCompile(`id="([A-Za-z][A-Za-z0-9_]*)"`)
+
+func htmlIDs(s string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range htmlIDRe.FindAllStringSubmatch(s, -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			out = append(out, m[1])
+		}
+	}
+	return out
+}

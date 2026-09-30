@@ -1,0 +1,65 @@
+/* anim.css — React Bits 效果的纯静态复刻（配套 anim.js） */
+
+/* ---------- Scroll reveal：区块入场（IntersectionObserver 触发） ---------- */
+.reveal { opacity: 0; transform: translateY(34px); }
+.reveal.revealed {
+  opacity: 1; transform: translateY(0);
+  transition: opacity .7s cubic-bezier(.22, 1, .36, 1), transform .7s cubic-bezier(.22, 1, .36, 1);
+}
+
+/* ---------- Animated List：卡片交错入场 ---------- */
+.card-enter { animation: cardIn .6s cubic-bezier(.22, 1, .36, 1) backwards; }
+@keyframes cardIn {
+  from { opacity: 0; transform: translateY(26px) scale(.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ---------- Border Glow：异常/停用账号呼吸光边 ---------- */
+@property --glow-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
+.glow-alert { border-color: transparent !important; }
+.glow-alert::before {
+  content: ""; position: absolute; inset: -1px; border-radius: 29px; padding: 1.5px;
+  background: conic-gradient(from var(--glow-angle),
+    var(--danger), transparent 40%, transparent 60%, var(--danger));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+  animation: glowSpin 3.2s linear infinite; pointer-events: none;
+}
+@keyframes glowSpin { to { --glow-angle: 360deg; } }
+@supports not (background: conic-gradient(from 0deg, red, blue)) {
+  .glow-alert::before { display: none; }
+  .glow-alert { border-color: var(--danger) !important; }
+}
+
+/* ---------- Shiny Text：扫光标题 ---------- */
+.shiny {
+  background: linear-gradient(100deg, var(--text) 40%, var(--accent) 50%, var(--text) 60%);
+  background-size: 250% 100%; background-position: 130% 0;
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+  animation: shinySweep 4.5s ease-in-out infinite;
+}
+@keyframes shinySweep {
+  0%, 100% { background-position: 130% 0; }
+  50%      { background-position: -30% 0; }
+}
+
+/* ---------- Glare Hover：复制按钮反光扫过 ---------- */
+.glare { position: relative; overflow: hidden; }
+.glare::after {
+  content: ""; position: absolute; top: -20%; bottom: -20%; left: -80%; width: 55%;
+  background: linear-gradient(105deg, transparent, rgba(255, 255, 255, .55), transparent);
+  transform: skewX(-18deg); transition: left .5s ease; pointer-events: none;
+}
+.glare:hover::after { left: 130%; }
+
+/* ---------- Magnetic：主按钮磁吸（transform 由 JS 写入） ---------- */
+.magnetic { transition: transform .25s cubic-bezier(.22, 1, .36, 1), background .2s, opacity .2s; }
+
+/* ---------- 尊重系统减弱动效设置 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .card-enter, .glow-alert::before, .shiny { animation: none; }
+  .reveal { opacity: 1; transform: none; }
+  .shiny { -webkit-text-fill-color: currentColor; color: inherit; }
+  * { transition-duration: .01ms !important; }
+}

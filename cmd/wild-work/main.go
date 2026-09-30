@@ -43,7 +43,7 @@ import (
 	"wild-work/internal/workbuddyai"
 )
 
-//go:embed all:web
+//go:embed all:web all:web-app
 var webFS embed.FS
 
 //go:embed build/trayicon.ico
@@ -354,6 +354,13 @@ func main() {
 	if err != nil {
 		fatal("embed web: %v", err)
 	}
+	// 迁移期过渡挂载：vanilla 在服务用的根路径，React 产物在 /next/，两者共存，
+	// 逐片移植时可同屏对照。embed 的是仓库里的 web-app/（npm 产物），
+	// 未跑过 npm build 时该目录只有 .gitkeep，/next/ 就是空页 —— 不影响根路径面板。
+	nextSub, err := fs.Sub(webFS, "web-app")
+	if err != nil {
+		fatal("embed web-app: %v", err)
+	}
 	inner := server.NewHandler(server.Config{
 		Runtimes:     runtimes,
 		APIKey:       cfg.APIKey,
@@ -363,6 +370,7 @@ func main() {
 		ErrThreshold: cfg.Cooldown.ErrThresh,
 		ErrCooldown:  cfg.ErrCooldownDur,
 		WebUI:        sub,
+		WebUINext:    nextSub,
 		AttachAPI:    appInst.HandleAPI,
 	})
 

@@ -58,6 +58,10 @@ type Config struct {
 
 	// WebUI 为内嵌的静态 Web UI 文件系统（go:embed 产物）；非 nil 时挂载到 /
 	WebUI fs.FS
+	// WebUINext 是 React 重写的过渡挂载点（/next/），迁移期与 WebUI 共存：
+	// 根路径继续服务 vanilla（生产在用），/next/ 服务 web-app 产物，逐片移植时可同屏对照。
+	// 阶段 3 收尾时删除本字段并把 web-app 提到 /，vanilla 引用一并移除。非 nil 时才挂载。
+	WebUINext fs.FS
 	// AttachAPI 由调用方注册管理 API 路由（internal/app 的 HandleAPI）
 	AttachAPI func(mux *http.ServeMux)
 
@@ -146,6 +150,15 @@ func NewHandler(cfg Config) *Handler {
 			w.Header().Set("Cache-Control", "no-cache")
 			webSrv.ServeHTTP(w, r)
 		}))
+	}
+	if cfg.WebUINext != nil {
+		// 与 WebUI 同一套 no-cache 语义；只在迁移期存在，见 Config.WebUINext。
+		// HashRouter 使 /next/#/xxx 的深链不参与服务端路由，无需 SPA fallback。
+		nextSrv := http.FileServer(http.FS(cfg.WebUINext))
+		h.mux.Handle("/next/", http.StripPrefix("/next", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "no-cache")
+			nextSrv.ServeHTTP(w, r)
+		})))
 	}
 	if cfg.AttachAPI != nil {
 		cfg.AttachAPI(h.mux)

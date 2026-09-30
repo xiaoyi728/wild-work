@@ -10,7 +10,10 @@ cmd/wild-work/icon.ico
 # 注意：//go:embed all:web-app 只收 web-app/，工程若被误建进 embed 目录会把依赖打进 exe，
 # 由 internal/app/web_contract_test.go 的守卫测试兜底。
 cmd/wild-work/webui/node_modules/
-cmd/wild-work/web-app/
+# web-app/ 整体是 npm 产物，不入库；但必须留一个 tracked 占位文件，
+# 否则新克隆的仓库里目录不存在，//go:embed all:web-app 直接编译失败。
+cmd/wild-work/web-app/*
+!cmd/wild-work/web-app/.gitkeep
 
 # 运行时数据（含敏感凭据）
 data/

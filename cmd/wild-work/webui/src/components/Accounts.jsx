@@ -32,16 +32,16 @@ function Credits({ a, shownRef }) {
 }
 
 // 积分数字的 Count-Up：起点为上次显示值，未变化时直接落值；「待刷新/不适用」不参与计数。
-function CreditValue({ account, shownRef }) {
+function CreditValue({ a, shownRef }) {
   const numRef = useRef(null);
   useLayoutEffect(() => {
-    if (account.credits_stale || account.credits_na || !numRef.current) return;
-    const target = Number(account.credits) || 0;
-    numRef.current.dataset.shown = (shownRef.current[account.uid] !== undefined) ? shownRef.current[account.uid] : 0;
+    if (a.credits_stale || a.credits_na || !numRef.current) return;
+    const target = Number(a.credits) || 0;
+    numRef.current.dataset.shown = (shownRef.current[a.uid] !== undefined) ? shownRef.current[a.uid] : 0;
     countUp(numRef.current, target);
-    shownRef.current[account.uid] = target;
-  }, [account.credits, account.credits_stale, account.credits_na, account.uid, shownRef]);
-  return <span className="credit-num" ref={numRef}>{account.credits}</span>;
+    shownRef.current[a.uid] = target;
+  }, [a.credits, a.credits_stale, a.credits_na, a.uid, shownRef]);
+  return <span className="credit-num" ref={numRef}>{a.credits}</span>;
 }
 
 // hover 积分区弹出的明细浮窗。条数可能很多（TraeWork 每个签到奖励都是独立条目，常见 30+），

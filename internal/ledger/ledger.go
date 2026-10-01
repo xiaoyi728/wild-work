@@ -76,9 +76,21 @@ func New(dir string) (*Ledger, error) {
 	return l, nil
 }
 
+// prevMonthCutoff 返回「now 往前 keepMonths 个月」的月份分段名，用作 cleanup 的保留下界。
+//
+// **必须先把日期锚到 1 号再加减月份。**直接对 time.Now() 做 AddDate(0,-1,0)，在上一个月
+// 天数不够时会溢出归一化：2026-05-31 → “4 月 31 日” → Go 归一化成 2026-06-01 之前的
+// 2026-05-01，cutoff 于是算成 **当月** 202605，比上月分段 202604 还新 ⇒ cleanup 把上月连同
+// 更早的一起删掉 —— keepMonths=1 在这些天实际保留 0 个历史月，且静默无日志。
+// 2026 年命中 7 天：3/29、3/30、3/31、5/31、7/31、10/31、12/31（闰年 3/30、3/31 同样命中）。
+func prevMonthCutoff(now time.Time) string {
+	anchor := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	return anchor.AddDate(0, -keepMonths, 0).Format("200601")
+}
+
 // cleanup 删除保留窗口之外的月分段文件（失败静默：锦上添花功能不阻塞启动）。
 func (l *Ledger) cleanup() {
-	cutoff := time.Now().AddDate(0, -keepMonths, 0).Format("200601")
+	cutoff := prevMonthCutoff(time.Now())
 	ents, err := os.ReadDir(l.dir)
 	if err != nil {
 		return

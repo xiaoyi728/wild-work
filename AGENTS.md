@@ -486,7 +486,7 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 **业务代码零改动**（`internal/` 除新增测试外无一个既有 .go 被改；`handler.go` 迁移期加过
 `WebUINext` 收尾又删，净变化为零）；上游 vanilla `cmd/wild-work/web/` 一字节未动。
 
-#### L6.2 过程中修掉的四个「测试全绿但仍然错」的缺陷
+#### L6.2 过程中修掉的五个「测试全绿但仍然错」的缺陷
 
 1. **整页白屏崩溃** — `CreditValue` 声明 `{ account }`、调用点写 `a={a}`。
    JSX 无类型，vite/esbuild/go vet 全不报。之所以躲过前几轮验证：沙箱里只有匿名账号，
@@ -508,6 +508,27 @@ git tag vX.Y.Z && git push origin vX.Y.Z
    按 `文件:行号` 报红）。⚠️ 前三条的教训在它身上**仍然成立**：静态 id 对账只看 id 有没有写出来，
    `render-check` 是 SSR 没有 CSS 级联，取数驱动的分支更不在 SSR 覆盖内——
    「渲染出来了」与「看得见」之间还隔着一层样式表。
+5. **积分明细浮窗位置漂移 + 移开不收起**（同日，用户看到浮窗后立刻报出「位置漂移了」）
+   —— 同一次移植留下的两个缺陷，都属「把命令式 DOM 改成 JSX 时丢了命令式的另一半」：
+   - **漂移**：浮窗是 `position:fixed`，却渲染在 `section.section` 里，而该 section 带
+     `.reveal.revealed { transform: translateY(0) }`——**入场动画的末态仍是 transform 而非 none**
+     （`prefers-reduced-motion` 下那条 `.reveal{transform:none}` 又被更高优先级的 `.reveal.revealed`
+     盖掉），于是它成了 fixed 后代的**包含块**：按视口算出的 left/top 被当作相对 section 原点使用。
+     实测整体偏 (22, 87)、垂直方向漂 **329px**。→ `createPortal(..., document.body)`
+     （vanilla 的 `appendChild` 天然如此）。修后实测 `dx=0`、向下挂时 `gapBelow=4`。
+   - **不收起**：卡片上写的是 `onMouseLeave={noCredits ? undefined : onDetail.hide}`，
+     而 `onDetail` 是 `show`、**`show.hide` 从未定义过**（`hide` 上挂的是 `.cancel`/`.now`）
+     ⇒ 处理器恒为 `undefined`，「移开 300ms 后自动收起」这条路径整个是死的：浮窗只会因换 hover
+     目标而改内容，鼠标移开就永久挂在页面上。运行时实测 `typeof props.onMouseLeave === 'undefined'`。
+     → 显式传 `onDetailLeave={hide}`，修后实测移开即卸载。
+   - ⚠️ **对我自己的一条更正**：第 4 条修完时我只断言了「可见」和「落在 anchor 下方」，
+     **没断言水平与 anchor 对齐**，于是放过了 `dx=-25`／纵向漂 329px。判据必须覆盖
+     「它声称修好的那件事的全部维度」，否则绿灯只覆盖到你想到的那一面。
+   - 另记：明细有 `cache.current[uid]` 缓存、命中即不再请求，**改桩数据后必须重载页面**，
+     否则读到上一轮结果（本轮又踩两次，都是同一处）。
+   - 防回归：`TestCreditTipIsPortaledToBody`。它第一版也是空断言——用 `Contains(s,"document.body")`
+     判 portal 目标，而**注释里也写了这个词**，于是把目标改成 `#root` 的负向用例照样绿；
+     改成匹配 `createPortal(` 的第二实参后才真会红（两个负向均已验）。
 
 **教训（写死在这里）**：同源的是 CSS，不是渲染条件；token 字节相等证明不了「该出现的元素出现了」。
 凡「界面有没有变」这类问题，判据只能是**同后端对照 + 数可见控件/量几何**，不能靠比对源文件。

@@ -159,3 +159,36 @@ func containsStr(s []string, v string) bool {
 	}
 	return false
 }
+
+// TestCreditTipIsPortaledToBody 钉住「积分明细浮窗必须 portal 到 document.body」。
+//
+// 起因：该浮窗是 `position: fixed`，而它原本渲染在 `section.section` 内，
+// 该 section 带 `.reveal.revealed { transform: translateY(0) }` —— 入场动画**末态仍是
+// transform 而非 none**，于是 section 成了 fixed 后代的包含块，按视口坐标算出的
+// left/top 被当作相对 section 原点使用，实测整体偏 (22, 87)、垂直方向漂 329px。
+// vanilla 用 document.body.appendChild 恰好天然没有这个问题。
+//
+// 这条判据是静态的（CSS 级联与 DOM 祖先关系在 SSR 里量不到），只防「有人把 portal 摘掉」。
+// 真几何对齐靠浏览器实测：修后 dx=0（tip.left == anchor.left）、向下挂时 gapBelow=4。
+func TestCreditTipIsPortaledToBody(t *testing.T) {
+	p := filepath.Join("..", "..", "cmd", "wild-work", "webui", "src", "components", "Accounts.jsx")
+	src, err := os.ReadFile(p)
+	if err != nil {
+		t.Skipf("读不到 %s：%v", p, err)
+	}
+	s := string(src)
+	if !strings.Contains(s, "createPortal(") {
+		t.Errorf("%s 里没有 createPortal —— .credit-tip 是 position:fixed，"+
+			"渲染在 section.section（带 reveal 的 transform）里会被其当作包含块，浮窗位置会整体漂移", p)
+	}
+	// ⚠️ 必须是「portal 的第二实参」是 document.body，不能只判文件里出现过 "document.body"：
+	// 本文件注释里也写了这个词，用 Contains 会退化成空断言（负向验证时就是这么被蒙过去的）。
+	if !regexp.MustCompile(`(?s)createPortal\(.*?,\s*document\.body\s*\)`).MatchString(s) {
+		t.Errorf("%s 的 createPortal 第二实参不是 document.body —— 挂到别处（如 #root）"+
+			"仍会落在带 transform 的祖先里，fixed 定位照样漂移", p)
+	}
+	// 反向：credit-tip 不能同时被渲染进组件树内的位置（portal 目标写错也会静默漂移）
+	if regexp.MustCompile(`className="[^"]*credit-tip[^"]*"`).MatchString(strings.SplitN(s, "createPortal", 2)[0]) {
+		t.Errorf("%s 里 createPortal 之前出现了 .credit-tip 的渲染，portal 可能没包住它", p)
+	}
+}

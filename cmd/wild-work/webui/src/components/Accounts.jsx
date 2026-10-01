@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../api.js';
 import { chLabel, chClass, noExplicitCheckin, noCheckinText, NO_CREDITS, DETAIL_PAGE_SIZE } from '../constants.js';
 import { shortUid } from '../format.js';
@@ -76,12 +77,18 @@ function CreditTip({ data, uid, anchorRect, onClose }) {
     tip.style.top = top + 'px';
   }, [anchorRect, cur, uid]);
 
-  // ⚠️ 必须显式 display:block：style.css 的 .credit-tip 基础规则带 `display:none`
-  // （vanilla 靠 app.js:229 的 tip.style.display="block" 点亮）。移植时这个浮窗从
-  // 「运行期 createElement + 手工点亮」变成了「有数据才挂载的 JSX 节点」，
-  // 于是按「渲染出来＝可见」的直觉把点亮那句丢了——节点在 DOM 里但永久不可见，
-  // 量到的 offsetHeight 也是 0，表现为「鼠标放积分上没有明细浮窗」，且不报任何错。
-  return (
+  // ⚠️ 两处都得显式处理，缺一处就是「不报错的界面坏掉」：
+  // ① display:block —— style.css 的 .credit-tip 基础规则带 `display:none`，vanilla 靠
+  //    app.js:229 的 tip.style.display="block" 点亮。移植时这个浮窗从「运行期 createElement
+  //    + 手工点亮」变成「有数据才挂载的 JSX 节点」，于是按「渲染出来＝可见」的直觉把那句丢了
+  //    ——节点在 DOM 里、数据也渲染了，但永久不可见，量到的 offsetHeight 也是 0。
+  // ② 用 portal 挂到 document.body —— 本组件位于 `section.section` 内，而该 section 带
+  //    `.reveal.revealed { transform: translateY(0) }`：入场动画的**末态仍是 transform 而非 none**
+  //    （prefers-reduced-motion 下那条 .reveal{transform:none} 又被更高优先级的 .reveal.revealed 盖掉）。
+  //    transform 非 none 的祖先会成为 position:fixed 后代的**包含块**，于是上面按视口坐标算出的
+  //    left/top 被当作相对 section 原点使用——实测整体偏 (22, 87)、垂直方向漂 329px。
+  //    vanilla 的 document.body.appendChild 恰好天然绕开这点，故这里同样落到 body。
+  return createPortal(
     <div className="credit-tip" id="creditTip" ref={tipRef} style={{ display: 'block' }}
          onMouseEnter={onClose.cancel} onMouseLeave={onClose.now}>
       <div className="detail-head">
@@ -116,11 +123,12 @@ function CreditTip({ data, uid, anchorRect, onClose }) {
         {/* 只在确实存在不可用额度时才拆开展示，否则保持单数字（不制造无意义的 0）。 */}
         {unusable > 0 ? <span className="detail-sum-unusable">不可用 <b>{unusable}</b></span> : null}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
-function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDisable, onRemove, onDetail }) {
+function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDisable, onRemove, onDetail, onDetailLeave }) {
   const group = chClass(a.group);
   const groupName = chLabel(a.group);
   const noCheckin = noExplicitCheckin(a.group);
@@ -182,7 +190,7 @@ function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDis
       <div className="acct-mid">
         <div className="acct-credits" data-uid={a.uid}
              onMouseEnter={noCredits ? undefined : (e) => onDetail(a.uid, e.currentTarget.getBoundingClientRect())}
-             onMouseLeave={noCredits ? undefined : onDetail.hide}>
+             onMouseLeave={noCredits ? undefined : onDetailLeave}>
           {<Credits a={a} shownRef={shownRef} />}
         </div>
         <div className="acct-checkin">{tag}</div>
@@ -244,7 +252,8 @@ export default function Accounts({ state, actions, knownUids }) {
         {acc.map((a) => (
           <Card key={a.uid} a={a} state={state} knownUids={knownUids}
                 onRename={actions.openRename} onCheckin={actions.checkin} onRefresh={actions.refreshOne}
-                onToggleDisable={actions.toggleDisable} onRemove={actions.removeAcct} onDetail={show} />
+                onToggleDisable={actions.toggleDisable} onRemove={actions.removeAcct}
+                onDetail={show} onDetailLeave={hide} />
         ))}
       </div>
       {/* 提示语只在该账号列表真的加载过之后才出现：vanilla 未登录时 renderAccounts

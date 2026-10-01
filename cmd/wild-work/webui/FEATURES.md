@@ -223,7 +223,7 @@ ledger kinds(earn/spend/expire) :1378 · glm 状态串 :759 · 掩码哨兵 `"�
 | `CH_VAR` 只映射 8 渠道、**缺 `glm`**，智谱清言折线走 `--accent` 兜底 | `app.js:1423` | 修在 `src/channelColors.js`（10 渠道齐）。vanilla 不动 —— 它是融合 diff 基准。**面板已提到 `/`，所以对用户而言这个 bug 实际已消失** |
 | 渠道清单硬编码，新增渠道会悄悄掉进 `--accent` | 同上 | 闸门 `TestChannelColorVarsAllMapped` 改为从 `feeChannelOrder` 推导，加渠道即报警 |
 
-### 5.2 移植过程中**新引入又修掉**的四个（都是"测试全绿但仍然错"）
+### 5.2 移植过程中**新引入又修掉**的五个（都是"测试全绿但仍然错"）
 
 1. `CreditValue` 声明 `{ account }`、调用点 `a={a}` → 有积分的卡一渲染就整页白屏。
    躲过前几轮验证只因沙箱只有匿名卡（走 `credits_na` 提前 return）。→ 补 `tools/check-props.mjs`。
@@ -240,6 +240,19 @@ ledger kinds(earn/spend/expire) :1378 · glm 状态串 :759 · 掩码哨兵 `"�
    要求 JSX 使用点自己点亮；摘掉那句即按 `文件:行号` 报红）。
    ⚠️ 前三道闸门都抓不到它：静态 id 对账只看 id 写没写、`render-check` 是 SSR 没有 CSS 级联、
    取数驱动的分支不在 SSR 覆盖内。**「渲染出来了」与「看得见」之间还隔着一层样式表。**
+5. **积分明细浮窗位置漂移 + 移开不收起**（同日，用户报「位置漂移了 应该是这个积分的位置显示」）。
+   - 漂移：浮窗 `position:fixed` 渲染在 `section.section` 内，而该 section 的入场动画末态是
+     `.reveal.revealed { transform: translateY(0) }`——**仍是 transform**，于是它成为 fixed 后代的
+     包含块，视口坐标被当成相对 section 原点用。实测偏 (22, 87)、纵向漂 329px。
+     → `createPortal(..., document.body)`（vanilla 的 `appendChild` 天然如此）。修后 `dx=0`、`gapBelow=4`。
+   - 不收起：`onMouseLeave={noCredits ? undefined : onDetail.hide}` 里的 `show.hide` **从未定义**
+     （`hide` 上挂的是 `.cancel`/`.now`）⇒ 处理器恒 `undefined`，鼠标移开浮窗永久滞留。
+     → 显式传 `onDetailLeave={hide}`。
+   - ⚠️ 第 4 条修完时我只验了「可见 + 在 anchor 下方」，**没验水平对齐**，所以放过了这条。
+     判据要覆盖「它声称修好的那件事的全部维度」。
+   - 防回归 `TestCreditTipIsPortaledToBody`；它第一版用 `Contains(s,"document.body")` 判 portal 目标，
+     而注释里也有这个词 ⇒ 空断言（把目标改成 `#root` 的负向用例照样绿），改为匹配
+     `createPortal(` 的第二实参后才可真红。
 
 **判据教训**：同源的是 CSS，不是渲染条件；token 字节相等证明不了「该出现的元素出现了」。
 

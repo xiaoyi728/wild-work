@@ -384,6 +384,21 @@ type CreditStats struct {
 	NameMap map[string]string `json:"name_map,omitempty"` // uid → 昵称
 }
 
+// monthSegments 列出 [from, now] 覆盖到的月分段名（与 usage-YYYYMM.jsonl 对齐），升序。
+//
+// 旧写法是「从 from 起每 15 天取一次样」：from=09-25、now=10-01 时第二步落到 10-10，
+// 已越过 now 于是循环直接结束，**当月分段根本没进集合**。后果是每月 1~14 日面板的
+// 7 日窗口只会读到上月分段（上月那份不受 trimCurrentMonth 裁剪，可能仍有陈旧条目），
+// 当月流水静默归零 —— 不报错、不影响 days=1（from 就是今天）。
+func monthSegments(from, now time.Time) []string {
+	var out []string
+	m := time.Date(from.Year(), from.Month(), 1, 0, 0, 0, 0, from.Location())
+	for ; !m.After(now); m = m.AddDate(0, 1, 0) {
+		out = append(out, m.Format("200601"))
+	}
+	return out
+}
+
 // Query 聚合最近 days 天的流水（days ∈ {1,7}，其他值按 7 处理）。
 // 读取前自动 Flush。返回结果为新建对象，调用方可直接 JSON 序列化。
 // enrich：可选，查询后按 uid 回填账号昵称（闭包由 App 提供，拿 pool 状态）。
@@ -397,11 +412,8 @@ func (l *Ledger) Query(days int, enrich func(uid string) (name, channel string))
 	from := now.AddDate(0, 0, -(days - 1))
 	fromTs := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, now.Location()).Unix()
 
-	// 覆盖范围内的月份分段（最多 2 个：当月 + 上月）
-	months := map[string]bool{}
-	for t := from; !t.After(now); t = t.AddDate(0, 0, 15) {
-		months[t.Format("200601")] = true
-	}
+	// 覆盖范围内的月份分段（跨月时 2 个：当月 + 上月）
+	months := monthSegments(from, now)
 
 	st := &Stats{}
 	// 聚合中间态：全部按天（小时视图由当天流水二次展开）
@@ -416,7 +428,7 @@ func (l *Ledger) Query(days int, enrich func(uid string) (name, channel string))
 	var sinceTs int64
 	var entries []RecentCredit
 
-	for m := range months {
+	for _, m := range months {
 		for _, prefix := range []string{"usage", "credit"} {
 			fp := filepath.Join(l.dir, fmt.Sprintf("%s-%s.jsonl", prefix, m))
 			scanJSONL(fp, func(line []byte) {

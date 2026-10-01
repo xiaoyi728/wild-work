@@ -430,7 +430,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 `admin_password` 非空且 ≥8 字符，**否则 daemon 启动即 fatal**。改回 `127.0.0.1` 则可不设。
 
 ### L6 React 迁移：当前状态与收尾清单
-- 计划与实测记录：`docs/前端React重构架构计划.md`（本地文档，受 `docs/*` 白名单制保护不入库）。
+- 计划与实测记录：`docs/前端React重构架构计划.md`（2026-10-01 起已在 `.gitignore` 反选入库；
+  本文记结论，那份记依据与逐阶段判定）。
 - **闸门**（`internal/app/`）：`web_contract_test.go` 端点级双向契约 + `TestDOMIdParity`（114 个 DOM id
   集合差，`echartsCdn` 白名单）+ `node_modules` 不得进 `web-app/` 的守卫；
   `web_field_contract_test.go` 字段级契约（`/api/state` 36 个字段路径，反射 + 内联 map 源码扫描）；
@@ -570,3 +571,26 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   - 未登录时桌宠轮询 `/api/pulse`、`/api/state` 会在浏览器网络日志里留一串 401。
     这是 L2 的**设计行为**（`petGet` 遇非 2xx 返回 null、静默跳过、登录后自愈），
     vanilla 的桌宠同样如此，不是 React 引入的回归，别去"修"成静默。
+
+### L7 生产 daemon 的启动与重启（**无任何托管**）
+
+- **事实**：本机没有 systemd user 单元、没有 cron、没有 `~/.config/autostart` 条目，Linux 侧开机自启
+  按 §7 本就「未实现」。所以进程挂掉**不会自己回来**，机器重启后也不会起来，必须手工启动。
+- **现行启动方式**（`cwd` 必须是 `dist/`；`WILDWORK_HOME` 留空即沿用 exe 所在目录）：
+  ```bash
+  cd dist && WILDWORK_HOME= setsid nohup ./wild-work-linux --no-tray < /dev/null > /tmp/ww-prod-restart.log 2>&1 &
+  ```
+  `setsid` 让 PPID=1，进程不随启动它的 shell 一起死（不带它、从 SSH 会话里起，会话一断就把服务带走）。
+- **`SIGTERM` 是优雅关闭，不要用 `kill -9`**：`main.go` 的 `<-sig` → `App.Stop()` →
+  `srv.Shutdown(3s)` → `App.Close()` → `ledger.Close()`，后者会冲刷那对 30s `AutoFlush` 缓冲句柄。
+  硬 kill 的代价是丢掉最后 ≤30s 的 usage/credit 流水。
+- **重启前后各做一件事**：先把 `dist/data/ledger/` 与 `dist/config.json` 备份出去
+  （本轮放 `/home/incam/Software/_pre-restart-<日期>/`，沿用 `_pre-merge-*` 的既有惯例）；
+  起来后拿备份逐文件 `cmp`，证明没有截断——2026-10-01 实测三个流水文件字节相同。
+- **确认「真换上了新二进制」的四项判据**（均为实测，别只看进程还在）：
+  ① `/proc/<pid>/exe` 指向活路径，**不是** `(deleted)`——`(deleted)` 说明跑的是被覆盖掉的旧 inode；
+  ② `curl /` 的首页引用 `assets/index-*.js`（React）而非 `app.js`（vanilla）；
+  ③ 无会话访问 `/api/state` 返回 401（R4 的强制没退化）；
+  ④ 从服务端取回的 bundle 里数得到面板指纹（`btnToggleFees` / `acct-card` / `ww-pet-toggle`）。
+- ⚠️ **验证用的 URL 自己也会写错**：本轮就出现过 `http://10.20.118.7863/` 这种错址，请求根本失败
+  而计数照样输出 `0`，看起来完全像「通过」。计数合乎预期但来路可疑时，先把原始响应打出来看。

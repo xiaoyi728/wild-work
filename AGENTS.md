@@ -445,6 +445,11 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   已修：路径锚到脚本自身位置 + 扫到 0 个文件 / 0 个组件签名一律 `exit 1`。
   接线后两条负向验证：给调用点塞一个组件不接收的 prop → 红；把 `render-check` 的控件正则改成永不匹配
   → 红（即计数器静默失效时报缺失、不报绿）。
+  同文件另有 `TestEmbeddedWebAppIsARealPanel`：断言 embed 目标里装的**真是面板**——index.html 引用了
+  存在的 `assets/*`、JS 里认得出面板指纹（`btnToggleFees`/`btnRefreshAll`/`acct-card`）、且源码不比产物新。
+  补它是因为 `//go:embed all:web-app` 只要求目录非空，而被跟踪的 `web-app/.gitkeep` 让「只有 .gitkeep」
+  也能编译通过 ⇒ 产出 `/` 是空面板的 exe 且**全程无错**；既有产物级检查在无产物时一律 `t.Skip`，
+  恰好在不变量 0 点名的两种情况（空壳 / 忘重建）下全部让路。三项均已负向验证。
 - **迁移期双份 embed 已结束**（2026-09-30 收尾）。当时 `/` = vanilla（生产在用）、`/next/` = React，
   Go 侧改动是 `main.go`（embed 两路 + `fs.Sub` 两次）与 `server.Config.WebUINext` + 一段挂载块。
   现已全部回删：embed 只剩 `all:web-app`，`WebUINext` 与 `/next/` 挂载已移除。

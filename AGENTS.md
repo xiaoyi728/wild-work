@@ -603,7 +603,10 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   ```bash
   cd dist && WILDWORK_HOME= setsid nohup ./wild-work-linux --no-tray < /dev/null > /tmp/ww-prod-restart.log 2>&1 &
   ```
-  `setsid` 让 PPID=1，进程不随启动它的 shell 一起死（不带它、从 SSH 会话里起，会话一断就把服务带走）。
+  ⚠️ 判据是 **`ps -o pid,ppid,pgid,sid -p <pid>` 里 `SID == 自身 PID`**（会话首进程）+ TTY 为 `?` +
+  stdin 接 `/dev/null`，**不是 PPID=1**——PPID 是否变成 1 只取决于启动它的 shell 有没有恰好退出，
+  实测两次重启：一次 PPID=1（shell 已退），一次 PPID 仍是那个 `/bin/bash -c …`（shell 还在），
+  但两者 SID 都等于自身 PID，都是安全的。拿 PPID 判存活会误判。
 - **`SIGTERM` 是优雅关闭，不要用 `kill -9`**：`main.go` 的 `<-sig` → `App.Stop()` →
   `srv.Shutdown(3s)` → `App.Close()` → `ledger.Close()`，后者会冲刷那对 30s `AutoFlush` 缓冲句柄。
   硬 kill 的代价是丢掉最后 ≤30s 的 usage/credit 流水。

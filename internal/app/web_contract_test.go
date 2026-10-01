@@ -21,7 +21,13 @@ import (
 // goPanelRouteRe 匹配 Go 1.22+ ServeMux 的「方法 + 路径」注册写法。
 // internal/app 全包的注册都是硬编码字面量，不存在服务端拼路径的情况，
 // 所以对编译后的 JS 产物做静态扫描是可靠的。
-var goPanelRouteRe = regexp.MustCompile(`HandleFunc\("(GET|POST) (/api/[^"]+)"`)
+//
+// `Handle(?:Func)?` 两种写法都要认：`/api/auth/login`、`/api/auth/logout` 是用
+// `mux.Handle(pattern, csrf.Handler(http.HandlerFunc(...)))` 注册的（不鉴权的 POST 仍需
+// 跨源保护，见 HandleAPI 里的说明）。只认 HandleFunc 会让这两条**静默脱离契约**——
+// 实测：把它们改成 mux.Handle 后本测试立刻报「前端引用了 Go 未注册的端点」，
+// 且路由计数从 33 掉到 31。
+var goPanelRouteRe = regexp.MustCompile(`Handle(?:Func)?\("(GET|POST) (/api/[^"]+)"`)
 
 // uiAPIRe 扫描前端源码/产物里的 /api/* 字面量。字符类刻意不含 '?'，
 // 使 `/api/usage?days=${n}` 这类模板字面量自然截成 /api/usage。

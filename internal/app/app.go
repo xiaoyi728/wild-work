@@ -1935,7 +1935,17 @@ func apiError(w http.ResponseWriter, status int, msg string) {
 // 密码为空 = 不鉴权，此时仅允许监听环回地址（见 SetListen / SetAdminPassword）。
 func (a *App) HandleAPI(mux *http.ServeMux) {
 	// 登录/登出/会话探针：挂在 /api/auth/* 上（比 /api/ 更具体，不经过会话鉴权）。
-	mux.HandleFunc("POST /api/auth/login", func(w http.ResponseWriter, r *http.Request) {
+	//
+	// 但这两个 POST 仍必须套跨源保护：它们不鉴权，且 login 用 json.Decoder 直接解析、
+	// **不看 Content-Type** ⇒ 跨站的 text/plain「简单请求」（不触发 CORS 预检）也能打进来。
+	// 于是管理员访问某个恶意页面时，该页面可以故意连错 5 次密码，把管理员自己的 IP
+	// 锁 5 分钟（panelLogin→allowLogin 按 RemoteAddr 计数）。属低危拒绝服务，但白送没理由。
+	//
+	// 语义见 net/http.CrossOriginProtection：只拒「非安全方法 + 跨源」，GET/HEAD/OPTIONS
+	// 与「无 Sec-Fetch-Site / Origin 头」的请求一律放行 ⇒ 面板同源调用、curl 等非浏览器
+	// 客户端、以及既有 httptest 用例都不受影响（三种情况均已实测）。
+	csrf := http.NewCrossOriginProtection()
+	mux.Handle("POST /api/auth/login", csrf.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !a.panelAuthEnabled() {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": ""})
 			return
@@ -1951,12 +1961,12 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		setSessionCookie(w, r, token)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": brief})
-	})
-	mux.HandleFunc("POST /api/auth/logout", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("POST /api/auth/logout", csrf.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a.panelLogout(r)
 		setSessionCookie(w, r, "") // 置空 + MaxAge<0 删除 cookie
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	})
+	})))
 	mux.HandleFunc("GET /api/auth/state", func(w http.ResponseWriter, r *http.Request) {
 		// 会话探针：不返回 401，未登录时只回鉴权元信息（绝不回传 API-Key/账号/代理等
 		// 已鉴权内容），供前端在首次加载时就弹出登录层。

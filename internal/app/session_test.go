@@ -64,6 +64,51 @@ func doReq(mux *http.ServeMux, method, path, body string, cookie *http.Cookie) *
 	return w
 }
 
+// TestAuthRoutesRejectCrossOriginPOST 不鉴权的 /api/auth/login、/api/auth/logout 也必须挡跨站 POST。
+//
+// 背景：login 用 json.Decoder 直接解析、**不看 Content-Type**，所以跨站的 text/plain
+// 「简单请求」不触发 CORS 预检就能打进来；管理员访问某个恶意页面时，该页面可以故意连错
+// 5 次密码，把管理员自己的 IP 锁 5 分钟（panelLogin → allowLogin 按 RemoteAddr 计数）。
+// 低危拒绝服务，但白送没理由。
+//
+// 沙箱 + 真浏览器实测四种形态：跨站 POST → 403；无 Origin/Sec-Fetch-Site 的 curl → 200；
+// 同源浏览器登录 → 200 且面板正常渲染；跨站 GET /api/auth/state → 200 且只回探针。
+func TestAuthRoutesRejectCrossOriginPOST(t *testing.T) {
+	a := newPanelApp(t, "127.0.0.1", "pw12345678")
+	mux := panelMux(a)
+
+	send := func(method, path string, crossOrigin bool) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(`{"password":"pw12345678"}`))
+		r.RemoteAddr = "192.168.1.50:12345"
+		if crossOrigin {
+			r.Header.Set("Sec-Fetch-Site", "cross-site")
+			r.Header.Set("Origin", "http://evil.example")
+		}
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w
+	}
+
+	for _, p := range []string{"/api/auth/login", "/api/auth/logout"} {
+		if w := send("POST", p, true); w.Code != http.StatusForbidden {
+			t.Errorf("跨站 POST %s = %d，期望 403：不鉴权的路由同样要挡 CSRF，"+
+				"否则恶意页面可远程把管理员 IP 锁 5 分钟", p, w.Code)
+		}
+	}
+	// 安全方法必须放行（否则面板首屏探针会挂），且未登录时只回探针、不含账号数据
+	w := send("GET", "/api/auth/state", true)
+	if w.Code != http.StatusOK {
+		t.Errorf("跨站 GET /api/auth/state = %d，期望 200（GET 是安全方法，一律放行）", w.Code)
+	} else if strings.Contains(w.Body.String(), "accounts") {
+		t.Errorf("未登录的探针回传了账号数据：%s", w.Body.String())
+	}
+	// 非浏览器客户端（无 Origin / Sec-Fetch-Site）必须照常可用
+	if w := send("POST", "/api/auth/login", false); w.Code != http.StatusOK {
+		t.Errorf("无 Origin/Sec-Fetch-Site 的登录 = %d，期望 200（curl 等命令行客户端不能被挡）；body=%s",
+			w.Code, w.Body.String())
+	}
+}
+
 // TestPanelNoAuthWhenNoPassword 未设置密码（仅本机监听）时，管理 API 不鉴权。
 func TestPanelNoAuthWhenNoPassword(t *testing.T) {
 	a := newPanelApp(t, "127.0.0.1", "")

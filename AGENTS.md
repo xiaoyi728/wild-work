@@ -486,7 +486,7 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 **业务代码零改动**（`internal/` 除新增测试外无一个既有 .go 被改；`handler.go` 迁移期加过
 `WebUINext` 收尾又删，净变化为零）；上游 vanilla `cmd/wild-work/web/` 一字节未动。
 
-#### L6.2 过程中修掉的三个「测试全绿但仍然错」的缺陷
+#### L6.2 过程中修掉的四个「测试全绿但仍然错」的缺陷
 
 1. **整页白屏崩溃** — `CreditValue` 声明 `{ account }`、调用点写 `a={a}`。
    JSX 无类型，vite/esbuild/go vet 全不报。之所以躲过前几轮验证：沙箱里只有匿名账号，
@@ -497,6 +497,17 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 3. **面板宽度被静默压 27px** — tailwind 核心组件 `.container` 与本项目同名布局类撞车，
    ≥768px 视口时它的 `max-width` 盖掉面板的 980px。vendored CSS 逐字相同也照样中招，
    因为冲突来自**加载的第二份 CSS**。→ 补 `TestBuiltCSSHasNoContainerCollision` 扫产物。
+4. **积分明细浮窗永久不可见**（2026-10-01 由用户报出：「鼠标放在积分这一块看不到积分明细」）
+   — `.credit-tip` 的 CSS 基础规则带 `display:none`，vanilla 靠 `web/app.js:229` 的
+   `tip.style.display="block"` 点亮；移植时这个浮窗从「运行期 createElement + 手工点亮」
+   变成「有数据才挂载的 JSX 节点」，于是按「渲染出来＝可见」的直觉把点亮那句丢了。
+   结果节点在 DOM 里、2 行数据也渲染了、标题也在，但 `display:none`、`offsetHeight/Width=0`，
+   **且不报任何错**；次生后果是定位 effect 量到 h=0，「向上翻」判据一并失准。
+   → 补 `style={{ display: 'block' }}`，并加 `TestHiddenByCssBaseRulesAreExplicitlyShown`
+   （扫 CSS 里基础规则带 `display:none` 的类，要求 JSX 使用点自己点亮；负向验证：摘掉那句即
+   按 `文件:行号` 报红）。⚠️ 前三条的教训在它身上**仍然成立**：静态 id 对账只看 id 有没有写出来，
+   `render-check` 是 SSR 没有 CSS 级联，取数驱动的分支更不在 SSR 覆盖内——
+   「渲染出来了」与「看得见」之间还隔着一层样式表。
 
 **教训（写死在这里）**：同源的是 CSS，不是渲染条件；token 字节相等证明不了「该出现的元素出现了」。
 凡「界面有没有变」这类问题，判据只能是**同后端对照 + 数可见控件/量几何**，不能靠比对源文件。
@@ -529,19 +540,31 @@ git tag vX.Y.Z && git push origin vX.Y.Z
    （`button|input|select|textarea` + `.icon-op|.icon-link` + 顶栏两格 `code.info-value`；
    初版数到 18 的差额就是这两格）。已负向验证：把 L6.2 第 2 条缺陷装回去 → `exit 1` 点名缺失的 18 个控件。
    ⚠️ 它仍**不覆盖取数驱动的分支**（SSR 不跑 `useEffect`），那类别再回到浏览器数一遍。
+6. **积分明细 tooltip**（原 A1）——**已实测，并因此查出一个真缺陷**（见 L6.2 第 4 条）。
+   原判「要 `resource_detail` 真返数据、我验不了」只对了一半：数据要真凭据，但**渲染与样式层**
+   可以用「页面内改写 `window.fetch` 喂假响应 + 直接调 React 的 `onMouseEnter`」驱动。
+   四条子判据全部实测过（沙箱 + 合成数据，不需要上游凭据）：hover 挂载并可见
+   （`display:block`、380×184）；12 条分两页、点 › 后 `1 / 2 → 2 / 2`、行首由「套餐1」变「套餐9」、
+   高度 375→248；有条目带 `expire_at` 时出现「有效期」列、全部不带时**整列消失**（4 列 / 每行 4 格，
+   即不变量 18 的「缺失不得用零值冒充」）；`unusable_remain=0` 时不显示「不可用」。
+   ⚠️ 方法教训两条：① 明细有 `cache.current[uid]` 缓存，命中即不再请求——第二次用例没重载页面
+   就会读到上一轮的缓存数据（我第一版就测出了「4 行 + 有效期列」的假矛盾）；② 匿名卡 `credits_na`
+   不挂 hover，必须挑真账号那张卡。
 
 **仍然剩下的**
 
 **A. 只能靠生产真凭据验证的（我这边验不了）**
-1. 积分明细 tooltip（hover 弹层 + 分页 + 有效期列存在性判据）——要 `resource_detail` 真返数据;
-2. 「刷新积分 / 全部签到」真联（含不变量 19/20 的 401 自愈 + refresh 后落盘）;
-3. glm CDP 自动登录（`glm_auto` → 真拉浏览器 → 轮询 `glm_auto_status` → 访客 token 判据）;
+1. 「刷新积分 / 全部签到」真联（含不变量 19/20 的 401 自愈 + refresh 后落盘）;
+2. glm CDP 自动登录（`glm_auto` → 真拉浏览器 → 轮询 `glm_auto_status` → 访客 token 判据）;
+   > ~~原第 1 项：积分明细 tooltip~~ **已实测，并当场查出真缺陷 L6.2 第 4 条**。它被归进
+   > 「验不了」是判断错误：上游数据确实要凭据，但**渲染与样式层不需要**——页面内改写
+   > `window.fetch` 喂假响应就能驱动。详见上方「已处置」第 6 条。
    > ~~4. 多渠道时图例翻页~~ **已实测（2026-10-01，不需要生产凭据）**：沙箱造 7 渠道 × 7 天流水，
    > legend 以 `type:'scroll'` 渲染成功、控制台零报错（漏注册的表现是运行期
    > `Component legend.scroll not exists`，见 `Usage.jsx` 顶部注释）；再把 `#usageChart` 压到 240px
    > 并派发 resize，图例带内墨迹裂成 4 组、末组贴在 x=216~239 —— 即翻页控件真的出来了。
    > 判据来源：`getImageData` 采样画布像素（echarts 的 legend 画在 canvas 上，没有 DOM 可查）。
-   > 这条从 A 类摘掉是因为它落在**合成数据可覆盖**的范围里；上面 1–3 条仍要真上游凭据，
+   > 这条从 A 类摘掉是因为它落在**合成数据可覆盖**的范围里；剩下 1–2 条仍要真上游凭据，
    > 且都在 render-check 的盲区（取数驱动 / 真上游），**没有闸门兜住**，别当成已验证。
 
 **C. 已知但低影响 / 有意为之**

@@ -223,7 +223,7 @@ ledger kinds(earn/spend/expire) :1378 · glm 状态串 :759 · 掩码哨兵 `"�
 | `CH_VAR` 只映射 8 渠道、**缺 `glm`**，智谱清言折线走 `--accent` 兜底 | `app.js:1423` | 修在 `src/channelColors.js`（10 渠道齐）。vanilla 不动 —— 它是融合 diff 基准。**面板已提到 `/`，所以对用户而言这个 bug 实际已消失** |
 | 渠道清单硬编码，新增渠道会悄悄掉进 `--accent` | 同上 | 闸门 `TestChannelColorVarsAllMapped` 改为从 `feeChannelOrder` 推导，加渠道即报警 |
 
-### 5.2 移植过程中**新引入又修掉**的三个（都是"测试全绿但仍然错"）
+### 5.2 移植过程中**新引入又修掉**的四个（都是"测试全绿但仍然错"）
 
 1. `CreditValue` 声明 `{ account }`、调用点 `a={a}` → 有积分的卡一渲染就整页白屏。
    躲过前几轮验证只因沙箱只有匿名卡（走 `credits_na` 提前 return）。→ 补 `tools/check-props.mjs`。
@@ -232,6 +232,14 @@ ledger kinds(earn/spend/expire) :1378 · glm 状态串 :759 · 掩码哨兵 `"�
 3. tailwind 核心组件 `.container` 与本项目同名布局类撞车，面板被静默压窄 27px。
    vendored CSS 逐字相同也中招，因为冲突来自**加载的第二份 CSS**。→ `corePlugins.container=false`
    + `TestBuiltCSSHasNoContainerCollision` 扫产物。
+4. **积分明细浮窗永久不可见**（2026-10-01 用户报出）。`.credit-tip` 的 CSS 基础规则带
+   `display:none`，vanilla 在 `web/app.js:229` 用 `tip.style.display="block"` 点亮；这个浮窗移植成
+   「有数据才挂载的 JSX 节点」后，那句被「渲染出来＝可见」的直觉吃掉了。节点在 DOM 里、数据也渲染了，
+   但 `offsetHeight/Width=0`、**不报任何错**。→ 补 `style={{ display: 'block' }}`
+   + 新闸门 `TestHiddenByCssBaseRulesAreExplicitlyShown`（扫 CSS 基础 `display:none` 的类，
+   要求 JSX 使用点自己点亮；摘掉那句即按 `文件:行号` 报红）。
+   ⚠️ 前三道闸门都抓不到它：静态 id 对账只看 id 写没写、`render-check` 是 SSR 没有 CSS 级联、
+   取数驱动的分支不在 SSR 覆盖内。**「渲染出来了」与「看得见」之间还隔着一层样式表。**
 
 **判据教训**：同源的是 CSS，不是渲染条件；token 字节相等证明不了「该出现的元素出现了」。
 

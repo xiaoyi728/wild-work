@@ -76,8 +76,13 @@ function CreditTip({ data, uid, anchorRect, onClose }) {
     tip.style.top = top + 'px';
   }, [anchorRect, cur, uid]);
 
+  // ⚠️ 必须显式 display:block：style.css 的 .credit-tip 基础规则带 `display:none`
+  // （vanilla 靠 app.js:229 的 tip.style.display="block" 点亮）。移植时这个浮窗从
+  // 「运行期 createElement + 手工点亮」变成了「有数据才挂载的 JSX 节点」，
+  // 于是按「渲染出来＝可见」的直觉把点亮那句丢了——节点在 DOM 里但永久不可见，
+  // 量到的 offsetHeight 也是 0，表现为「鼠标放积分上没有明细浮窗」，且不报任何错。
   return (
-    <div className="credit-tip" id="creditTip" ref={tipRef}
+    <div className="credit-tip" id="creditTip" ref={tipRef} style={{ display: 'block' }}
          onMouseEnter={onClose.cancel} onMouseLeave={onClose.now}>
       <div className="detail-head">
         <span className="detail-count">共 {items.length} 条</span>

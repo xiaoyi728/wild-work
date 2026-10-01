@@ -139,7 +139,7 @@ function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDis
   }
 
   const name = a.nickname || shortUid(a.uid);
-  const oczenName = (state.oczen_api_key || '') ? '私有Key' : '匿名';
+  const oczenName = ((state && state.oczen_api_key) || '') ? '私有Key' : '匿名';
 
   return (
     <div className={`acct-card${a.disabled ? ' disabled' : ''}${(a.disabled || checkinFail) ? ' glow-alert' : ''}${isNew ? ' card-enter' : ''}`}
@@ -186,6 +186,10 @@ function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDis
   );
 }
 
+// state 允许为 null（未登录 / 首帧加载中）。此时照 vanilla 的样子把整幅操作区渲染出来：
+// vanilla 的面板 DOM 是静态 HTML，未登录只是不填数据、不跑 renderAccounts，
+// 标签页与所有按钮都在场且可点（点了会 401 → 弹登录层，与现状一致）。
+// 「还没有账号」提示则不渲染 —— 它由 renderAccounts 摘掉 hidden 才出现，未登录时不该有。
 export default function Accounts({ state, actions, knownUids }) {
   const [tipState, setTipState] = useState(null); // {uid, rect, data}
   const cache = useRef({});
@@ -210,7 +214,7 @@ export default function Accounts({ state, actions, knownUids }) {
     } catch (e) { /* 明细失败不影响卡片 */ }
   };
 
-  const acc = state.accounts || [];
+  const acc = state ? (state.accounts || []) : [];
 
   return (
     <>
@@ -238,7 +242,10 @@ export default function Accounts({ state, actions, knownUids }) {
                 onToggleDisable={actions.toggleDisable} onRemove={actions.removeAcct} onDetail={show} />
         ))}
       </div>
-      {!acc.length ? <div id="acctEmpty" className="empty">还没有账号，点击上方按钮添加</div> : null}
+      {/* 提示语只在该账号列表真的加载过之后才出现：vanilla 未登录时 renderAccounts
+          根本不执行，#acctEmpty 一直带着 hidden 类。所以判据是「state 存在且为空」，
+          不是「数组为空」——后者会让未登录页面凭空多出一行提示。 */}
+      {state && !acc.length ? <div id="acctEmpty" className="empty">还没有账号，点击上方按钮添加</div> : null}
       {tipState ? <CreditTip data={tipState.data} uid={tipState.uid} anchorRect={tipState.rect} onClose={hide} /> : null}
     </>
   );

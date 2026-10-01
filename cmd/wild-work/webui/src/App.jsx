@@ -270,7 +270,7 @@ export default function App() {
       const results = r.results || [];
       const ok = results.filter((x) => x.ok).length;
       const pending = results.filter((x) => !x.ok && x.retryable).length;
-      const skip = (state.accounts || []).filter((a) => noExplicitCheckin(a.group)).length;
+      const skip = ((state && state.accounts) || []).filter((a) => noExplicitCheckin(a.group)).length;
       const total = results.length + skip;
       const parts = [skip ? `成功 ${ok} / ${total}（${skip} 个无签到活动跳过）` : `成功 ${ok} / 共 ${total}`];
       if (pending) parts.push(`${pending} 个未领到将在窗口内自动重试`);
@@ -438,10 +438,26 @@ export default function App() {
                   onSettings={() => {}} onHelp={() => {}} onAbout={() => {}}
                   onCopy={() => {}} disabled />
         <div className="container">
-          <section className="section" id="secAccounts">
+          <section className="section" id="secAccounts" ref={sectionRef}>
+            <div className="section-head">
+              <div className="main-tabs">
+                <button className="mtab active" id="mtabBtnAccounts">账号管理</button>
+                <button className="mtab" id="mtabBtnUsage">用量与流水 <span className="ver" id="usageSince"></span></button>
+              </div>
+              <div className="panel-actions">
+                <button className="btn" id="btnToggleFees" onClick={() => setShowFees(true)}>渠道费率</button>
+              </div>
+            </div>
+            {/* 未登录也要把整幅操作区摆出来：vanilla 的面板 DOM 是静态的，
+                会话探针只是不填数据。少了这些控件就是可见退化（实测 20 → 8 个）。 */}
+            <div className="mtab-body" id="mtabAccounts">
+              <Accounts state={null} actions={actions} knownUids={knownUids.current} />
+            </div>
+            <div className="mtab-body hidden" id="mtabUsage" />
             <div className="footer">wild-work — 多渠道账号聚合 · 仅供个人学习 · 右键托盘图标退出</div>
           </section>
         </div>
+        {showFees ? <Fees fees={fees} refreshBusy={busy.refreshFees} onRefresh={refreshFees} onClose={() => setShowFees(false)} /> : null}
         <AdminLogin open msg={loginMsg} onSubmit={(pass) => submitLogin(pass)} />
       </>
     );

@@ -36,15 +36,31 @@ function chartBase() {
   };
 }
 
+// echarts 4 的 axis tooltip 默认结构（model/Series.js formatTooltip）：
+//   标题 encodeHTML(name)，每行 getTooltipMarker(color) + encodeHTML(seriesName) + ': ' + encodeHTML(addCommas(value))
+// 行与标题之间用 <br/>。这里只把最后一段换成 fmtValue，其余逐字照抄，
+// 否则行距/圆点尺寸一变，两张图的观感会跟着漂。
+// ⚠️ 落地方式是 TooltipContent.js 的 el.innerHTML = content，所以默认实现里的 encodeHTML
+// 不能省：积分图的系列名是账号备注（用户可编辑），不转义就是 XSS 入口。
+const escHtml = (s) => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+const axisTooltip = (fmtValue) => (params) => {
+  const rows = params.map((p) => (
+    `<span style="display:inline-block;margin-right:5px;border-radius:10px;width:10px;height:10px;`
+    + `background-color:${escHtml(p.color)};"></span>${escHtml(p.seriesName)}: ${escHtml(fmtValue(p.value))}`
+  ));
+  return [escHtml(params[0] && params[0].name), ...rows].join('<br/>');
+};
+
 // 两条折线共用的骨架，只差数据与格式化器。
 function buildOption(base, dates, series, fmtValue) {
   return {
     ...base,
-    // ⚠️ valueFormatter 是 echarts 5.3+ 的选项，本仓精确锁 4.3.0，因此它在此**不生效**
-    // （tooltip 数值走 echarts 默认渲染，Y 轴的 formatter 才生效）。
-    // 这里刻意照现状保留而不改成 v4 能用的 formatter：/next/ 与 / 必须逐像素可比，
-    // 任何「顺手修好」都会让对账失去基准。是否真要修，属产品决定，已单独报给所有者。
-    tooltip: { ...base.tooltip, trigger: 'axis', valueFormatter: fmtValue },
+    // valueFormatter 是 echarts 5.3+ 的选项，本仓精确锁 4.3.0，写了也不生效；
+    // 4.x 要格式化数值只能接管整个 formatter（结构见上方 axisTooltip）。
+    tooltip: { ...base.tooltip, trigger: 'axis', formatter: axisTooltip(fmtValue) },
     legend: { ...base.legend, data: series.map((s) => s.name) },
     grid: { left: 56, right: 20, top: 40, bottom: 28 },
     xAxis: { ...base.xAxis, type: 'category', data: dates },
@@ -115,6 +131,15 @@ function useChart(boxRef, option) {
   return inst;
 }
 
+// /api/usage 的 disabled 来自 app.ledger == nil（app.go:2263），根因是启动期 ledger.New
+// 失败（main.go:248-250 只记日志、不拦启动）。**面板侧没有开关**，所以提示语不能写
+// 「去设置里开启」——那是假指引。这里给一份可渲染的空骨架，让版面照常立着：
+// 只把内容整块换成一句提示，会让今日/7日/30 日、刷新、四张卡、子 tab 全部消失。
+const EMPTY_ST = {
+  token: { total: 0, requests: 0, by_day: [], by_model: [] },
+  credit: { spend: 0, earn: 0, entries: [], name_map: {} },
+};
+
 export default function Usage({ active, usageDays, setUsageDays, bump, sinceSink }) {
   // 所有 hook 必须在任何提前 return 之前调用，否则切 tab 时 hook 数量变化会崩。
   const [st, setSt] = useState(null);
@@ -134,7 +159,7 @@ export default function Usage({ active, usageDays, setUsageDays, bump, sinceSink
   useEffect(() => {
     let alive = true;
     api(`/api/usage?days=${usageDays}`)
-      .then((d) => { if (alive) setSt(d.disabled ? { disabled: true } : d); })
+      .then((d) => { if (alive) setSt(d.disabled ? { disabled: true, ...EMPTY_ST } : d); })
       .catch(() => { /* 统计加载失败不阻塞 */ });
     return () => { alive = false; };
   }, [usageDays, nonce]);
@@ -177,13 +202,11 @@ export default function Usage({ active, usageDays, setUsageDays, bump, sinceSink
   }, []);
 
   if (!st) return <div className="muted" style={{ padding: 8 }}>加载中…</div>;
-  if (st.disabled) {
-    sinceSink && sinceSink('（统计不可用）');
-    return <div className="muted" style={{ padding: 8 }}>用量统计已关闭</div>;
-  }
 
   // 角标：已记录起始日 → 天数（本地零点，避免时区漂一天）
-  if (st.recorded_since) {
+  if (st.disabled) {
+    sinceSink && sinceSink('（统计不可用）');
+  } else if (st.recorded_since) {
     const d = Math.max(1, Math.round((Date.now() - new Date(st.recorded_since + 'T00:00:00')) / 86400000) + 1);
     sinceSink && sinceSink(`已记录 ${d} 天`);
   } else {
@@ -213,6 +236,12 @@ export default function Usage({ active, usageDays, setUsageDays, bump, sinceSink
           <button className="btn small" id="btnRefreshUsage" onClick={reload}>刷新</button>
         </div>
       </div>
+      {st.disabled && (
+        <div className="risk-tip" style={{ marginTop: 0, marginBottom: 12 }}>
+          用量统计不可用：记账目录在启动时初始化失败，因此没有流水可汇总（原因见启动日志的 ledger init failed）。
+          下面各表在这一状态下始终为空。
+        </div>
+      )}
       <div className="usage-cards">
         <div className="ucard"><div className="ucard-label">Token 总量</div><div className="ucard-value" id="ucTokens">{fmtTokensFull(st.token.total)}</div></div>
         <div className="ucard"><div className="ucard-label">请求数</div><div className="ucard-value" id="ucReqs">{fmtCredits(st.token.requests)}</div></div>

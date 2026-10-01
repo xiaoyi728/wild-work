@@ -734,6 +734,8 @@ const Pet = (() => {
   function setEnabled(on) {
     enabled = on;
     wls(LS.on, on ? "1" : "0");
+    // 广播给设置弹层：那里的 chkPet 是受控输入，不通知就停在旧值（浮层「隐藏」走的是这里）。
+    window.dispatchEvent(new CustomEvent("ww-pet-toggle", { detail: { on: !!on } }));
     if (on) {
       mini = ls(LS.mini, "0") === "1";
       build();

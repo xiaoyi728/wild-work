@@ -78,6 +78,16 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
   const [expiring, setExpiring] = useState(String(state.expiring_days || 1));
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
+  // 桌宠开关只存本浏览器 localStorage，后端不参与，故初值在弹层挂载时现读一次。
+  // 受控 + 订阅广播是两个入口不打架的前提：弹层里拨开关、或点桌宠浮层的「隐藏」，
+  // 另一边都得跟着变。vanilla 是靠 app.js:774 那行嵌错位置（glm 轮询回调里）的赋值
+  // 顺带掩盖了这个问题，移植时没照搬那行，于是暴露成勾选与实况不符。
+  const [petOn, setPetOn] = useState(() => !!(window.Pet && window.Pet.isEnabled()));
+  useEffect(() => {
+    const onToggle = (e) => setPetOn(!!(e.detail && e.detail.on));
+    window.addEventListener('ww-pet-toggle', onToggle);
+    return () => window.removeEventListener('ww-pet-toggle', onToggle);
+  }, []);
 
   // 选定的监听主机名（下拉 + 自定义输入合成）
   const selectedHost = host !== '__custom__' ? host : customHost.trim();
@@ -396,8 +406,8 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
             <div className="row" style={{ alignItems: 'center' }}>
               <label className="lbl wide">显示桌宠</label>
               <label className="switch">
-                <input type="checkbox" id="chkPet" checked={window.Pet ? window.Pet.isEnabled() : false}
-                       onChange={(e) => { if (window.Pet) window.Pet.setEnabled(e.target.checked); }} />
+                <input type="checkbox" id="chkPet" checked={petOn}
+                       onChange={(e) => { setPetOn(e.target.checked); if (window.Pet) window.Pet.setEnabled(e.target.checked); }} />
                 <span className="slider"></span>
               </label>
               <span className="hint" style={{ marginLeft: 8 }}>右下角的小仓鼠，随请求派发与账号状态变化；关闭后不再轮询</span>

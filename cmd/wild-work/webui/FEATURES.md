@@ -261,6 +261,29 @@ Settings 弹层 / Fees 弹层。
 已负向验证：把 5.2 第 2 条那个缺陷（未登录 early-return 成裸登录层）临时装回去，闸门 `exit 1`
 并点名缺失的 18 个控件；还原后 5/5 绿。
 
+### 5.5 闸门自己也会假绿：`check-props.mjs` 的 cwd 陷阱（2026-10-01 修）
+
+`check-props.mjs` 原先写 `const root = 'src'`，是**相对 cwd** 的。于是：
+
+| 跑法 | 结果 |
+|---|---|
+| `cd webui && node tools/check-props.mjs` | `✓ 20 个组件…`（真的扫了 8 个 `.jsx`） |
+| 仓库根 `node cmd/wild-work/webui/tools/check-props.mjs` | `✓ 0 个组件…全部对得上`，`exit 0` |
+
+第二行就是假绿：`existsSync('src')` 为假 → `continue` 静默跳过 → 一个文件都没扫，却照样报成功。
+而这道闸门正是为 5.2 第 1 条那个白屏崩溃加的。**「跑过了、是绿的」不等于「它看了东西」。**
+
+修法两条，缺一不可：① 路径锚到脚本自身位置（`fileURLToPath(import.meta.url)`），与 cwd 无关
+（实测仓库根与 `/tmp` 下都报 20 个组件）；② **扫到 0 个 `.jsx` 或 0 个组件签名一律 `exit 1`**——
+「什么都没扫到」是错误，不是通过。负向验证：把脚本复制到没有 `src/` 的目录跑 → `exit 1` 并说明原因。
+
+同时补 `internal/app/webui_gates_test.go`：以固定 cwd 从 Go 侧调这两道闸门，接进 `go test ./...`
+（缺 node / 未装依赖则 skip）。理由是 `npm run check` 是手工入口、没人保证跑过，而本项目实际每天跑的
+是 §8 那条 `go build && go vet && go test ./...`——闸门不进常跑流程就等于没有闸门（AGENTS.md R34
+记过同型事故：调度器建了、注册了、漏了 `go Run()`，自动签到从未执行且不报错）。
+接线后两条端到端负向验证：塞一个组件不接收的 prop → `go test` 红；把 render-check 的控件正则改成
+永不匹配 → `go test` 红。
+
 > SSR 只渲首帧，`useEffect` 不执行，因此**取数驱动的分支（`Usage` 内部）不在本闸门覆盖范围内**——
 > §5.3 第 2 条那种类别仍需在真浏览器里用同一条规则数一遍（本文上面的实测值即这么来的）。
 

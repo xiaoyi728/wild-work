@@ -436,6 +436,15 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   `web_field_contract_test.go` 字段级契约（`/api/state` 36 个字段路径，反射 + 内联 map 源码扫描）；
   `web_theme_tokens_test.go` 三主题渠道色对账 + 禁止 tailwind `dark:` 变体。
   **这些闸门的价值在于能变红**，均已做过负向验证（改一个 id 名、删一行 `CH_VAR` 映射都会报精确位置）。
+  2026-10-01 再加两道：`webui_gates_test.go` 以**固定 cwd** 跑 `webui/tools/{check-props,render-check}.mjs`，
+  把手工入口 `npm run check` 接进 `go test ./...`（缺 node 或未装依赖则 skip，不阻塞无前端工具链的机器）；
+  `render-check.mjs` 是渲染层闸门（SSR 数可见控件，见 `webui/FEATURES.md` §5.4）。
+  ⚠️ **新教训：闸门还得证明「它真的看了东西」**。`check-props.mjs` 原先把扫描根写成相对 cwd 的 `'src'`，
+  从仓库根跑就一个 `.jsx` 都扫不到，却照样打「✓ 0 个组件…全部对得上」并 `exit 0`——而它正是为
+  L6.2 第 1 条白屏崩溃而加的闸门，换个 cwd 就退化成假绿（本轮第一次跑它就吃到了这个假绿）。
+  已修：路径锚到脚本自身位置 + 扫到 0 个文件 / 0 个组件签名一律 `exit 1`。
+  接线后两条负向验证：给调用点塞一个组件不接收的 prop → 红；把 `render-check` 的控件正则改成永不匹配
+  → 红（即计数器静默失效时报缺失、不报绿）。
 - **迁移期双份 embed 已结束**（2026-09-30 收尾）。当时 `/` = vanilla（生产在用）、`/next/` = React，
   Go 侧改动是 `main.go`（embed 两路 + `fs.Sub` 两次）与 `server.Config.WebUINext` + 一段挂载块。
   现已全部回删：embed 只剩 `all:web-app`，`WebUINext` 与 `/next/` 挂载已移除。

@@ -8,8 +8,14 @@
 // 只报「传了但没声明」这一方向；「声明了但没传」多为可选 props，噪音大，忽略。
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = 'src';
+// 路径必须锚到脚本自身位置，不能用 cwd：本脚本原先写死 `root = 'src'`，
+// 从仓库根跑 `node cmd/wild-work/webui/tools/check-props.mjs` 时 src/ 不存在 →
+// existsSync 判假 → continue 静默跳过 → 最后照样打「✓ 0 个组件的调用点 props 全部对得上」
+// 并 exit 0。一道为白屏崩溃而加的闸门，换个 cwd 就退化成「什么都不检查且报绿」。
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const root = path.join(ROOT, 'src');
 const files = [];
 for (const d of [root, path.join(root, 'components')]) {
   if (!fs.existsSync(d)) continue;
@@ -44,7 +50,7 @@ for (const f of files) {
     while ((a = attrRe.exec(m[2]))) {
       if (!sigs[name].has(a[1]) && a[1] !== 'key') {
         const line = s.slice(0, m.index).split('\n').length;
-        problems.push(`${f}:${line}  <${name} ${a[1]}=...>  但 ${name} 只接收 {${[...sigs[name]].join(', ')}}`);
+        problems.push(`${path.relative(ROOT, f)}:${line}  <${name} ${a[1]}=...>  但 ${name} 只接收 {${[...sigs[name]].join(', ')}}`);
       }
     }
   }
@@ -55,4 +61,14 @@ if (problems.length) {
   for (const p of [...new Set(problems)]) console.error('  ' + p);
   process.exit(1);
 }
-console.log(`✓ ${Object.keys(sigs).length} 个组件的调用点 props 全部对得上`);
+// 扫不到东西必须报错，不能报绿：本脚本曾经因为 cwd 而扫到 0 个组件却打「✓ …全部对得上」。
+// 闸门能报绿的前提是它真的看了东西。
+if (files.length === 0) {
+  console.error(`✗ 一个 .jsx 都没扫到（root=${root}）——路径不对就别报绿`);
+  process.exit(1);
+}
+if (Object.keys(sigs).length === 0) {
+  console.error(`✗ 扫到 ${files.length} 个 .jsx 却解析不出任何组件签名——签名正则已失效，别报绿`);
+  process.exit(1);
+}
+console.log(`✓ ${Object.keys(sigs).length} 个组件的调用点 props 全部对得上（扫了 ${files.length} 个 .jsx）`);

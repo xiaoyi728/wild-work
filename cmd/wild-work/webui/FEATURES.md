@@ -228,20 +228,41 @@ ledger kinds(earn/spend/expire) :1378 · glm 状态串 :759 · 掩码哨兵 `"�
 1. `CreditValue` 声明 `{ account }`、调用点 `a={a}` → 有积分的卡一渲染就整页白屏。
    躲过前几轮验证只因沙箱只有匿名卡（走 `credits_na` 提前 return）。→ 补 `tools/check-props.mjs`。
 2. 未登录时面板操作区整块没渲染（可见控件 20 → 8）。→ 同后端双二进制对照才量得出。
+   判据已于 2026-10-01 固化成 `tools/render-check.mjs`（SSR 数可见控件），见 §5.4。
 3. tailwind 核心组件 `.container` 与本项目同名布局类撞车，面板被静默压窄 27px。
    vendored CSS 逐字相同也中招，因为冲突来自**加载的第二份 CSS**。→ `corePlugins.container=false`
    + `TestBuiltCSSHasNoContainerCollision` 扫产物。
 
 **判据教训**：同源的是 CSS，不是渲染条件；token 字节相等证明不了「该出现的元素出现了」。
 
-### 5.3 仍然存在、需要所有者拍板的
+### 5.3 所有者已拍板、2026-10-01 已全部处置（原「需要拍板」四项）
 
-| # | 事项 | 现状 |
+| # | 事项 | 处置 |
 |---|---|---|
-| 1 | `valueFormatter` 在 echarts **4.3.0 下是死选项**（该 API 5.3+ 才有，实测产物内计数 0），tooltip 数值不走 `万/亿` 格式化（Y 轴 `formatter` 生效） | 刻意**照现状保留**以便两面板逐像素可比，没顺手改好。要修就得改用 v4 `formatter` 并复刻默认 tooltip 结构 |
-| 2 | `usage.disabled` 观感分叉：vanilla 只把角标改成「（统计不可用）」、版面保持；React 目前整块替换成「用量统计已关闭」 | 需定一个 |
-| 3 | `Settings` 的 `chkPet` 在 render 期读 `window.Pet.isEnabled()`，非响应式：从桌宠浮层改开关后弹层勾选不跟着变 | vanilla 靠一行**位置错乱**在 glm 轮询回调里的 `$("chkPet").checked = ...`（`app.js:774`）顺带同步；移植时没照搬那行错位，故缺此副作用 |
-| 4 | `TestDOMIdParity` 只静态扫 `id="..."` 字面量，能证明"写出来了"、不能证明"渲染在 DOM 上"（5.2 第 2 条它就漏了；动态拼的 id 也会漏） | 渲染层判据本次是手工做的可见控件计数，未固化成测试 |
+| 1 | `valueFormatter` 是 echarts 5.3+ 的选项，本仓精确锁 4.3.0 → 写了不生效，tooltip 数值一直走 echarts 默认 `addCommas`（Y 轴的 `formatter` 是生效的，所以只有 tooltip 漏了） | **已修**：改接管整个 `tooltip.formatter`，逐字复刻 4.3.0 默认结构（`model/Series.js` `formatTooltip`：标题 + 圆点 marker + 系列名 + `': '` + 值，行间 `<br/>`），只替换数值段。实测 `323,579` → `32.4万`。默认实现会对系列名 `encodeHTML` 而 `TooltipContent.js` 是 `innerHTML` 落地，所以自定义后转义不能省——积分图系列名是用户可改的账号备注；备注填 `<img src=x onerror=…>` 实测在 tooltip 里以 `&lt;img` 文本呈现、DOM 内注入节点 0 |
+| 2 | `usage.disabled` 观感分叉：vanilla 只把角标改成「（统计不可用）」、版面保持；React 曾整块替换成一句话 | **已定并实现**：保留完整版面 + 顶部提示条（复用既有 `.risk-tip`，不加新 id 以免动 DOM 契约）。提示语按真实判据写（`disabled` = `app.ledger == nil` ← 启动期 `ledger.New` 失败，**面板侧没有开关**），不写「去设置里开启」那种假指引。实测两态可见控件**逐项相同**（15 项同名），差额只在数值填充与图表容器 `display` |
+| 3 | `chkPet` 在 render 期读 `window.Pet.isEnabled()`，非响应式 | **已修**：受控 `useState` + 订阅 `Pet.setEnabled` 广播的 `ww-pet-toggle`。vanilla 是靠 `app.js:774` 那行嵌错位置（glm 轮询回调内）的赋值顺带掩盖，移植时没照搬错位、于是暴露。实测：弹层开着时点桌宠浮层「隐藏」，勾选随之翻为 `false` 且桌宠同时消失 |
+| 4 | `TestDOMIdParity` 只静态扫 `id="..."` 字面量，证明不了「渲染在 DOM 上」 | **已补**：`tools/render-check.mjs`（见 §5.4）。它不替代 id 对账，管的是「此刻真渲染出来了没有」这一层 |
+
+### 5.4 渲染层闸门（2026-10-01 补，零新依赖）
+
+`npm --prefix cmd/wild-work/webui run check` 一次跑 `check-props` + `render-check`。
+`render-check` 用 vite `ssrLoadModule` 载源码、`react-dom/server` 渲真实分支，按
+「interactive 元素且不在 `.hidden` 子树内」数可见控件，五个场景：App 未登录外壳 /
+Accounts 未登录 / Accounts 有数据（fixture 覆盖正常·停用·签到失败·`credits_na`·不支持签到·匿名
+六种卡片分支，补的正是 5.2 第 1 条「沙箱只有匿名卡所以永远到不了那段」的盲区）/
+Settings 弹层 / Fees 弹层。
+
+控件口径已与浏览器对齐：`button|input|select|textarea` + `.icon-op|.icon-link` +
+`code.info-value`（顶栏两格「点击复制」）。同一条规则在真浏览器实测同为 **20**、id 列表逐项一致。
+⚠️ 上一轮手工记录的「20」与本闸门初版的「18」之差就是这两格 `<code>`——数字对不上时先查口径，
+别急着怀疑界面退化。
+
+已负向验证：把 5.2 第 2 条那个缺陷（未登录 early-return 成裸登录层）临时装回去，闸门 `exit 1`
+并点名缺失的 18 个控件；还原后 5/5 绿。
+
+> SSR 只渲首帧，`useEffect` 不执行，因此**取数驱动的分支（`Usage` 内部）不在本闸门覆盖范围内**——
+> §5.3 第 2 条那种类别仍需在真浏览器里用同一条规则数一遍（本文上面的实测值即这么来的）。
 
 完整遗留清单（含只能靠生产真凭据验证的 4 项、待重启/待 push）见 **AGENTS.md §10 L6.3**。
 

@@ -272,6 +272,7 @@ POST /api/quit                     # 退出程序
 # 前端产物（改了 webui/ 源码必做；产物落 cmd/wild-work/web-app/，被 embed）
 npm --prefix cmd/wild-work/webui install --no-audit --no-fund   # 首次或依赖变更
 npm --prefix cmd/wild-work/webui run build                       # 出 web-app/
+npm --prefix cmd/wild-work/webui run check                       # check-props + render-check（改前端源码后必跑）
 
 # Windows（本机直接构建，或 WSL 交叉编译）
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-H windowsgui" -o dist/wild-work.exe ./cmd/wild-work
@@ -312,6 +313,11 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 - [AGENTS.md](AGENTS.md) — 本文件：决议项（R1–R35）、架构选型、不变量
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
+- [docs/前端React重构架构计划.md](docs/前端React重构架构计划.md) — React 重构的选型签核（R5 被推翻的那次）、逐阶段 DoD 判定、
+  各闸门的负向验证记录与实测数字（体积/控件数/色值对账）。§10 L6 是结论摘要，本文是依据与过程记录。
+  > 本文件的**缺陷处置结论以 §10 L6.2/L6.3 与 `webui/FEATURES.md` §5 为准**——本文按时间顺序记录，
+  > 已处置的缺陷在其原文中仍写作「待修/待定」，不逐条回填（避免两份互相覆盖的"权威结论"）。
+  > 2026-10-01 起反选入库（此前受 `docs/*` 白名单制限制，仅本地可见）。
 
 以下备忘被 R16 / 不变量 22 / 不变量 23 等决议引用，但**尚未入库**（`.gitignore` 白名单未反选，仅本地可见）：
 `docs/opencodezen渠道接入备忘.md`、`docs/qwenwork渠道接入备忘.md`、`docs/qoderCN渠道接入备忘.md`、
@@ -394,6 +400,16 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 - 故 `go test ./...` 目前**非全绿**（仅此一处），`go build` / `go vet` 全绿。执行 §8「全绿后再构建」时须知悉此条。
 - `index.html` 的 echarts CDN `<script>` 无 SRI/`crossorigin`（上游同款），本机 origin 可被第三方脚本执行；
   上游 09-28 只是把 host 换成 `registry.npmmirror.com`（issue #47 的 3~10s 卡顿修复），未加校验。
+- **`ledger.Query` 的月份分段覆盖循环漏当月（2026-10-01 已在本仓修掉，上游未修）** —— 又一记
+  「测试全绿但仍然错」，且这次错在**业务代码**而非前端：`Query` 按「从窗口起点每 15 天取一次样」
+  收集要扫的 `usage-YYYYMM.jsonl`，`from=09-25 / now=10-01` 时第二步落到 10-10 已越过 `now` 直接结束，
+  **本月分段根本进不了集合** ⇒ 每月 1~14 日面板的 7 日视图只显示上月（上月那份不受 `trimCurrentMonth`
+  裁剪，可能留着陈旧数字），当月流水静默归零——不报错、不影响 `days=1`（`from` 就是今天），所以极难察觉。
+  实测铁证：造 `usage-202610.jsonl`（09-27…10-01 四条），10-01 当天 `?days=7` 返 `total=0` 而 `?days=1`
+  返 169134；改为按月推进后 `?days=7` 返 609933、`by_day` 覆盖到 10-01。
+  判据做在纯函数 `monthSegments(from, now)` 上而非端到端：**端到端只在每月头 14 天复现，其余日子会假绿**，
+  而那正是这个缺陷本来的形态。已负向验证（装回 15 天取样 → 4 个用例变红并点名漏掉的分段）。
+  上游出处 `d82dbcb`（融合 v2.5.4 带入）。
 
 ### L5 生产配置约束
 `config.json` 与 `dist/config.json` 的 `listen.host` 是局域网地址（非环回）→ R4 要求
@@ -416,6 +432,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   2. ✅ `main.go` embed 去掉 `all:web`、`fs.Sub` 只留 `web-app`，`handler.go` 删 `WebUINext` 与 `/next/`；
   3. ✅ exe 实测：同源码 vanilla-only 基线 16,072,740 → 迁移期峰值 16,761,806（+689,066，+4.29%）
      → 收尾后 **16,580,652（+507,912，+3.16%）**，即去掉 vanilla 那一份回落 **181,154 B**。
+     ⚠️ **这三个数已不可复现**（2026-10-01 用同 HEAD 源码重建得 16,641,509，+60,817），
+     当历史留档看，做体积对账请现测——缘由见 L6.3「仍然剩下的」第 8 条。
      ⚠️ 阶段 1 预估的「收尾后 +1.96%」是拿**空壳 bundle** 算的，作废；此处为真实面板实测值。
   4. ✅ `cmd/wild-work/web/README.md` 说明「上游参考基准，不参与 embed」；
   5. ✅ 本节与 §10 L1/L3 已标注 vanilla 不再参与 embed（§4/§5 中描述的面板**行为**仍然准确，
@@ -445,7 +463,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
    JSX 无类型，vite/esbuild/go vet 全不报。之所以躲过前几轮验证：沙箱里只有匿名账号，
    而匿名卡走 `credits_na` 提前 return，永远到不了那段。→ 补 `webui/tools/check-props.mjs`。
 2. **未登录面板塌成半张** — 可见控件 20 → 8（标签页、渠道费率、刷新积分、7 个添加按钮全没渲染）。
-   → 同后端双二进制对照才量得出来。
+   → 同后端双二进制对照才量得出来。该判据已于 2026-10-01 固化成 `webui/tools/render-check.mjs`
+   （SSR 数可见控件，口径与浏览器对齐在 20，已负向验证），见 L6.3「已处置」第 5 条。
 3. **面板宽度被静默压 27px** — tailwind 核心组件 `.container` 与本项目同名布局类撞车，
    ≥768px 视口时它的 `max-width` 盖掉面板的 980px。vendored CSS 逐字相同也照样中招，
    因为冲突来自**加载的第二份 CSS**。→ 补 `TestBuiltCSSHasNoContainerCollision` 扫产物。
@@ -453,44 +472,67 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 **教训（写死在这里）**：同源的是 CSS，不是渲染条件；token 字节相等证明不了「该出现的元素出现了」。
 凡「界面有没有变」这类问题，判据只能是**同后端对照 + 数可见控件/量几何**，不能靠比对源文件。
 
-#### L6.3 还没处理的问题（按该不该由谁决定分类）
+#### L6.3 遗留问题（2026-10-01 二次收口后）
+
+**已经处置的（原 B 类三项 + C 类两项，均所有者拍板后落地）**
+
+1. **tooltip 数值格式化**（原 B5）——已修。`valueFormatter` 是 echarts 5.3+ 的选项、本仓精确锁 4.3.0
+   （产物内计数 0），所以 tooltip 一直走 echarts 默认的 `addCommas`。改接管整个 `formatter`，
+   逐字复刻 4.3.0 的默认结构（`model/Series.js` `formatTooltip`：标题 + 圆点 marker + 系列名 + `': '` + 值，
+   行间 `<br/>`），只替换数值段。实测 `323,579` → `32.4万`。
+   ⚠️ 附带的安全约束：`TooltipContent.js` 是 `el.innerHTML = content` 落地，默认实现会对系列名
+   `encodeHTML`，自定义 formatter 后**转义不能省**——积分图系列名是用户可改的账号备注。
+   实测：备注填 `<img src=x onerror=…>` 在 tooltip 里以 `&lt;img` 文本呈现，DOM 内注入节点 0。
+2. **`usage.disabled` 观感**（原 B6）——已定为「提示条 + 保留版面」。整块替换一句话会让
+   今日/7日/30日、刷新、四张 KPI 卡、两个子 tab 全消失。实测两态可见控件**逐项相同**（15 项同名），
+   差额只在数值填充与图表容器 `display`。提示语按真实判据写：`disabled` = `app.ledger == nil`
+   ← 启动期 `ledger.New` 失败（`main.go:248-250` 只记日志不拦启动），**面板侧没有开关**，
+   所以不能写「去设置里开启」那种假指引。
+3. **`前端React重构架构计划.md` 入库**（原 B7）——已在 `.gitignore` 反选，§9 加了链接与
+   「结论以 L6.2/L6.3 + FEATURES §5 为准」的指向。
+4. **`chkPet` 非响应式**（原 C8）——已修：受控 `useState` + 订阅 `Pet.setEnabled` 广播的
+   `ww-pet-toggle`。vanilla 是靠 `app.js:774` 那行嵌错位置（glm 轮询回调内）的赋值顺带掩盖，
+   移植时没照搬错位、于是暴露。实测：弹层开着时点桌宠浮层「隐藏」，勾选随之翻为 `false`。
+5. **渲染层判据固化**（原 C10）——已补 `webui/tools/render-check.mjs`（`npm run check` 一并跑
+   `check-props`）：vite `ssrLoadModule` + `react-dom/server` 渲真实分支，按「interactive 元素
+   且不在 `.hidden` 子树内」数可见控件，五场景（App 未登录外壳 / Accounts 未登录 / Accounts 有数据
+   六种卡片分支 / Settings 弹层 / Fees 弹层）。控件口径已与真浏览器逐项对齐在 **20**
+   （`button|input|select|textarea` + `.icon-op|.icon-link` + 顶栏两格 `code.info-value`；
+   初版数到 18 的差额就是这两格）。已负向验证：把 L6.2 第 2 条缺陷装回去 → `exit 1` 点名缺失的 18 个控件。
+   ⚠️ 它仍**不覆盖取数驱动的分支**（SSR 不跑 `useEffect`），那类别再回到浏览器数一遍。
+
+**仍然剩下的**
 
 **A. 只能靠生产真凭据验证的（我这边验不了）**
 1. 积分明细 tooltip（hover 弹层 + 分页 + 有效期列存在性判据）——要 `resource_detail` 真返数据;
 2. 「刷新积分 / 全部签到」真联（含不变量 19/20 的 401 自愈 + refresh 后落盘）;
 3. glm CDP 自动登录（`glm_auto` → 真拉浏览器 → 轮询 `glm_auto_status` → 访客 token 判据）;
-4. 多渠道时图例翻页（`legendScroll` 已注册，但没有 3+ 渠道数据就没触发过真实滚动）。
-
-**B. 需要所有者拍板的（不属"修 bug"，是产品判断）**
-5. **echarts 4.3.0 下 `valueFormatter` 是死选项**（该 API 5.3+ 才有，实测产物内计数 0），
-   所以 tooltip 数值至今不走 `万/亿` 格式化（Y 轴的 `formatter` 是生效的）。
-   移植时刻意**照现状保留**以便两面板逐像素可比，没顺手改好。要不要修真修（改用 v4 的
-   `formatter` 并复刻默认 tooltip 结构）由所有者定。
-6. `/api/usage` 返回 `{disabled:true}` 时：vanilla 只把角标改成「（统计不可用）」、其余版面保持;
-   React 版目前整块替换成「用量统计已关闭」。二者观感不同，需定一个。
-7. 本文档 §9 的既有毛病：`docs/*` 白名单制使计划与验证记录**只存在于本地**，
-   而该节自己记着「部分可能已丢失，仅存在于历史会话中」。`前端React重构架构计划.md`
-   含全部实测与判据，建议追加 `!docs/前端React重构架构计划.md` 入库。
+   > ~~4. 多渠道时图例翻页~~ **已实测（2026-10-01，不需要生产凭据）**：沙箱造 7 渠道 × 7 天流水，
+   > legend 以 `type:'scroll'` 渲染成功、控制台零报错（漏注册的表现是运行期
+   > `Component legend.scroll not exists`，见 `Usage.jsx` 顶部注释）；再把 `#usageChart` 压到 240px
+   > 并派发 resize，图例带内墨迹裂成 4 组、末组贴在 x=216~239 —— 即翻页控件真的出来了。
+   > 判据来源：`getImageData` 采样画布像素（echarts 的 legend 画在 canvas 上，没有 DOM 可查）。
+   > 这条从 A 类摘掉是因为它落在**合成数据可覆盖**的范围里；上面 1–3 条仍要真上游凭据，
+   > 且都在 render-check 的盲区（取数驱动 / 真上游），**没有闸门兜住**，别当成已验证。
 
 **C. 已知但低影响 / 有意为之**
-8. `Settings` 里 `chkPet` 在 render 期读 `window.Pet.isEnabled()`，非响应式：
-   从桌宠自己的浮层改开关后，弹层里的勾选不会立刻跟着变（vanilla 靠一行**位置错乱**在
-   glm 轮询回调里的 `$("chkPet").checked = Pet.isEnabled()` 顺带同步，移植时没照搬那行错位）。
-9. 我给两个主 tab 加了 `mtabBtnAccounts`/`mtabBtnUsage` 两个 id（vanilla 用 `.main-tabs .mtab` 选类）——
+5. 我给两个主 tab 加了 `mtabBtnAccounts`/`mtabBtnUsage` 两个 id（vanilla 用 `.main-tabs .mtab` 选类）——
    属新增，非缺失。
-10. `TestDOMIdParity` 是**静态扫 JSX 里的 `id="..."` 字面量**：能证明"这个 id 有被写出来"，
-    不能证明"它此刻真渲染在 DOM 上"。L6.2 第 2 条那个缺陷它就是没抓住——动态拼出来的 id
-    也会漏。要覆盖渲染层，得靠可见控件计数那种浏览器判据（本次手工做过，未固化成测试）。
-11. `go test ./...` 有**一处既有失败**：`internal/cdp` 的 `TestWriteDoesNotHangClose`
-    （纯上游同样复现，见 §10 L4），非本次引入。
-12. `dist/wild-work.exe`（Windows）只验过**体积与二进制内嵌标记**，从未在本机执行过
-    （Linux 环境）。它的实际运行表现要等所有者在 Windows 上确认。
+6. `go test ./...` 有**一处既有失败**：`internal/cdp` 的 `TestWriteDoesNotHangClose`
+   （纯上游同样复现，见 §10 L4），非本次引入。
+7. `dist/wild-work.exe`（Windows）只验过**体积与二进制内嵌标记**，从未在本机执行过（Linux 环境）。
+   它的实际运行表现要等所有者在 Windows 上确认。
+8. ⚠️ **上面 L6 收尾清单第 3 条（本文件 line ~434）记的 exe 体积不可复现**：用**当前 HEAD 源码**重建
+   `dist/wild-work-linux` 得 16,641,509 B，而 2026-10-01 09:30 那份产物是 16,580,692 B（记录值 16,580,652），
+   差 **+60,817 B**；本次改动本身实测只值 +1.00 kB bundle（649.42 → 650.42 kB）。
+   即那份基线是在一个**更早的 web-app bundle** 上量的（`web-app/` 被 gitignore，无从比对哈希，
+   原产物已被覆盖，无法归因）。今后做体积对账请现测，不要引用这几个数。
 
 **D. 待办动作**
-13. 生产 daemon（`10.20.15.118:7863`）仍在跑旧二进制里的 vanilla 面板，`/proc/<pid>/exe` 指向
-    `(deleted)`。磁盘上的 `dist/` 已是 React 版，**要重启才生效**；因监听局域网地址、
-    重启会瞬断其他设备的客户端，须所有者点头。
-14. 未 push（`xiaoyi728/wild-work` 私有仓仍是旧的）。
+9. 生产 daemon（`10.20.15.118:7863`，PID 2948815，2026-09-29 启动）仍在跑旧二进制里的 vanilla 面板，
+   `/proc/<pid>/exe` 指向 `(deleted)`。磁盘上的 `dist/` 已是 React 版 + 本轮三处修复，**要重启才生效**；
+   因监听局域网地址、重启会瞬断其他设备的客户端，须所有者点头。
+10. 未 push（`xiaoyi728/wild-work` 私有仓仍是旧的）。
 
 - **已知有意行为差异**（不是 bug，别再"修回去"）：
   - `echartsCdn` 这个 id 消失（echarts 改 npm 按需引入，不再有 CDN `<script>`，L4 记的无 SRI 隐患随之消除）；

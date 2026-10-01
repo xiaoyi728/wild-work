@@ -18,7 +18,7 @@ const keepPlaceholder = {
 
 export default defineConfig({
   plugins: [react(), keepPlaceholder],
-  base: '/next/',
+  base: '/',
   build: {
     outDir: '../web-app',
     emptyOutDir: true,

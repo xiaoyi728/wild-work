@@ -64,7 +64,7 @@ function NavShell({ state, theme, toggleTheme, onSettings, onHelp, onAbout, onCo
     <nav className="topbar">
       <div className="topbar-inner">
         <div className="brand">
-          <img className="logo" src="/next/logo64.png" alt="logo" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+          <img className="logo" src={import.meta.env.BASE_URL + "logo64.png"} alt="logo" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
           <div className="brand-text">
             <div className="title">wild-work <span className="ver" id="ver">{state ? `v${state.version}` : ''}</span></div>
             <div className="sub" id="serverLine">{state ? (state.running ? '服务运行中' : '服务未启动') : ''}</div>

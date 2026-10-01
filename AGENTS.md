@@ -406,16 +406,27 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   `web_field_contract_test.go` 字段级契约（`/api/state` 36 个字段路径，反射 + 内联 map 源码扫描）；
   `web_theme_tokens_test.go` 三主题渠道色对账 + 禁止 tailwind `dark:` 变体。
   **这些闸门的价值在于能变红**，均已做过负向验证（改一个 id 名、删一行 `CH_VAR` 映射都会报精确位置）。
-- **迁移期双份 embed**：`/` = vanilla（生产在用），`/next/` = React。Go 侧改动是
-  `main.go`（embed 两路 + `fs.Sub` 两次）与 `server.Config.WebUINext` + 一段挂载块，**不碰业务代码**。
-- 收尾清单（阶段 3 完成后执行，一次做完）：
-  1. `vite.config.js` 的 `base` 从 `'/next/'` 改回 `'/'`；
-  2. `main.go` embed 去掉 `all:web`、`fs.Sub` 只留 `web-app`，`handler.go` 删 `WebUINext` 与 `/next/` 挂载；
-  3. exe 回落约 245 KB（实测迁移期 +3.52% → 收尾后 +1.96%）；
-  4. `cmd/wild-work/web/` 保留但加 README 说明「上游参考基准，不参与 embed」；
-  5. 更新本文 §5/§4 中引用 vanilla 面板行为的小节。
+- **迁移期双份 embed 已结束**（2026-09-30 收尾）。当时 `/` = vanilla（生产在用）、`/next/` = React，
+  Go 侧改动是 `main.go`（embed 两路 + `fs.Sub` 两次）与 `server.Config.WebUINext` + 一段挂载块。
+  现已全部回删：embed 只剩 `all:web-app`，`WebUINext` 与 `/next/` 挂载已移除。
+- **收尾清单已执行完毕**（一次做完的 5 项）：
+  1. ✅ `vite.config.js` 的 `base` 从 `'/next/'` 改回 `'/'`；
+     同时把两处硬编码 `/next/logo64.png` 改成 `import.meta.env.BASE_URL` 拼接 ——
+     否则挂载点一变就静默 404，不必每次收尾再手改一遍。
+  2. ✅ `main.go` embed 去掉 `all:web`、`fs.Sub` 只留 `web-app`，`handler.go` 删 `WebUINext` 与 `/next/`；
+  3. ✅ exe 实测：同源码 vanilla-only 基线 16,072,740 → 迁移期峰值 16,761,806（+689,066，+4.29%）
+     → 收尾后 **16,580,652（+507,912，+3.16%）**，即去掉 vanilla 那一份回落 **181,154 B**。
+     ⚠️ 阶段 1 预估的「收尾后 +1.96%」是拿**空壳 bundle** 算的，作废；此处为真实面板实测值。
+  4. ✅ `cmd/wild-work/web/README.md` 说明「上游参考基准，不参与 embed」；
+  5. ✅ 本节与 §10 L1/L3 已标注 vanilla 不再参与 embed（§4/§5 中描述的面板**行为**仍然准确，
+     因为 React 版是按同样语义移植的；变的只是实现位置）。
+- 二进制内容复核（收尾后实测）：`node_modules` 计数 0、`/next/` 计数 0、
+  vanilla 的 `function renderAccounts` 已不在包内。
 - **已知有意行为差异**（不是 bug，别再"修回去"）：
   - `echartsCdn` 这个 id 消失（echarts 改 npm 按需引入，不再有 CDN `<script>`，L4 记的无 SRI 隐患随之消除）；
   - `creditTip` 由 vanilla 的运行期 `createElement` 变成 JSX 常驻节点；
   - 首屏总量 vanilla 995,000 B（含 CDN echarts 751,806 B）vs React 756,036 B ⇒ −24.0%，
     但**本地传输 +210.9%**——echarts 从网络搬进二进制的必然代价，换来断网可用与 3~10s CDN 卡顿消失。
+  - 未登录时桌宠轮询 `/api/pulse`、`/api/state` 会在浏览器网络日志里留一串 401。
+    这是 L2 的**设计行为**（`petGet` 遇非 2xx 返回 null、静默跳过、登录后自愈），
+    vanilla 的桌宠同样如此，不是 React 引入的回归，别去"修"成静默。

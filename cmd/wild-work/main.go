@@ -25,9 +25,9 @@ import (
 	"wild-work/internal/auth"
 	"wild-work/internal/config"
 	"wild-work/internal/gateway"
+	"wild-work/internal/glm"
 	"wild-work/internal/ledger"
 	"wild-work/internal/oczen"
-	"wild-work/internal/glm"
 	"wild-work/internal/platform"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
@@ -43,7 +43,7 @@ import (
 	"wild-work/internal/workbuddyai"
 )
 
-//go:embed all:web all:web-app
+//go:embed all:web-app
 var webFS embed.FS
 
 //go:embed build/trayicon.ico
@@ -350,14 +350,9 @@ func main() {
 	glmSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("glm", uid, ok, msg) })
 
 	// HTTP handler：OpenAI 端点 + Web UI + 管理 API
-	sub, err := fs.Sub(webFS, "web")
-	if err != nil {
-		fatal("embed web: %v", err)
-	}
-	// 迁移期过渡挂载：vanilla 在服务用的根路径，React 产物在 /next/，两者共存，
-	// 逐片移植时可同屏对照。embed 的是仓库里的 web-app/（npm 产物），
-	// 未跑过 npm build 时该目录只有 .gitkeep，/next/ 就是空页 —— 不影响根路径面板。
-	nextSub, err := fs.Sub(webFS, "web-app")
+	// embed 目标只有 web-app/（vite 产物）。cmd/wild-work/web/ 里的 vanilla 面板
+	// 已不参与 embed，只作为上游融合的 diff 基准保留（AGENTS.md 决议 R5 / §10 L6）。
+	sub, err := fs.Sub(webFS, "web-app")
 	if err != nil {
 		fatal("embed web-app: %v", err)
 	}
@@ -370,7 +365,6 @@ func main() {
 		ErrThreshold: cfg.Cooldown.ErrThresh,
 		ErrCooldown:  cfg.ErrCooldownDur,
 		WebUI:        sub,
-		WebUINext:    nextSub,
 		AttachAPI:    appInst.HandleAPI,
 	})
 

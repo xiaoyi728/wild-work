@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -192,23 +191,8 @@ func TestSingleAccountDoesNotRotate(t *testing.T) {
 	t.Logf("✅ 单账号语义保持：调用 %d 次、原文透传 401、账号未被禁用", len(calls))
 }
 
-// TestGLMNotSingleAccount 回归：GLM 的 Runtime 装配不得再带 SingleAccount。
-//
-// 这条锁死我这次修的 bug——若将来有人又给它加上，测试立刻失败。
-func TestGLMNotSingleAccount(t *testing.T) {
-	// 从 main.go 的装配语义出发：这里断言「多账号池 + 非 SingleAccount」
-	// 能正常轮换（用上面的 TestMultiAccountRotatesOnSessionDead 已证明）。
-	// 本测试额外检查 provider.GLM 常量存在且非 oczen。
-	if provider.GLM.String() != "glm" {
-		t.Errorf("provider.GLM = %q, want glm", provider.GLM.String())
-	}
-	if provider.GLM == provider.Oczen {
-		t.Error("GLM 不应与 oczen 同值")
-	}
-	// 序列化检查：Runtime 零值 SingleAccount 应为 false
-	rt := Runtime{Kind: provider.GLM}
-	if rt.SingleAccount {
-		t.Error("GLM Runtime 的 SingleAccount 零值应为 false")
-	}
-	_ = json.Marshal
-}
+// TestGLMNotSingleAccount 已删除：它断言的全是常量与 Go 零值（provider.GLM.String()=="glm"、
+// Runtime{} 的 SingleAccount 零值为 false），**从未读过 main.go 的装配**，因此永远不可能失败——
+// 而它的注释却写着「若将来有人又给它加上，测试立刻失败」。真正的守卫改在
+// cmd/wild-work/single_account_test.go（静态扫 main.go，双向锁死：带 SingleAccount=true
+// 的渠道集合必须恰为 {oczen}）。留着一条不可能红的测试比没有更糟：它会让 R24 看起来有人守着。

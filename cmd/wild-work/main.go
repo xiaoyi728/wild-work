@@ -167,9 +167,9 @@ func main() {
 		qodercom.EnsureFingerprint(a) // 老凭证补机器指纹
 		qcmPool.Add(a)
 	}
-	// 智谱清言：与其它渠道同为多账号池（可加多个 refresh_token），
-	// 但每个账号不可人工恢复（refresh_token 轮换后旧值即失效），
-	// 故 Runtime 置 SingleAccount —— 见 runtimes 装配处的说明。
+	// 智谱清言：正常多账号池（可加多个 refresh_token），**不设 SingleAccount** —— 见下方
+	// runtimes 装配处的说明与 AGENTS.md R24（曾误设，导致账号 A 失效时永不切 B）。
+	// 其真实约束只有一条：refresh_token 轮换必须落盘，由 glm.RefreshToken 内部保证。
 	glmPool := pool.New(filepath.Join(stateDir, "state-glm.json"))
 	for _, a := range glmAuths {
 		glmPool.Add(a)
@@ -206,7 +206,7 @@ func main() {
 	// ⚠️ 只改 HTTP（非流式）的 Timeout。
 	// **不要**给 glmUp.StreamHTTP 设 Timeout —— 流式请求一旦有整体超时，
 	// 长回答会在超时点被掐断且无终止帧（实测 2026-09-27 触发 5 次）。
-	// 两者共用同一 Transport，故代理只需套 HTTP 即可（见下方 applyProxies）。
+	// 注意：这**不**意味着代理只套 HTTP 就够 —— 恰恰相反，见下方 applyProxies（R35）。
 	glmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 
 	// 单渠道上游代理：config.proxies 按 kind 套到各渠道 HTTP client 上（未配置 = 直连）。

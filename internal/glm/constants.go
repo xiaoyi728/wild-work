@@ -14,8 +14,11 @@
 //     实测与对话联动（界面文案「对话后记得回来领取打卡进度」），
 //     故保活与签到串成「先对话后签到」一个流程（见 checkin.go）。
 //
-// 单账号渠道：一个 refresh_token 一个号，且不可人工恢复，故 Runtime 置 SingleAccount
-// （任何账号级惩罚都等于整条渠道下线，见 server.Runtime.SingleAccount）。
+// **多账号渠道**：可加多个 refresh_token，Runtime **不设** SingleAccount（AGENTS.md R24，
+// 2026-09-26 修正）。初版误设为单账号，理由「凭据轮换后不可人工恢复」并不成立
+// （CDP 自动登录可随时补号），而该语义会让 handler 短路全部账号级惩罚 ⇒
+// 账号 A 失效/限流时永不切 B，多账号形同虚设。唯一真实约束是「refresh_token 轮换必须落盘」，
+// 由本包 RefreshToken 保证（落盘失败显式报错）。
 package glm
 
 import (

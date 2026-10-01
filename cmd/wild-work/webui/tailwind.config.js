@@ -7,7 +7,15 @@ export default {
   // （试过 darkMode:false，tailwind 明确警告它已等同 media，起不到关闭作用；
   //   真正的约束由 internal/app/web_theme_tokens_test.go 扫源码里不得出现 dark: 来兜。）
   theme: { extend: {} },
-  // preflight 关掉：它会重置本项目已有的 Apple/Paper 视觉层元素默认样式
-  corePlugins: { preflight: false },
+  corePlugins: {
+    // preflight 关掉：它会重置本项目已有的 Apple/Paper 视觉层元素默认样式
+    preflight: false,
+    // container 也关掉 —— 这是真踩到的坑：本项目自己的布局类就叫 .container
+    // （style.css:84 `max-width: 980px`），而 tailwind 的核心组件恰好也叫 .container，
+    // 且按断点注入 max-width。@tailwind components 一开，768px 断点起那条规则就
+    // 静默把面板宽度压成 768px（实测 vanilla 795 vs React 768），
+    // vendored CSS 逐字相同也照样中招 —— 因为冲突来自加载的第二份 CSS，不是本项目那份。
+    container: false,
+  },
   plugins: [],
 };

@@ -182,3 +182,42 @@ func TestNoTailwindDarkVariants(t *testing.T) {
 		t.Errorf("源码里出现 tailwind dark: 变体 %v —— 主题只能有一套机制，请改用 tokens.css 的 CSS 变量", hits)
 	}
 }
+
+// TestBuiltCSSHasNoContainerCollision 守的是一类很阴的回归：构建产物里出现
+// 第二条 .container 规则，静默改掉面板宽度。
+//
+// 真实经过：本项目自己的布局类叫 .container（style.css:84 max-width:980px），
+// 而 tailwind 的**核心组件**恰好也叫 .container 并按断点注入 max-width。
+// 一旦 @tailwind components 生效，视口 ≥768px 时它就把面板压成 768px。
+// 当时 vendored 的 style.css 与上游逐字相同、token 颜色全部字节相等，
+// 所以四道闸门与像素比对全绿——冲突来自加载的第二份 CSS，不在本项目那份里。
+// 判据只能落在产物上：数 .container 规则，且宽度必须是 980px。
+func TestBuiltCSSHasNoContainerCollision(t *testing.T) {
+	dir := filepath.Join("..", "..", "cmd", "wild-work", "web-app", "assets")
+	fs, err := os.ReadDir(dir)
+	if err != nil {
+		t.Skip("web-app/ 尚未产出（未跑 npm build）")
+	}
+	var checked int
+	containerRuleRe := regexp.MustCompile(`\.container\s*\{([^}]*)\}`)
+	for _, f := range fs {
+		if !strings.HasSuffix(f.Name(), ".css") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, f.Name()))
+		if err != nil {
+			continue
+		}
+		checked++
+		for _, m := range containerRuleRe.FindAllStringSubmatch(string(b), -1) {
+			if !strings.Contains(m[1], "max-width:980px") && !strings.Contains(m[1], "max-width: 980px") {
+				t.Errorf("%s 里有一条 .container 规则未声明 max-width:980px：%s —— "+
+					"疑似第三方框架的同名组件类覆盖了面板布局（tailwind container 曾把 795px 压成 768px）",
+					f.Name(), strings.TrimSpace(m[0]))
+			}
+		}
+	}
+	if checked == 0 {
+		t.Skip("web-app/assets 下没有 css（未跑 npm build）")
+	}
+}

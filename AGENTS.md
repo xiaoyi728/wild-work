@@ -422,6 +422,76 @@ git tag vX.Y.Z && git push origin vX.Y.Z
      因为 React 版是按同样语义移植的；变的只是实现位置）。
 - 二进制内容复核（收尾后实测）：`node_modules` 计数 0、`/next/` 计数 0、
   vanilla 的 `function renderAccounts` 已不在包内。
+
+#### L6.1 完成了什么（2026-10-01 收口，11 个 commit）
+
+| 阶段 | 交付 | 判据 |
+|---|---|---|
+| 0 | 三道闸门 + `FEATURES.md` 核对单 | 端点/字段/id 三类集合差均可变红（已逐个负向验证） |
+| 1 | webui 骨架 + 会话链路 | 真实浏览器：401→登录层→cookie→`/api/state`→渲染 |
+| 2 | `tokens.css` 三主题 + OKLCH + 字号阶梯 | 51 对 hex/oklch **画出来像素逐通道相等** |
+| 3+4 | 面板功能全量移植 + 桌宠接入 | 6 卡各状态逐项核对；改名/停用真写穿磁盘 |
+| 5+6 | 构建链固化 + 本文档 | `go build/vet` 全绿 |
+| 收尾 | React 提到 `/`，vanilla 退为基准 | 未登录可见控件 20 vs 20 同后端对照 |
+| 修补 | 3 个真实缺陷（见 L6.2） | 各自配负向验证 |
+
+规模：**44 文件 / +8366 / −9**，其中 40 个纯新增、只改 4 个既有文件。
+**业务代码零改动**（`internal/` 除新增测试外无一个既有 .go 被改；`handler.go` 迁移期加过
+`WebUINext` 收尾又删，净变化为零）；上游 vanilla `cmd/wild-work/web/` 一字节未动。
+
+#### L6.2 过程中修掉的三个「测试全绿但仍然错」的缺陷
+
+1. **整页白屏崩溃** — `CreditValue` 声明 `{ account }`、调用点写 `a={a}`。
+   JSX 无类型，vite/esbuild/go vet 全不报。之所以躲过前几轮验证：沙箱里只有匿名账号，
+   而匿名卡走 `credits_na` 提前 return，永远到不了那段。→ 补 `webui/tools/check-props.mjs`。
+2. **未登录面板塌成半张** — 可见控件 20 → 8（标签页、渠道费率、刷新积分、7 个添加按钮全没渲染）。
+   → 同后端双二进制对照才量得出来。
+3. **面板宽度被静默压 27px** — tailwind 核心组件 `.container` 与本项目同名布局类撞车，
+   ≥768px 视口时它的 `max-width` 盖掉面板的 980px。vendored CSS 逐字相同也照样中招，
+   因为冲突来自**加载的第二份 CSS**。→ 补 `TestBuiltCSSHasNoContainerCollision` 扫产物。
+
+**教训（写死在这里）**：同源的是 CSS，不是渲染条件；token 字节相等证明不了「该出现的元素出现了」。
+凡「界面有没有变」这类问题，判据只能是**同后端对照 + 数可见控件/量几何**，不能靠比对源文件。
+
+#### L6.3 还没处理的问题（按该不该由谁决定分类）
+
+**A. 只能靠生产真凭据验证的（我这边验不了）**
+1. 积分明细 tooltip（hover 弹层 + 分页 + 有效期列存在性判据）——要 `resource_detail` 真返数据;
+2. 「刷新积分 / 全部签到」真联（含不变量 19/20 的 401 自愈 + refresh 后落盘）;
+3. glm CDP 自动登录（`glm_auto` → 真拉浏览器 → 轮询 `glm_auto_status` → 访客 token 判据）;
+4. 多渠道时图例翻页（`legendScroll` 已注册，但没有 3+ 渠道数据就没触发过真实滚动）。
+
+**B. 需要所有者拍板的（不属"修 bug"，是产品判断）**
+5. **echarts 4.3.0 下 `valueFormatter` 是死选项**（该 API 5.3+ 才有，实测产物内计数 0），
+   所以 tooltip 数值至今不走 `万/亿` 格式化（Y 轴的 `formatter` 是生效的）。
+   移植时刻意**照现状保留**以便两面板逐像素可比，没顺手改好。要不要修真修（改用 v4 的
+   `formatter` 并复刻默认 tooltip 结构）由所有者定。
+6. `/api/usage` 返回 `{disabled:true}` 时：vanilla 只把角标改成「（统计不可用）」、其余版面保持;
+   React 版目前整块替换成「用量统计已关闭」。二者观感不同，需定一个。
+7. 本文档 §9 的既有毛病：`docs/*` 白名单制使计划与验证记录**只存在于本地**，
+   而该节自己记着「部分可能已丢失，仅存在于历史会话中」。`前端React重构架构计划.md`
+   含全部实测与判据，建议追加 `!docs/前端React重构架构计划.md` 入库。
+
+**C. 已知但低影响 / 有意为之**
+8. `Settings` 里 `chkPet` 在 render 期读 `window.Pet.isEnabled()`，非响应式：
+   从桌宠自己的浮层改开关后，弹层里的勾选不会立刻跟着变（vanilla 靠一行**位置错乱**在
+   glm 轮询回调里的 `$("chkPet").checked = Pet.isEnabled()` 顺带同步，移植时没照搬那行错位）。
+9. 我给两个主 tab 加了 `mtabBtnAccounts`/`mtabBtnUsage` 两个 id（vanilla 用 `.main-tabs .mtab` 选类）——
+   属新增，非缺失。
+10. `TestDOMIdParity` 是**静态扫 JSX 里的 `id="..."` 字面量**：能证明"这个 id 有被写出来"，
+    不能证明"它此刻真渲染在 DOM 上"。L6.2 第 2 条那个缺陷它就是没抓住——动态拼出来的 id
+    也会漏。要覆盖渲染层，得靠可见控件计数那种浏览器判据（本次手工做过，未固化成测试）。
+11. `go test ./...` 有**一处既有失败**：`internal/cdp` 的 `TestWriteDoesNotHangClose`
+    （纯上游同样复现，见 §10 L4），非本次引入。
+12. `dist/wild-work.exe`（Windows）只验过**体积与二进制内嵌标记**，从未在本机执行过
+    （Linux 环境）。它的实际运行表现要等所有者在 Windows 上确认。
+
+**D. 待办动作**
+13. 生产 daemon（`10.20.15.118:7863`）仍在跑旧二进制里的 vanilla 面板，`/proc/<pid>/exe` 指向
+    `(deleted)`。磁盘上的 `dist/` 已是 React 版，**要重启才生效**；因监听局域网地址、
+    重启会瞬断其他设备的客户端，须所有者点头。
+14. 未 push（`xiaoyi728/wild-work` 私有仓仍是旧的）。
+
 - **已知有意行为差异**（不是 bug，别再"修回去"）：
   - `echartsCdn` 这个 id 消失（echarts 改 npm 按需引入，不再有 CDN `<script>`，L4 记的无 SRI 隐患随之消除）；
   - `creditTip` 由 vanilla 的运行期 `createElement` 变成 JSX 常驻节点；

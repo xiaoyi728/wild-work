@@ -1,6 +1,7 @@
 # 面板功能核对单 · vanilla → React 移植基线
 
 > 生成于 2026-09-30，来源：`cmd/wild-work/web/`（上游 v2.5.4 + 本地视觉层）全文穷举。
+> **2026-10-01 状态：移植已完成，面板已提到根路径 `/`。本文件仍是下次融合的功能基准。**
 > 用法：移植完成的判据是本文件每一节都能逐条打勾，**一个都不能少**。
 > 配套闸门：`internal/app/web_contract_test.go`（端点级）+ `web_field_contract_test.go`（字段级）。
 > 本目录 `webui/` 是 React **源码**；构建产物必须输出到 `../web-app/`。两者混用会把
@@ -212,10 +213,37 @@ ledger kinds(earn/spend/expire) :1378 · glm 状态串 :759 · 掩码哨兵 `"�
 
 ---
 
-## 5. 已知现存缺陷（移植时顺手处理，别原样复刻）
+## 5. 缺陷处置结论（本表是权威记录，别再回去读 vanilla 猜结论）
 
-- `app.js:333` `state.accounts.length` 无兜底，同文件 634/1104 却用了 `|| []` —— 口径不一致。
-- `app.js:1423` `CH_VAR` 只映射 8 渠道、**缺 `glm`**，智谱清言折线走 `--accent` 兜底而非 `--glm`。
+### 5.1 vanilla 带来的、已在 React 侧修掉的
+
+| 缺陷 | vanilla 出处 | 处置 |
+|---|---|---|
+| `state.accounts.length` 无兜底（同文件 634/1104 却用 `\|\| []`，口径不一致） | `app.js:333` | React 侧统一为 `state ? (state.accounts \|\| []) : []`；`checkinAll` 同样加了守卫（未登录点它会崩） |
+| `CH_VAR` 只映射 8 渠道、**缺 `glm`**，智谱清言折线走 `--accent` 兜底 | `app.js:1423` | 修在 `src/channelColors.js`（10 渠道齐）。vanilla 不动 —— 它是融合 diff 基准。**面板已提到 `/`，所以对用户而言这个 bug 实际已消失** |
+| 渠道清单硬编码，新增渠道会悄悄掉进 `--accent` | 同上 | 闸门 `TestChannelColorVarsAllMapped` 改为从 `feeChannelOrder` 推导，加渠道即报警 |
+
+### 5.2 移植过程中**新引入又修掉**的三个（都是"测试全绿但仍然错"）
+
+1. `CreditValue` 声明 `{ account }`、调用点 `a={a}` → 有积分的卡一渲染就整页白屏。
+   躲过前几轮验证只因沙箱只有匿名卡（走 `credits_na` 提前 return）。→ 补 `tools/check-props.mjs`。
+2. 未登录时面板操作区整块没渲染（可见控件 20 → 8）。→ 同后端双二进制对照才量得出。
+3. tailwind 核心组件 `.container` 与本项目同名布局类撞车，面板被静默压窄 27px。
+   vendored CSS 逐字相同也中招，因为冲突来自**加载的第二份 CSS**。→ `corePlugins.container=false`
+   + `TestBuiltCSSHasNoContainerCollision` 扫产物。
+
+**判据教训**：同源的是 CSS，不是渲染条件；token 字节相等证明不了「该出现的元素出现了」。
+
+### 5.3 仍然存在、需要所有者拍板的
+
+| # | 事项 | 现状 |
+|---|---|---|
+| 1 | `valueFormatter` 在 echarts **4.3.0 下是死选项**（该 API 5.3+ 才有，实测产物内计数 0），tooltip 数值不走 `万/亿` 格式化（Y 轴 `formatter` 生效） | 刻意**照现状保留**以便两面板逐像素可比，没顺手改好。要修就得改用 v4 `formatter` 并复刻默认 tooltip 结构 |
+| 2 | `usage.disabled` 观感分叉：vanilla 只把角标改成「（统计不可用）」、版面保持；React 目前整块替换成「用量统计已关闭」 | 需定一个 |
+| 3 | `Settings` 的 `chkPet` 在 render 期读 `window.Pet.isEnabled()`，非响应式：从桌宠浮层改开关后弹层勾选不跟着变 | vanilla 靠一行**位置错乱**在 glm 轮询回调里的 `$("chkPet").checked = ...`（`app.js:774`）顺带同步；移植时没照搬那行错位，故缺此副作用 |
+| 4 | `TestDOMIdParity` 只静态扫 `id="..."` 字面量，能证明"写出来了"、不能证明"渲染在 DOM 上"（5.2 第 2 条它就漏了；动态拼的 id 也会漏） | 渲染层判据本次是手工做的可见控件计数，未固化成测试 |
+
+完整遗留清单（含只能靠生产真凭据验证的 4 项、待重启/待 push）见 **AGENTS.md §10 L6.3**。
 
 ---
 

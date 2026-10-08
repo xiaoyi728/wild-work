@@ -713,3 +713,16 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   `style.css` 的 `.btn.primary.alt.<kind>` 背景。
 - **导入型渠道的弹层三分支**：普通（浏览器授权）/ 导入型（只打 `/api/account/import_local`）/ 双入口（raccoon，R41 协议回调），
   判据是 `isImportLocal()` 与 `hasProtocolLogin()`；导入失败时后端 `note` 必须透出（已装/未登录官方客户端的降级提示不能吞）。
+
+### L10 2026-10-08 README 重写为「本仓库视角」+ 删交流群
+- **起因**：README 此前与 `upstream/master` 逐字一致（纯上游文案），既没写本地能力，也把渠道数写成「十一渠道」
+  ——实际界面 12 个（漏 `glm` 智谱清言），测试数写 62 也已过时（同步后 98 个）。
+- **改法**：新增「本仓库说明」表（React 面板 / 桌宠 / 运行统计 / 端点防护 / 记账修正五项本地能力）+「架构」节
+  （目录树、运行时 Go 1.25 仅两直接依赖、`data/` 落盘清单、测试闸门），功能节改写为十二渠道并补 v2.6.2 新能力
+  （同请求换号、模型级冷却、300s 空闲监控、导入型渠道、托盘三态图标）；压缩冗长示例（Pi 配置只留 2 个模型）、
+  删掉个人吐槽式 FAQ 条目；徽章与 Releases 链接改指本 fork + 上游。
+- **删「交流群」整节**，连带删除 `wechat_group.jpg`（166 KB，删节后全仓零引用）——此为相对上游的本地偏离。
+- **口径纪律**：README 里的数字必须现查现写。本轮逐项核实：面板 `/api/*` 端点 34 个、推理端点 6 个
+  （`internal/server/handler.go:144-145` 的 chat/completions + models，`internal/gateway/gateway.go:120-124` 的
+  responses/messages/count_tokens/systemone）、`_test.go` 98 个、`data/stats.json`（`internal/stats/stats.go:280`）、
+  托盘单条目 `build/trayicon.ico`（`cmd/wild-work/main.go:595`，OpenUI/OpenLog/Quit，退出先 `systray.Quit(3s)` 摘图标）。

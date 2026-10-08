@@ -1,7 +1,7 @@
 # wild-work 开发者文档（面向 AI Agent）
 
 > 本文件为**代码维护者（含 AI Agent）**而写，供新 Agent 快速接手二次开发。
-> 普通用户请看 [README.md](README.md)，项目决议见 [AGENTS.md](AGENTS.md)，交接记录见 [HANDOFF.md](HANDOFF.md)。
+> 普通用户请看 [README.md](README.md)，项目决议见 [AGENTS.md](AGENTS.md)。
 
 ## 0. 项目速览
 
@@ -209,8 +209,16 @@ type Upstream interface {
 
 ### 构建
 
+**先出前端产物再编 Go**：`//go:embed` 的是 `cmd/wild-work/web-app/`（构建产物），不是 `webui/src/`。
+改了前端源码不先跑 npm build，exe 里会静静躺着旧面板且**不报任何错**。
+
 ```bash
-# Windows（WSL 交叉编译）
+# 1) 前端产物（改了 webui/ 源码必做；产物落 cmd/wild-work/web-app/，被 embed）
+npm --prefix cmd/wild-work/webui install --no-audit --no-fund   # 首次或依赖变更
+npm --prefix cmd/wild-work/webui run check                       # 渲染闸门，改前端源码后必跑
+npm --prefix cmd/wild-work/webui run build                       # 出 web-app/
+
+# 2) Go（Windows 走 WSL 交叉编译）
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-H windowsgui" -o dist/wild-work.exe ./cmd/wild-work
 
 # macOS（需要 macOS 真机或 CI，cgo 必需）

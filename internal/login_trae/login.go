@@ -50,6 +50,19 @@ type state struct {
 func NewClient() *http.Client { return &http.Client{Timeout: 30 * time.Second} }
 
 // Start 启动本地一次性回调监听，返回 Trae 授权 URL。
+//
+// 设备号作用域是「登录会话」，不是「本机」（issue #60/#70，R37 第二次修订）：
+// 每次 Start 都新生成一对 machineId/deviceId，随登录流程走完落进
+// auths/trae-<uid>.json —— 从此成为该账号的稳定注册设备（#3：x-device-id 必须是
+// 注册设备，否则 9074；签到/对话头均从 auth 文件读，重登/刷新不经过这里）。
+//   - 旧实现（本机级 device-id.json 全局复用）被 #70 实测证伪：一机挂 N 号 →
+//     共用设备号的账号全部撞 4017 风控（15 号对照：共享组 3 号全中、一机一号组 0 中）；
+//   - 同时它也是 #60 的根因：同一编造设备号被多账号先后绑定后，新账号授权
+//     直接 20401 Device limit reached。随机新会话号即可消解两者，无需读官方
+//     客户端真实设备号（需移植 storage.json TC 解密且依赖本机装官方客户端）。
+//
+// 注意：不能复用 login-state.json 本身——它承载的一次性登录状态（authCode/verifier）
+// 在登录成功/取消时会被删除。
 func Start(client *http.Client, statePath string) (string, error) {
 	machineID := randHex(32)                          // 真实客户端 64 位 hex（32 字节）
 	deviceID := randNumericID()                       // 真实客户端 15 位数字设备 ID（首次绑定随机产生）
@@ -174,6 +187,20 @@ func Poll(client *http.Client, statePath string) (Result, error) {
 		// PKCE 新流程：AuthCode + codeVerifier + 设备公钥交换
 		res, err := c.ExchangeAuthCode(a, st.AuthCode, st.CodeVerifier)
 		if err != nil {
+			// 终端性 4xx 拒绝：authCode 已一次性耗尽，重试无意义。把错误固化到 state.Err，
+			// 并清空 AuthCode，让后续轮询经顶部 `st.Err != ""` 短路直接返回可行动错误
+			// （而不再每 2s 重复消耗同一次性 authCode 刷屏日志）。
+			// 注意 ExchangeAuthCode 对 429/408/5xx/传输层还是会换 origin 重试并在全部失败
+			// 后返回普通 error——此处仅对 *AuthCodeRejectedError 判断为可固化终态。
+			var rej *traework.AuthCodeRejectedError
+			if errors.As(err, &rej) {
+				st.AuthCode = ""
+				st.Err = err.Error()
+				if traework.IsDeviceLimitReached(rej) {
+					st.Err = "设备数量已达上限：请到其它设备登出该账号或设备列表「下线」释放名额（同一账号最多 10 台设备）"
+				}
+				_ = writeState(statePath, st)
+			}
 			return Result{}, err
 		}
 		a.AccessToken = res.AccessToken
@@ -199,6 +226,9 @@ func Poll(client *http.Client, statePath string) (Result, error) {
 		return Result{}, err
 	}
 	_ = os.Remove(statePath)
+	// 老用户自愈：R37 旧版遗留的本机级 device-id.json 已废弃（#60/#70：一机多号
+	// 共享设备号 → 4017/20401）。新号不再读它；删掉可避免误解，也无凭据价值。
+	_ = os.Remove(filepath.Join(filepath.Dir(statePath), "device-id.json"))
 	return Result{AccessToken: a.AccessToken, RefreshToken: a.RefreshToken, ExpiresAt: a.ExpiresAt, Domain: "trae.cn", ApiHost: st.Host, MachineID: st.MachineID, DeviceID: st.DeviceID, UID: uid, EnterpriseID: ent, Nickname: nick}, nil
 }
 
@@ -332,7 +362,7 @@ func getString(m map[string]any, key string) string {
 func randHex(n int) string { b := make([]byte, n); _, _ = rand.Read(b); return hex.EncodeToString(b) }
 
 // randNumericID 生成 15 位数字 ID，对齐官方客户端 device_id 格式（纯数字）。
-// 首次绑定随机产生并持久化到 auth 文件，后续签到沿用同一 ID。
+// 每次登录会话新生成，登录成功后随 auth 文件持久化，后续签到沿用同一 ID（#3）。
 func randNumericID() string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)

@@ -32,6 +32,10 @@ type itemSnap struct {
 	Key    string `json:"k"`
 	Remain int64  `json:"r"`
 	Expire string `json:"e,omitempty"` // YYYY-MM-DD（UTC+8 墙钟口径）
+	// Used 已消耗量（issue #67）：delta=0 时用于识别「发放即消耗」形态——
+	// WorkBuddy 每日签到包提前一天以 r=0 建档，发放与消耗落在同一刷新窗内时
+	// remain 与快照持平，earn 只能靠 used 差分救回。旧快照无此字段 → 零值，安全。
+	Used int64 `json:"u,omitempty"`
 }
 
 // snapshots credit-snapshot.json 结构：key "ch/uid" → 条目列表。
@@ -108,7 +112,7 @@ func (l *Ledger) DiffCredits(ch, uid string, balance int64, cur []provider.Resou
 	// 必须先合并成一条再与快照差分，保证每 key 每次刷新最多一条事件。
 	type aggEnt struct {
 		name, expire string
-		remain       int64
+		remain, used int64
 	}
 	agg := map[string]*aggEnt{} // key → 聚合条目
 	var order []string          // 首现顺序遍历，事件输出稳定可测
@@ -123,6 +127,7 @@ func (l *Ledger) DiffCredits(ch, uid string, balance int64, cur []provider.Resou
 			agg[k], order = a, append(order, k)
 		}
 		a.remain += it.Remain // 同 key 多条余额求和，视作一个整体
+		a.used += it.Used
 		if a.expire == "" {
 			a.expire = it.ExpireAt // 到期日取首个非空（同 key 通常相同）
 		}
@@ -131,11 +136,24 @@ func (l *Ledger) DiffCredits(ch, uid string, balance int64, cur []provider.Resou
 	curMap := map[string]itemSnap{}
 	for _, k := range order {
 		a := agg[k]
-		curMap[k] = itemSnap{Key: k, Remain: a.remain, Expire: a.expire}
+		curMap[k] = itemSnap{Key: k, Remain: a.remain, Expire: a.expire, Used: a.used}
 		p, ok := prevMap[k]
 		if !ok {
-			// 无快照的存量条目：不在首次差分逐条展开（会把存量余额刷屏成假 earn），
-			// 仅后续刷新中新增的条目才逐条记 earn。
+			if firstTime {
+				// 首次见此账号：存量条目由末尾的「存量额度」baseline 统一汇总，
+				// 不在此逐条展开（会把存量余额刷屏成假 earn）。
+				continue
+			}
+			// 非首次出现的新 key = 真实新增发放 → 逐条记 earn。
+			// 修复少记（2026-10-02 生产账本实证）：WorkBuddy 的伪键是「套餐名|到期日」，
+			// 月周期切换时旧键消失（已记 expire）、同余额挂在新键上——此前这里静默跳过，
+			// 导致每账号每月约 2500 的周期发放从不进入收入流水，账本只降不升。
+			// 条目抖动（上游瞬时缺失后回归）会产出 expire+earn 一对，净额不变，
+			// 优于旧行为「回归被吞、收入永久少记」。
+			if a.remain > 0 {
+				events = append(events, CreditEntry{Ch: ch, UID: uid, Kind: "earn",
+					Amount: a.remain, Balance: balance, Note: a.name})
+			}
 			continue
 		}
 		delta := a.remain - p.Remain
@@ -152,6 +170,14 @@ func (l *Ledger) DiffCredits(ch, uid string, balance int64, cur []provider.Resou
 			}
 			events = append(events, CreditEntry{Ch: ch, UID: uid, Kind: kind,
 				Amount: delta, Balance: balance, Note: a.name})
+		case a.used > p.Used:
+			// remain 持平但 used 上涨（issue #67）：发放与消耗落在同一刷新窗内，
+			// 差分把签到发放误判为「条目没变」。由 remain=total-used 可知
+			// 发放额 = usedDelta（total 同量增加），记 earn 保住收入；对应的
+			// 消耗不另记 spend（两次快照间无法拆分先后，净额守恒）。used 恒 0
+			// 的渠道（如 qwenwork）自然不触发，零影响。
+			events = append(events, CreditEntry{Ch: ch, UID: uid, Kind: "earn",
+				Amount: a.used - p.Used, Balance: balance, Note: a.name})
 		}
 	}
 	// 上次有、本次消失：套餐到期移除是主因，归因过期。

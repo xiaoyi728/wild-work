@@ -22,9 +22,19 @@ const (
 	QoderCN     Kind = "qodercn"  // QoderCN（qoder.com.cn，移植自 qoder2api，独立渠道）
 	QoderCOM    Kind = "qodercom" // QoderCOM 国际版（qoder.com / qoder.sh，移植自 qodercn）
 	QwenWork    Kind = "qwenwork" // 千问办公（gateway.qwenwork.cn + qwenwork.cn）
-	TraeCode    Kind = "traecode" // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
-	Oczen       Kind = "oczen"    // OpenCodeZen 匿名免费通道（opencode.ai/zen，无账号、凭证固定 public）
-	GLM         Kind = "glm"      // 智谱清言（chatglm.cn 网页版私有接口，凭据为 chatglm_refresh_token）
+	// MonkeyCode 平台托管模型（proxy.monkeycode-ai.com）：凭据由面板从本机官方客户端导入，
+	// 一个账号 = oma_ api_key + omas_ signing_secret；上游无目录/额度/刷新接口，
+	// 故模型表静态、额度恒 0、RefreshToken 为空实现。
+	MonkeyCode Kind = "monkeycode"
+	// Raccoon 小浣熊（xiaohuanxiong.com）：凭据由面板从本机官方客户端导入，
+	// access_token 约 2h + refresh_token 约 30d，可用 refresh_token 自动续期。
+	Raccoon Kind = "raccoon"
+	// Loomy 讯飞 Loomy（loomyad.xunfei.cn）：凭据由面板从本机官方客户端导入，
+	// session 约 14 天且上游无 refresh 端点，到期需重新导入。
+	Loomy    Kind = "loomy"
+	TraeCode Kind = "traecode" // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
+	Oczen    Kind = "oczen"    // OpenCodeZen 匿名免费通道（opencode.ai/zen，无账号、凭证固定 public）
+	GLM      Kind = "glm"      // 智谱清言（chatglm.cn 网页版私有接口，凭据为 chatglm_refresh_token）
 )
 
 func (k Kind) String() string { return string(k) }
@@ -42,6 +52,8 @@ const (
 	ErrClient                        // 其他 4xx / 业务错误
 	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，透传原文
 	ErrPromptTooLong                 // 11115 上下文超限 → 请求级错误，不罚号不轮转，透传原文
+	ErrImageInvalid                  // 图片格式/数据无效（11135 等）→ 请求级错误，不罚号不轮转，透传原文
+	ErrBadParams                     // 出站 body / 请求参数无法被上游接受 → 请求级错误，不罚号不轮转，透传原文
 	ErrWafBlock                      // 403 + 非业务信封（WAF 拦截页/空体）→ 账号软冷却
 	ErrAccountFault                  // 账号级授权/配额故障（11140/14017）→ 冷却轮换
 	ErrModelBlocked                  // 11102 该后端无此模型 → (账号,模型) 负缓存避让
@@ -66,6 +78,10 @@ func (k ErrKind) String() string {
 		return "content_blocked"
 	case ErrPromptTooLong:
 		return "prompt_too_long"
+	case ErrImageInvalid:
+		return "image_invalid"
+	case ErrBadParams:
+		return "bad_params"
 	case ErrWafBlock:
 		return "waf_block"
 	case ErrAccountFault:
@@ -76,6 +92,19 @@ func (k ErrKind) String() string {
 		return "passthrough"
 	default:
 		return "none"
+	}
+}
+
+// Rotatable 报告该错误是否应换下一个账号重试本请求（账号级错误）。
+// 账号有问题的（限流/欠费/登录态死/偶发 404/上游 5xx/账号故障）：换号有价值；
+// 请求内容有问题的（内容拦截/上下文超限/模型不存在）：换号必然复现，透传原文结束；
+// ErrClient（其他 4xx 业务错误）默认可换一次——部分渠道业务错误挂在账号权益上。
+func (k ErrKind) Rotatable() bool {
+	switch k {
+	case ErrSoftRate, ErrHardCredit, ErrSessionDead, ErrNotFound, ErrServer, ErrAccountFault, ErrClient:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -168,12 +197,33 @@ type Upstream interface {
 	Aggregate(r io.Reader, model string) (map[string]any, error)
 }
 
+// StreamErrorClassifier 由「流内业务错误可分类」的渠道实现（当前 traework 的
+// SOLOStreamError）。handler 用 errors.As 取值，据此决定账号惩罚——
+// 使 server 层不必 import 具体渠道包。
+//
+// 为什么需要它：流式请求的 HTTP 200 与响应头在读到上游错误帧**之前**就已发出，
+// 协议上无法在同一请求内换号重试。唯一可行的补救是「把中招账号冷却掉」，
+// 让客户端**下一次**重试时由挑号逻辑换到别的账号（3004 是账号级限流，换号有效）。
+type StreamErrorClassifier interface {
+	Kind() ErrKind
+}
+
 // CheckinReporter 由「签到结果可结构化上报」的渠道实现（当前 QoderCN / QoderCOM）。
 // 调度器优先使用它；未实现的渠道回退 DailyCheckin + isAlready 文本判定。
 // 之所以需要独立接口：error 通道无法区分 no_campaign 与 error——两者都不是
 // 「已签到」，却都需要在当日窗口内继续重试，而 error 文本判定做不到。
 type CheckinReporter interface {
 	DailyCheckinReport(a *auth.Auth) (CheckinReport, error)
+}
+
+// CheckinGranter 由「签到回执自带发放额」的渠道实现（当前 WorkBuddy，issue #67）。
+// 上游 daily-checkin 回执的 credit/today_credit 是本次发放的权威值；调度器在签到
+// 成功后用它直接记 earn（ledger.RecordCheckinEarn），不再完全依赖快照差分——
+// WorkBuddy 签到包落在「明日到期」key 上且提前一天以 r=0 建档，「发放即消耗」
+// 场景下差分会把当日 earn 抵消为 0（面板今日收入显示 0 的根因）。
+// granted<=0 时调度器静默降级回差分口径；未实现本接口的渠道行为不变。
+type CheckinGranter interface {
+	DailyCheckinGrant(a *auth.Auth) (granted int64, err error)
 }
 
 // CheckinStatus 是签到结果状态（语义对齐上游 qoder2api 的 checkinStatus*）。
@@ -230,12 +280,21 @@ type ResourceItem struct {
 	// 本工具走的是 ep=0；这类额度对用户是「看得见用不了」，需在界面上分开统计。
 	// 注意：零值为 false，故各渠道构造时须显式置位；渠道无此概念时统一填 true。
 	Usable bool `json:"usable"`
+	// InfoOnly 标记该条目**只作展示**，不参与任何积分算术（Summarize 小计、
+	// ExpiringWithin 临期、ledger 差分）。用于「同一账号下计量单位不同的另一套额度」——
+	// 如 MonkeyCode 的每日 Token 额度（单位是 token，而积分是 credits）：
+	// 两者都该显示，但相加无意义。
+	// 注意：InfoOnly 条目应同时置 Usable=true（它在界面上既非「不可用」，也不该被小计）。
+	InfoOnly bool `json:"info_only,omitempty"`
 }
 
 // Summarize 按 Usable 标记汇总条目：返回 (可消耗剩余, 不可消耗剩余)。
 // 供 app 层统一填充 ResourceDetail 接口的两个小计字段，避免多处各写一份循环。
 func Summarize(items []ResourceItem) (usable, unusable int64) {
 	for _, it := range items {
+		if it.InfoOnly {
+			continue
+		}
 		if it.Usable {
 			usable += it.Remain
 		} else {
@@ -258,7 +317,7 @@ func ExpiringWithin(items []ResourceItem, horizon time.Duration) int64 {
 	deadline := time.Now().In(expireLoc).Add(horizon)
 	var expiring int64
 	for _, it := range items {
-		if !it.Usable || it.ExpireAt == "" {
+		if !it.Usable || it.InfoOnly || it.ExpireAt == "" {
 			continue
 		}
 		// 日期解析到当天零点（UTC+8），零点落在 deadline 之前即视为临期

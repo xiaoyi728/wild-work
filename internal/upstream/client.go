@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/idle"
 	"wild-work/internal/provider"
 )
 
@@ -131,6 +132,12 @@ type Client struct {
 	// BillingHTTP 供账单/签到接口使用（短超时，慢网络下避免面板操作长时间假死）。
 	// 为 nil 时回退到 HTTP。
 	BillingHTTP *http.Client
+	// StreamHTTP 用于对话流（SSE）：不设整体 Timeout，避免长回答在超时点被掐断
+	// 且无终止帧（R35 / issue #42）。
+	StreamHTTP *http.Client
+	// IdleTimeout 聊天 SSE 流中空闲超时（StreamHTTP 无总时长上限，靠本字段兜底
+	// 「上游中途卡死」）。<=0 表示禁用（测试用）。
+	IdleTimeout time.Duration
 
 	ChatBaseCN      string
 	BillingBaseCN   string
@@ -144,6 +151,8 @@ func New() *Client {
 	return &Client{
 		HTTP:            &http.Client{Timeout: 120 * time.Second, Transport: tr},
 		BillingHTTP:     &http.Client{Timeout: 30 * time.Second, Transport: tr},
+		StreamHTTP:      &http.Client{Transport: tr}, // 共用 Transport，不设 Timeout
+		IdleTimeout:     idle.DefaultTimeout,         // 流中空闲监控兜底（见 internal/idle）
 		ChatBaseCN:      "https://copilot.tencent.com",
 		BillingBaseCN:   "https://www.codebuddy.cn",
 		ChatBaseGlobal:  "https://www.workbuddy.ai",
@@ -289,12 +298,19 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		return nil, 0, nil, err
 	}
 	ChatHeaders(req, a)
-	resp, err := c.HTTP.Do(req)
+	req, cancel := idle.WithCancel(req)
+	hc := c.HTTP
+	if c.StreamHTTP != nil {
+		hc = c.StreamHTTP
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
+		cancel()
 		log.Printf("chat_stream uid=%s: transport error: %v", a.UID, err)
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
+		cancel()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
 		kind := Classify(resp.StatusCode, string(raw))
@@ -302,7 +318,8 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 			a.UID, resp.StatusCode, kind, truncate(string(raw), 200))
 		return nil, resp.StatusCode, raw, nil
 	}
-	return resp.Body, resp.StatusCode, nil, nil
+	// 成功分支：cancel 所有权交给 idle.Monitor（其 Close 会 cancel；静默超时也会 cancel）。
+	return idle.Monitor(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 }
 
 // ModelInfo 动态模型信息（含 maxInputTokens/maxOutputTokens）。
@@ -540,20 +557,46 @@ func (c *Client) getUserResource(a *auth.Auth) (*userResourceResp, error) {
 
 // DailyCheckin 执行每日签到。已签到（业务 code 非 0）也返回错误，调用方按 msg 区分。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
+	_, err := c.DailyCheckinGrant(a)
+	return err
+}
+
+// dailyCheckinGrant 执行签到并解析上游回执的发放额：credit/today_credit 字段
+// （权威值，见 ref/Buddy2api 同款实现）。供 provider.CheckinGranter 能力接口
+// （issue #67：签到包落在明日到期 key 上且提前 r=0 建档，差分在「发放即消耗」
+// 场景会把当日 earn 抵消为 0；回执值不依赖差分）。解析失败/未回填返回 0，
+// 调用方降级回快照差分口径，不影响签到主流程。
+func (c *Client) DailyCheckinGrant(a *auth.Auth) (granted int64, err error) {
 	log.Printf("workbuddy checkin start uid=%s", a.UID)
 	url := c.billingBase(a) + "/v2/billing/meter/daily-checkin"
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte("{}")))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	BillingHeaders(req, a)
-	_, err = c.doJSONBilling(req)
+	data, err := c.doJSONBilling(req)
 	if err != nil {
 		log.Printf("workbuddy checkin failed uid=%s err=%v", a.UID, err)
-		return err
+		return 0, err
 	}
-	log.Printf("workbuddy checkin success uid=%s", a.UID)
-	return nil
+	// 容忍响应形状差异：credit 字段可能在 data 层或带 today_credit 别名；
+	// JSON 数字可能带小数（Buddy2api 实测 float）。失败吞掉——记账是锦上添花。
+	var env struct {
+		Credit         json.Number `json:"credit"`
+		TodayCredit    json.Number `json:"today_credit"`
+		TodayCheckedIn bool        `json:"today_checked_in"`
+	}
+	if json.Unmarshal(data, &env) == nil {
+		v := env.Credit
+		if v == "" {
+			v = env.TodayCredit
+		}
+		if f, perr := v.Float64(); perr == nil && f > 0 {
+			granted = int64(f) // 积分是整数口径，小数部分是上游表示误差
+		}
+	}
+	log.Printf("workbuddy checkin success uid=%s granted=%d", a.UID, granted)
+	return granted, nil
 }
 
 // Classify 实现 provider.Upstream。

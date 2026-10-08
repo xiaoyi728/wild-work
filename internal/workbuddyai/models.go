@@ -447,6 +447,13 @@ func Classify(status int, body string) provider.ErrKind {
 	}
 	// 429 优先于 hardRule：限流 body 高频带 "quota exceeded"。
 	if status == http.StatusTooManyRequests {
+		// 上游按**模型**限流（6004 / "switch to the other models"）：属请求级拒绝，
+		// **不得**按账号级冷却——否则该账号上其它还能用的模型一起被拖下水
+		// （issue #53：A 的 deepseek-v4.1-flash 撞每日上限后，A 的 gpt-5.6-luna 也不能用）。
+		// 透传原文让客户端按 Retry-After 自行退避或换模型，与 R16 单账号渠道同款哲学。
+		if strings.Contains(lower, "switch to the other models") || strings.Contains(lower, "usage exceeds frequency limit") {
+			return provider.ErrPassthrough
+		}
 		return provider.ErrSoftRate
 	}
 	for _, m := range hardMarkers {
@@ -457,6 +464,10 @@ func Classify(status int, body string) provider.ErrKind {
 	// 非 429 但 body 含限流文案 → 软限流
 	if strings.Contains(lower, "rate limit") || strings.Contains(lower, "too many requests") ||
 		strings.Contains(lower, "usage limit") || strings.Contains(lower, "请求过于频繁") {
+		// 同上：模型级限流不算账号问题。
+		if strings.Contains(lower, "switch to the other models") {
+			return provider.ErrPassthrough
+		}
 		return provider.ErrSoftRate
 	}
 	if status == http.StatusNotFound {

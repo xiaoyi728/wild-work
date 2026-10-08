@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, setOnUnauthorized } from './api.js';
 import { shortUid, isWildcardHost } from './format.js';
-import { noExplicitCheckin } from './constants.js';
+import { noExplicitCheckin, chLabel } from './constants.js';
 import { reveal, magnetic } from './anim.js';
 import Accounts from './components/Accounts.jsx';
 import Usage from './components/Usage.jsx';
+import Stats from './components/Stats.jsx';
 import Fees from './components/Fees.jsx';
 import Settings from './components/Settings.jsx';
 import LoginFlow from './components/LoginFlow.jsx';
@@ -317,6 +318,19 @@ export default function App() {
 
   function promptLogin(channel) { setFlow((f) => ({ ...f, confirm: { channel } })); }
 
+  // 导入型渠道（monkeycode / raccoon / loomy）：凭据只在本机已登录的官方客户端里，
+  // 没有授权 URL，直接打 /api/account/import_local（后端 internal/app/import_local.go）。
+  // 后端可能返回「已降级」的 note（如官方客户端未装/未登录），必须透出而不是吞掉。
+  async function importLocal(channel) {
+    setFlow((f) => ({ ...f, confirm: null }));
+    try {
+      const r = await api('/api/account/import_local', { channel });
+      toast(`已导入 ${chLabel(channel)} 账号 ${r.uid || ''}${r.note ? '（' + r.note + '）' : ''}`);
+      await loadState();
+      refreshFees();
+    } catch (e) { toast(e.message); }
+  }
+
   async function startLogin(channel) {
     try {
       const r = await api('/api/login/start', { channel });
@@ -422,6 +436,7 @@ export default function App() {
     promptLogin, startGLMLogin, checkin, refreshOne, toggleDisable, removeAcct,
     checkinAll, refreshAll, refreshFees, openRename, copyUrl: (u) => copyText(u, '链接', toast),
     cancelLogin, confirmLogin: () => flow.confirm && startLogin(flow.confirm.channel),
+    importLocal,
     closeConfirm: () => setFlow((f) => ({ ...f, confirm: null })),
     busy,
   }), [state, flow.confirm, busy]);
@@ -443,6 +458,7 @@ export default function App() {
               <div className="main-tabs">
                 <button className="mtab active" id="mtabBtnAccounts">账号管理</button>
                 <button className="mtab" id="mtabBtnUsage">用量与流水 <span className="ver" id="usageSince"></span></button>
+                <button className="mtab" id="mtabBtnStats">运行统计</button>
               </div>
               <div className="panel-actions">
                 <button className="btn" id="btnToggleFees" onClick={() => setShowFees(true)}>渠道费率</button>
@@ -454,10 +470,13 @@ export default function App() {
               <Accounts state={null} actions={actions} knownUids={knownUids.current} />
             </div>
             <div className="mtab-body hidden" id="mtabUsage" />
+            <div className="mtab-body hidden" id="mtabStats" />
             <div className="footer">wild-work — 多渠道账号聚合 · 仅供个人学习 · 右键托盘图标退出</div>
           </section>
         </div>
-        {showFees ? <Fees fees={fees} refreshBusy={busy.refreshFees} onRefresh={refreshFees} onClose={() => setShowFees(false)} /> : null}
+        {showFees ? <Fees fees={fees} state={state} refreshBusy={busy.refreshFees} onRefresh={refreshFees}
+            onCopy={(t) => copyText(t, '模型标识', toast)}
+            onClose={() => setShowFees(false)} /> : null}
         <AdminLogin open msg={loginMsg} onSubmit={(pass) => submitLogin(pass)} />
       </>
     );
@@ -477,6 +496,8 @@ export default function App() {
               <button className={`mtab${mainTab === 'usage' ? ' active' : ''}`} onClick={() => setMainTab('usage')}>
                 用量与流水 <span className="ver" id="usageSince">{sinceText}</span>
               </button>
+              <button className={`mtab${mainTab === 'stats' ? ' active' : ''}`} id="mtabBtnStats"
+                      onClick={() => setMainTab('stats')}>运行统计</button>
             </div>
             <div className="panel-actions">
               <button className="btn" id="btnToggleFees" onClick={() => setShowFees(true)}>渠道费率</button>
@@ -490,12 +511,18 @@ export default function App() {
             <Usage active={mainTab === 'usage'} usageDays={usageDays} setUsageDays={setUsageDays}
                    bump={usageNonce + (mainTab === 'usage' ? 1 : 0)} sinceSink={setSinceText} />
           </div>
+          <div className={`mtab-body${mainTab === 'stats' ? '' : ' hidden'}`} id="mtabStats">
+            {/* 里程碑 toast 走面板全局 toast（与顶栏复制提示同一通道），不单独弹窗 */}
+            <Stats active={mainTab === 'stats'} onToast={toast} />
+          </div>
         </section>
 
         <div className="footer">wild-work — 多渠道账号聚合 · 仅供个人学习 · 右键托盘图标退出</div>
       </div>
 
-      {showFees ? <Fees fees={fees} refreshBusy={busy.refreshFees} onRefresh={refreshFees} onClose={() => setShowFees(false)} /> : null}
+      {showFees ? <Fees fees={fees} state={state} refreshBusy={busy.refreshFees} onRefresh={refreshFees}
+            onCopy={(t) => copyText(t, '模型标识', toast)}
+            onClose={() => setShowFees(false)} /> : null}
       {showSettings ? (
         <Settings key={JSON.stringify(state.compat) + state.listen_port}
                   state={state} onClose={() => setShowSettings(false)} onSaved={loadState}
@@ -509,6 +536,7 @@ export default function App() {
       <LoginFlow flow={{ ...flow, glm: glmView }} actions={{
         closeConfirm: () => setFlow((f) => ({ ...f, confirm: null })),
         confirmLogin: () => flow.confirm && startLogin(flow.confirm.channel),
+        confirmImport: () => flow.confirm && importLocal(flow.confirm.channel),
         cancelLogin, copyUrl: (u) => copyText(u, '链接', toast),
       }} />
       <Confirm open={!!confirmBox} msg={confirmBox && confirmBox.msg}

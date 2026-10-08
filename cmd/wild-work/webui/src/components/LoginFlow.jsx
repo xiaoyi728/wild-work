@@ -1,9 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
-import { chLabel, noExplicitCheckin, NO_CHECKIN_LOGIN_HINT } from '../constants.js';
+import { chLabel, hasProtocolLogin, isImportLocal, NO_CHECKIN_LOGIN_HINT } from '../constants.js';
 
 // 添加账号：确认弹层 → login/start → 轮询 /api/state 的 login_busy。
 // 智谱清言走另一条路：CDP 自动捕获 Cookie（独立 profile），手工粘贴 refresh_token 为兜底。
+//
+// 三种添加形态（对应 constants.js 的两个判据集）：
+//   ① 普通：浏览器授权登录（workbuddy 系 / qoder 系 / traework / qwenwork）；
+//   ② 导入型：凭据只在本机已登录的官方客户端里（monkeycode / loomy / raccoon），
+//      没有授权 URL，直接调 /api/account/import_local 读本机配置；
+//   ③ 浏览器授权 + 导入两条路都有（raccoon，AGENTS.md R41 的协议回调）——弹层给两个按钮，
+//      主按钮走授权、次按钮走导入，不替用户猜哪条路可用。
 export default function LoginFlow({ flow, actions }) {
   const {
     confirm, // {channel} 待确认
@@ -11,25 +18,43 @@ export default function LoginFlow({ flow, actions }) {
     glm, // null | {status, uid, nickname, error, manualOpen}
   } = flow;
 
+  const ch = confirm && confirm.channel;
+  const canImport = !!ch && isImportLocal(ch);
+  const canLogin = !!ch && !isImportLocal(ch) || hasProtocolLogin(ch);
+  const hint = ch ? (NO_CHECKIN_LOGIN_HINT[ch] || '') : '';
+  const msg = !ch ? '' : canLogin && !canImport
+    ? `点击「登录${chLabel(ch)}」将打开浏览器窗口，请按照指示正常登录${chLabel(ch)}账号，登录成功后关闭浏览器窗口即可。${hint}`
+    : canImport && !canLogin
+      ? `点击「导入${chLabel(ch)}」将从<b>本机已登录的 ${chLabel(ch)} 官方客户端</b>读取凭据并添加账号，无需浏览器登录。${hint}`
+      : `两个入口任选其一：浏览器授权登录（登录期间本工具会临时接管 ${chLabel(ch)} 的协议回调以接住授权码），或从本机已登录的官方客户端直接导入凭据。${hint}`;
+
   return (
     <>
       {confirm ? (
         <div className="overlay" id="loginConfirmOverlay"
              onClick={(e) => { if (e.target.id === 'loginConfirmOverlay') actions.closeConfirm(); }}>
           <div className="modal">
-            <div className="modal-title" id="lcTitle">{`添加 ${chLabel(confirm.channel)} 账号`}</div>
+            <div className="modal-title" id="lcTitle">
+              {canImport && !canLogin ? `导入 ${chLabel(ch)} 账号` : `添加 ${chLabel(ch)} 账号`}
+            </div>
             <div className="modal-body">
-              <p id="lcMsg">
-                {noExplicitCheckin(confirm.channel)
-                  ? `点击「登录${chLabel(confirm.channel)}」将打开浏览器窗口，请按照指示正常登录${chLabel(confirm.channel)}账号，登录成功后关闭浏览器窗口即可。${NO_CHECKIN_LOGIN_HINT[confirm.channel] || ''}`
-                  : `点击「登录${chLabel(confirm.channel)}」将打开浏览器窗口，请按照指示正常登录${chLabel(confirm.channel)}账号，登录成功后关闭浏览器窗口即可。`}
-              </p>
+              <p id="lcMsg" dangerouslySetInnerHTML={{ __html: msg }} />
             </div>
             <div className="modal-actions">
               <button className="btn small" id="btnLoginConfirmCancel" onClick={actions.closeConfirm}>取消</button>
-              <button className="btn small primary" id="btnLoginConfirm" onClick={actions.confirmLogin}>
-                {`登录${chLabel(confirm.channel)}`}
-              </button>
+              {canImport && canLogin ? (
+                <button className="btn small" id="btnLoginImportAlt" title={`从本机已登录的 ${chLabel(ch)} 客户端读取凭据`}
+                        onClick={actions.confirmImport}>从客户端导入</button>
+              ) : null}
+              {canLogin ? (
+                <button className="btn small primary" id="btnLoginConfirm" onClick={actions.confirmLogin}>
+                  {`登录${chLabel(ch)}`}
+                </button>
+              ) : (
+                <button className="btn small primary" id="btnLoginImport" onClick={actions.confirmImport}>
+                  {`导入${chLabel(ch)}`}
+                </button>
+              )}
             </div>
           </div>
         </div>

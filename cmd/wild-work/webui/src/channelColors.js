@@ -17,6 +17,9 @@ export const CH_VAR = {
   qodercom: '--qodercom',
   qwenwork: '--qwenwork',
   glm: '--glm',
+  monkeycode: '--monkeycode',
+  raccoon: '--raccoon',
+  loomy: '--loomy',
   oczen: '--oczen',
 };
 

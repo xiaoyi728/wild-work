@@ -693,3 +693,23 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   下次融合又要重新判读。`go build`/`go vet`/`go test` 不受影响。
 - ⚠️ **L4 增补**：`internal/cdp` 的 `TestWriteDoesNotHangClose`（`writeTimeout=15s` > 测试预算 12s）
   在 v2.6.2 依旧失败，属**上游自带缺陷**，勿归因于本地改动。
+
+### L9 2026-10-08 前端「只补功能不动设计」：React 侧承接 v2.6.2 的运行统计与三渠道
+
+- **范围纪律**：桌宠与视觉层零改动（`pet.js` / `pet.css` / `public/pet/*` / `style.css` 既有规则 / `tokens.css` 既有色值
+  一律不碰）。只做四件事：① 三个导入型渠道（monkeycode / raccoon / loomy）进面板；② 运行统计 tab（新建 `components/Stats.jsx`）；
+  ③ 积分汇总条（PR #68）与费率 tab 余额角标 + 模型名点击复制（PR #69）；④ 相应 CSS **追加**在 `style.css` 末尾（新段带标题注释，不改既有规则）。
+- ⚠️ **契约测试只扫构建产物**：`internal/app/web_contract_test.go` 的 `uiSourceDirs` 是 `cmd/wild-work/web`（vanilla 基准）
+  与 `cmd/wild-work/web-app`（React 产物），**不含 `webui/src`** ⇒ 新端点只写进源码时 `TestPanelAPIRouteContract`
+  必然报「无任何前端引用」，必须先 `npm --prefix cmd/wild-work/webui run build` 测试才转绿。这是闸门设计使然，不是 bug。
+- ⚠️ **`tokens.css` 插色不能用「按缩进猜块」**：`--glm` 在 6 个主题块里各出现一次（light hex / light `@supports` oklch /
+  dark hex / dark `@supports` oklch / paper hex / paper `@supports` oklch），缩进只有两档（`  ` 与 `    `），
+  第一次按缩进自动插入把 dark/paper 插错块，`git checkout` 回滚后改按**精确行号**插入才对。
+  oklch 数值一律用 `webui/tools/derive-tokens.mjs` 的 `oklch()`/`fmt()` 现算，不手写。
+- ⚠️ **新 CSS 类不要写 `display:none`**：`TestHiddenByCssBaseRulesAreExplicitlyShown` 要求 JSX 使用点 inline `display:`，
+  新类干脆不带 `display`，省掉这层耦合（沿用 L1 对 `.credit-tip` 的处理）。
+- **新增渠道的落地清单**（漏一处就会被契约测试点名）：`constants.js` 的 `CH_LABEL`/`CH_CLASS`/`CH_NAMES`/`NO_EXPLICIT_CHECKIN`/
+  `PROXY_CHANNELS`/`PROXY_HINT`/`NO_CHECKIN_LOGIN_HINT`/`CHANNEL_PRESETS` + `channelColors.js` 的 `CH_VAR` + `tokens.css` 三主题色 +
+  `style.css` 的 `.btn.primary.alt.<kind>` 背景。
+- **导入型渠道的弹层三分支**：普通（浏览器授权）/ 导入型（只打 `/api/account/import_local`）/ 双入口（raccoon，R41 协议回调），
+  判据是 `isImportLocal()` 与 `hasProtocolLogin()`；导入失败时后端 `note` 必须透出（已装/未登录官方客户端的降级提示不能吞）。

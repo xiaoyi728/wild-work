@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api.js';
-import { chLabel, chClass, noExplicitCheckin, noCheckinText, NO_CREDITS, DETAIL_PAGE_SIZE } from '../constants.js';
+import { chLabel, chClass, noExplicitCheckin, noCheckinText, NO_CREDITS, CH_SUMMARY_ORDER, DETAIL_PAGE_SIZE } from '../constants.js';
 import { shortUid } from '../format.js';
 import { countUp } from '../anim.js';
 
@@ -203,8 +203,34 @@ function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDis
 // vanilla 的面板 DOM 是静态 HTML，未登录只是不填数据、不跑 renderAccounts，
 // 标签页与所有按钮都在场且可点（点了会 401 → 弹登录层，与现状一致）。
 // 「还没有账号」提示则不渲染 —— 它由 renderAccounts 摘掉 hidden 才出现，未登录时不该有。
+// 积分汇总条（PR #68）：按渠道把账号数 / 可用积分 / 临期 / 不可用 压成一行，
+// 点渠道 chip 即筛选下方卡片，再点一次取消 —— 一眼看出「哪个渠道的钱多、哪个快过期」，
+// 省得逐张卡片去扫。不计入筛选的：匿名通道（credits_na 无积分概念）与
+// credits_stale（余额口径已过期，数字不可信，故单列 stale 计数而不是并进 num）。
+function channelSummary(acc) {
+  const map = new Map();
+  for (const a of acc) {
+    if (NO_CREDITS.has(a.group)) continue; // 匿名通道无积分概念，不占汇总条
+    if (!map.has(a.group)) {
+      map.set(a.group, { group: a.group, n: 0, num: 0, exp: 0, unu: 0, stale: 0, off: 0 });
+    }
+    const s = map.get(a.group);
+    s.n++;
+    if (a.disabled) s.off++;
+    if (a.credits_na || a.credits_stale) { if (a.credits_stale) s.stale++; continue; }
+    s.num += Number(a.credits) || 0;
+    s.exp += Number(a.expiring_credits) || 0;
+    s.unu += Number(a.unusable_credits) || 0;
+  }
+  const keys = [...map.keys()];
+  const known = CH_SUMMARY_ORDER.filter((k) => map.has(k));
+  const rest = keys.filter((k) => !CH_SUMMARY_ORDER.includes(k)).sort();
+  return [...known, ...rest].map((k) => map.get(k));
+}
+
 export default function Accounts({ state, actions, knownUids }) {
   const [tipState, setTipState] = useState(null); // {uid, rect, data}
+  const [filter, setFilter] = useState(null); // null = 全部；否则为渠道 key
   const cache = useRef({});
   const hideTimer = useRef(null);
 
@@ -228,6 +254,9 @@ export default function Accounts({ state, actions, knownUids }) {
   };
 
   const acc = state ? (state.accounts || []) : [];
+  const rows = channelSummary(acc); // state 为 null 时是空数组 ⇒ 汇总条不渲染（未登录）
+  const shown = filter ? acc.filter((a) => a.group === filter) : acc;
+  const totals = rows.reduce((t, s) => ({ n: t.n + s.n, num: t.num + s.num }), { n: 0, num: 0 });
 
   return (
     <>
@@ -245,11 +274,41 @@ export default function Accounts({ state, actions, knownUids }) {
             <button className="btn primary alt qodercom" id="btnAddQoderCOM" onClick={() => actions.promptLogin('qodercom')}>＋ QoderCOM</button>
             <button className="btn primary alt qwenwork" id="btnAddQwen" onClick={() => actions.promptLogin('qwenwork')}>＋ 千问办公</button>
             <button className="btn primary alt glm" id="btnAddGLM" title="体验渠道：仅文本对话，不支持工具调用/多模态" onClick={actions.startGLMLogin}>＋ 智谱清言</button>
+            {/* 导入型渠道：凭据来自本机已登录的官方客户端，没有浏览器授权流 */}
+            <button className="btn primary alt monkeycode" id="btnAddMonkeyCode" title="从本机已登录的 MonkeyCode 客户端导入凭据"
+                    onClick={() => actions.promptLogin('monkeycode')}>＋ MonkeyCode</button>
+            <button className="btn primary alt raccoon" id="btnAddRaccoon" title="小浣熊：可浏览器授权登录，也可从本机客户端导入"
+                    onClick={() => actions.promptLogin('raccoon')}>＋ 小浣熊</button>
+            <button className="btn primary alt loomy" id="btnAddLoomy" title="从本机已登录的 Loomy 客户端导入凭据"
+                    onClick={() => actions.promptLogin('loomy')}>＋ Loomy</button>
           </div>
         </div>
       </div>
+      {rows.length ? (
+        <div className="cs-bar" id="creditSummaryBar">
+          <span className="cs-title">积分汇总</span>
+          <button className={`cs-chip${filter === null ? ' active' : ''}`} id="csAll"
+                  onClick={() => setFilter(null)}>全部{` · ${totals.n} 个 · ${totals.num} 分`}</button>
+          {rows.map((s) => (
+            <button key={s.group}
+                    className={`cs-chip clickable ${chClass(s.group)}${filter === s.group ? ' active' : ''}`}
+                    data-wg={s.group}
+                    title={[`${chLabel(s.group)}：${s.n} 个账号${s.off ? `（停用 ${s.off}）` : ''}`,
+                            `可用 ${s.num} 分`,
+                            s.exp ? `临期 ${s.exp} 分（优先消耗）` : null,
+                            s.unu ? `不可用 ${s.unu} 分（官方客户端专用）` : null,
+                            s.stale ? `${s.stale} 个余额待刷新（不计入合计）` : null].filter(Boolean).join('\n')}
+                    onClick={() => setFilter(filter === s.group ? null : s.group)}>
+              {`${chLabel(s.group)} · ${s.num} 分`}
+              {s.exp ? <span className="cs-exp">{`临期 ${s.exp}`}</span> : null}
+              {s.stale ? <span className="cs-stale">{`待刷新 ${s.stale}`}</span> : null}
+            </button>
+          ))}
+          <span className="cs-total">{`合计 ${totals.num} 分`}</span>
+        </div>
+      ) : null}
       <div id="acctList" className="acct-grid">
-        {acc.map((a) => (
+        {shown.map((a) => (
           <Card key={a.uid} a={a} state={state} knownUids={knownUids}
                 onRename={actions.openRename} onCheckin={actions.checkin} onRefresh={actions.refreshOne}
                 onToggleDisable={actions.toggleDisable} onRemove={actions.removeAcct}

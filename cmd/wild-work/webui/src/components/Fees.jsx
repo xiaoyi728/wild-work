@@ -57,11 +57,14 @@ function RateCell({ m }) {
   return <span className="rate-paid">x{m.rate.toFixed(2)}</span>;
 }
 
-function ModelId({ m }) {
+function ModelId({ m, ch, onCopy }) {
   if (!m) return null;
+  // 点击复制的是「渠道/模型」完整标识（路由前缀 + 模型名），而不是裸模型名 ——
+  // 光复制模型名粘到客户端里是调不通的，这是本页最容易踩的坑。
+  const full = `${ch}/${m.model}`;
   return (
     <>
-      <code title={modelTip(m)}>{m.model}</code>
+      <code className="fee-model-copy" title={`${modelTip(m)}\n\n点击复制：${full}`} onClick={() => onCopy && onCopy(full)}>{m.model}</code>
       <CtxTag m={m} />
       <CapIcons m={m} />
       {m.note ? <span className="rate-note" style={m.color ? { color: m.color } : undefined}> {m.note}</span> : null}
@@ -69,9 +72,22 @@ function ModelId({ m }) {
   );
 }
 
+// 渠道余额角标：该渠道全部账号的可用积分合计。匿名渠道（无积分概念）与
+// 余额尚未刷新（credits_stale）的账号都不计入 —— 否则角标会是个假数字。
+function channelCredits(state, ch) {
+  const accs = (state && state.accounts) || [];
+  let sum = 0, any = false;
+  for (const a of accs) {
+    if (a.group !== ch || a.credits_na || a.credits_stale) continue;
+    sum += Number(a.credits) || 0;
+    any = true;
+  }
+  return any ? sum : null;
+}
+
 // 渠道费率弹层内部。L1 约束：本地是弹层、上游是页内多标签 ——
 // 保留本地 feesOverlay 外壳，内部承载上游 .fees-tabs 渲染，渲染目标仍是 feesBox。
-export default function Fees({ fees, refreshBusy, onRefresh, onClose }) {
+export default function Fees({ fees, state, refreshBusy, onRefresh, onCopy, onClose }) {
   const channels = (fees && fees.channels) || [];
   // 记住上次选中的渠道，重渲染后自动恢复（后台刷新不打断用户浏览）。
   const [lastCh, setLastCh] = useState(null);
@@ -110,6 +126,9 @@ export default function Fees({ fees, refreshBusy, onRefresh, onClose }) {
                           title={chLabel(ch.channel)}
                           onClick={() => setLastCh(ch.channel)}>
                     {chLabel(ch.channel)}<span className="fees-tab-n">{(ch.models || []).length}</span>
+                    {channelCredits(state, ch.channel) != null
+                      ? <span className="fees-tab-bal">{`余额 ${channelCredits(state, ch.channel)} 分`}</span>
+                      : null}
                   </button>
                 ))}
               </div>
@@ -127,9 +146,9 @@ export default function Fees({ fees, refreshBusy, onRefresh, onClose }) {
                       <tbody>
                         {rows.map(([m1, m2], i) => (
                           <tr key={i}>
-                            <td><ModelId m={m1} /></td>
+                            <td><ModelId m={m1} ch={ch.channel} onCopy={onCopy} /></td>
                             <td><RateCell m={m1} /></td>
-                            <td><ModelId m={m2} /></td>
+                            <td><ModelId m={m2} ch={ch.channel} onCopy={onCopy} /></td>
                             <td><RateCell m={m2} /></td>
                           </tr>
                         ))}

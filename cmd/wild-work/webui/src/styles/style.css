@@ -629,3 +629,78 @@ html[data-theme="paper"] .shiny {
   border-radius: 980px; padding: 0 5px; line-height: 15px;
 }
 .fees-tab.active .fees-tab-n { color: #fff; background: rgba(255, 255, 255, .22); }
+
+/* ===================================================================
+   v2.6.2 功能补齐（上游同步，2026-10-08）
+   原则：只追加，不改任何既有规则 —— 桌宠与视觉层零改动。
+   新类一律不写 display:none（web_visibility_test.go 会要求 JSX 处 inline 点亮）。
+   =================================================================== */
+
+/* --- 新增渠道的添加按钮（与既有 .btn.primary.alt.<渠道> 同构） --- */
+.btn.primary.alt.monkeycode { background: var(--monkeycode); }
+.btn.primary.alt.raccoon { background: var(--raccoon); }
+.btn.primary.alt.loomy { background: var(--loomy); }
+
+/* --- 积分汇总条（PR #68）：点渠道 chip 筛选下方账号卡片 --- */
+.cs-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin-bottom: 14px; padding: 10px 12px;
+  background: var(--card-bg); border: 1px solid var(--card-hairline);
+  border-radius: 14px; box-shadow: var(--shadow-card);
+  backdrop-filter: blur(20px) saturate(1.8); -webkit-backdrop-filter: blur(20px) saturate(1.8);
+}
+.cs-title { font-size: 12px; color: var(--muted); margin-right: 2px; }
+.cs-chip {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  font-size: 12px; line-height: 1.6; padding: 3px 10px; border-radius: 980px;
+  border: 1px solid var(--card-hairline); background: var(--code-bg);
+  color: var(--text); font-family: inherit;
+}
+.cs-chip.clickable { cursor: pointer; transition: border-color .2s, background .2s; }
+.cs-chip.clickable:hover { border-color: var(--chip-border); background: var(--chip-bg); }
+.cs-chip.active { border-color: var(--accent); background: var(--chip-bg); font-weight: 600; }
+.cs-chip.wb.active { border-color: var(--wb); }
+.cs-chip.wbai.active { border-color: var(--wbai); }
+.cs-chip.trae.active { border-color: var(--trae); }
+.cs-chip.traecode.active { border-color: var(--traecode); }
+.cs-chip.qoder.active, .cs-chip.qodercn.active { border-color: var(--qodercn); }
+.cs-chip.qodercom.active { border-color: var(--qodercom); }
+.cs-chip.qwenwork.active { border-color: var(--qwenwork); }
+.cs-chip.glm.active { border-color: var(--glm); }
+.cs-chip.monkeycode.active { border-color: var(--monkeycode); }
+.cs-chip.raccoon.active { border-color: var(--raccoon); }
+.cs-chip.loomy.active { border-color: var(--loomy); }
+.cs-chip.oczen.active { border-color: var(--oczen); }
+.cs-exp { color: var(--warn); }
+.cs-stale { color: var(--muted); }
+.cs-total { margin-left: auto; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* --- 费率弹层：tab 上的渠道余额角标 + 模型名点击复制 --- */
+.fees-tab-bal {
+  font-size: 11px; margin-left: 6px; padding: 1px 6px; border-radius: 980px;
+  background: var(--chip-bg); color: var(--muted);
+}
+.fees-tab.active .fees-tab-bal { background: rgba(255, 255, 255, .22); color: #fff; }
+.fee-model-copy { cursor: pointer; }
+.fee-model-copy:hover { color: var(--accent); }
+
+/* --- 运行统计 tab --- */
+.st-wrap { display: block; }
+.st-sum { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; margin-bottom: 18px; }
+.st-card { margin-bottom: 18px; overflow-x: auto; }
+.st-card > .ucard-label { display: block; margin-bottom: 8px; }
+.table .zero { text-align: right; color: var(--muted); }
+.st-rot-row { display: flex; align-items: center; gap: 10px; padding: 7px 0;
+  border-bottom: 1px solid var(--hairline); font-size: 13px; }
+.st-rot-row:last-child { border-bottom: 0; }
+.st-rot-cur { font-weight: 600; }
+.st-rot-next { color: var(--muted); font-size: 12px; margin-left: auto; }
+.st-applog {
+  margin: 0; max-height: 320px; overflow: auto; padding: 10px 12px;
+  background: var(--code-bg); border-radius: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.7; color: var(--muted);
+}
+.st-applog-lvl { display: inline-block; min-width: 44px; color: var(--text); }
+.st-applog-line.lvl-error .st-applog-msg { color: var(--danger); }
+.st-applog-line.lvl-warn .st-applog-msg { color: var(--warn); }

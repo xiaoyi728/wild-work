@@ -19,6 +19,8 @@ import (
 	"wild-work/internal/ledger"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
+	// 别名 statsEngine：与运行统计引擎包名一致（本包无同名局部变量，别名仅为与 app 包对齐可读）
+	statsEngine "wild-work/internal/stats"
 )
 
 // Runtime 是一个平台的一组运行时资源：pool + upstream + 静态模型兜底。
@@ -68,6 +70,9 @@ type Config struct {
 	// Ledger 用量/积分流水记账器（非 nil 时成功请求记 token 流水）。
 	Ledger *ledger.Ledger
 
+	// Stats 运行统计引擎（非 nil 时转发请求插桩 AddUsage/AddRequestRow；见 internal/stats 包注释）。
+	Stats *statsEngine.Stats
+
 	MaxRotate    int
 	HardCooldown time.Duration
 	SoftCooldown time.Duration
@@ -90,7 +95,8 @@ type Handler struct {
 	cfg Config
 	mux *http.ServeMux
 
-	ledger *ledger.Ledger // 记账器（cfg.Ledger 透传，nil = 不记账）
+	ledger *ledger.Ledger     // 记账器（cfg.Ledger 透传，nil = 不记账）
+	stats  *statsEngine.Stats // 运行统计引擎（cfg.Stats 透传，nil = 不插桩）
 
 	apiMu    sync.RWMutex // 保护 cfg.APIKey（面板可运行时修改）
 	stickyMu sync.RWMutex
@@ -99,11 +105,13 @@ type Handler struct {
 	// 桌宠实时流量计：一次「已选定账号、即将打上游」算一次。
 	// 刻意不复用 sticky 的 reqCount（那是粘性路由的每账号计数，不是全局流量），
 	// 也不查 ledger（R17 的按需扫描设计不适合秒级轮询）。
+	// 与上游新加的 h.stats（运行统计引擎）并存：那是按需聚合口径，这是秒级实时值。
 	traffic atomic.Int64
 	lastReq atomic.Int64 // Unix 毫秒
 }
 
 // Traffic 返回累计上游请求数与最后一次派发的 Unix 毫秒时间戳。
+// 本地分叉专有（L2 桌宠 /api/pulse 的数据源），上游无此方法。
 func (h *Handler) Traffic() (int64, int64) {
 	return h.traffic.Load(), h.lastReq.Load()
 }
@@ -132,7 +140,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger, stats: cfg.Stats}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -160,11 +168,11 @@ func (h *Handler) stickyKey(kind provider.Kind) string { return kind.String() }
 
 // pickWithSticky 粘性路由选择账号。
 // 优先使用上次成功路由的账号，直到：
-//   - 账号进入冷却/禁用状态
+//   - 账号进入冷却/禁用状态，或对该请求模型处于模型级冷却（429/6004 按模型限额）
 //   - 连续成功请求达到 maxReqs 次（默认 50），自动轮换
 //
-// 任一条件触发则降级为 Pick() 选新账号并重置粘性记录。
-func (h *Handler) pickWithSticky(rt *Runtime) *auth.Auth {
+// 任一条件触发则降级为 PickForModel(model) 选新账号并重置粘性记录。
+func (h *Handler) pickWithSticky(rt *Runtime, model string) *auth.Auth {
 	const defaultMaxReqs = 50
 
 	h.stickyMu.RLock()
@@ -176,7 +184,8 @@ func (h *Handler) pickWithSticky(rt *Runtime) *auth.Auth {
 		acct := rt.Pool.AuthByUID(sticky.uid)
 		if acct != nil {
 			status, ok := rt.Pool.Status(sticky.uid)
-			if ok && !status.Cooling && !status.Disabled {
+			modelCooled := ok && status.ModelCooling != nil && status.ModelCooling[model].After(time.Now())
+			if ok && !status.Cooling && !status.Disabled && !modelCooled {
 				log.Printf("sticky route platform=%s uid=%s count=%d/%d",
 					rt.Kind, sticky.uid, sticky.reqCount, sticky.maxReqs)
 				return acct
@@ -184,8 +193,8 @@ func (h *Handler) pickWithSticky(rt *Runtime) *auth.Auth {
 		}
 	}
 
-	// 降级：选择余额最高的 healthy 账号
-	acct := rt.Pool.Pick()
+	// 降级：选择对当前模型可用的、余额最高的 healthy 账号
+	acct := rt.Pool.PickForModel(model)
 	if acct == nil {
 		return nil
 	}
@@ -213,6 +222,29 @@ func (h *Handler) stickyClear(rt *Runtime) {
 	h.stickyMu.Lock()
 	defer h.stickyMu.Unlock()
 	delete(h.sticky, h.stickyKey(rt.Kind))
+}
+
+// StickyState 粘性路由快照片段（运行统计喂入用）。
+type StickyState struct {
+	UID   string
+	Count int // 已连续成功请求数
+	Max   int // 轮换阈值（默认 50）
+}
+
+// StickySnapshot 返回粘性路由快照（key = 渠道名，即 provider.Kind.String()）。
+// 供运行统计引擎喂 ApplySticky——进程内直读取代 sidecar 对粘性日志行的解析；
+// 无粘性记录的渠道不出现在结果里。
+func (h *Handler) StickySnapshot() map[string]StickyState {
+	h.stickyMu.RLock()
+	defer h.stickyMu.RUnlock()
+	out := make(map[string]StickyState, len(h.sticky))
+	for k, e := range h.sticky {
+		if e == nil || e.uid == "" {
+			continue
+		}
+		out[k] = StickyState{UID: e.uid, Count: e.reqCount, Max: e.maxReqs}
+	}
+	return out
 }
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -436,17 +468,46 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 运行统计插桩：每客户端请求一行（最终结果；中间换号尝试不逐行——对齐 sidecar 口径）。
+	// TTFB 由 statWriter 记首字节，耗时/吞吐在出口由 defer 收口；
+	// Status 未显式赋值 = 成功写回（200）。
+	var statRow statsEngine.ReqRow
+	statRow.Model = clientModel
+	if peek.Stream {
+		statRow.Mode = "流"
+	} else {
+		statRow.Mode = "非流"
+	}
+	sw := &statWriter{ResponseWriter: w, start: time.Now()}
+	w = sw // 此后所有写出（流式/非流式/透传错误）统一经 sw 计时
+	if h.stats != nil {
+		defer func() {
+			now := time.Now()
+			statRow.Time = now.Format("01-02 15:04:05")
+			statRow.TTFBMs = sw.ttfbMs
+			statRow.TotalSec = now.Sub(sw.start).Seconds()
+			if statRow.Status == 0 {
+				statRow.Status = http.StatusOK
+			}
+			h.stats.AddRequestRow(statRow)
+		}()
+	}
+
 	tried := map[string]bool{}
 	var lastErr error
+	// 最后一次上游错误的原始 status+body：候选耗尽时原样透传（而非包装成 503），
+	// 客户端才能看到 6004 重置时间等上游细节。内容类错误在循环内已提前透传，不受影响。
+	var lastStatus int
+	var lastBody []byte
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		acct := h.pickWithSticky(rt)
+		acct := h.pickWithSticky(rt, model)
 		if acct == nil {
 			break
 		}
 		if tried[acct.UID] {
 			// 粘性路由选回已尝试的账号，清除粘性记录后重试
 			h.stickyClear(rt)
-			acct = rt.Pool.PickExcluding(tried)
+			acct = rt.Pool.PickExcludingForModel(tried, model)
 			if acct == nil {
 				break
 			}
@@ -485,6 +546,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 会让整条渠道下线（且无号可轮换）。直接透传错误，重试交给客户端。
 				log.Printf("upstream transport error platform=%s uid=%s（单账号渠道不计错）err=%v",
 					rt.Kind, acct.UID, terr)
+				statRow.Status = http.StatusBadGateway
 				writeOpenAIError(w, http.StatusBadGateway, "upstream_error", terr.Error())
 				return
 			}
@@ -492,6 +554,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if status >= 400 {
+			statRow.Status = status // 所有透传出口（单账号/请求级/惩罚后）共用
 			h.stickyClear(rt)
 			kind := rt.Upstream.Classify(status, string(respBody))
 			// 单账号渠道：任何账号级惩罚都等于整条渠道下线，故一律原文透传、不罚账号。
@@ -507,8 +570,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			case provider.ErrHardCredit:
 				rt.Pool.Cooldown(acct.UID, pool.CoolHard, h.cfg.HardCooldown, "余额/权益不足")
 			case provider.ErrSoftRate:
-				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "429 rate limit")
-			case provider.ErrSessionDead:
+			// 429/6004 上游按模型限额（「您也可以切换其他模型继续使用」）：
+			// 只冷却该账号的该模型，同号其他模型继续参与选号；
+			// 短时间内第二个模型也撞墙时 CooldownModel 会升级整号冷却（防上游按账号计时）。
+			// 冷却时长按 6004 响应体的真实重置点解析（#82）：固定 60s 与上游「按重置点解封」
+			// 不符，解析失败/非正回退 SoftCooldown；升级时整号冷却到最晚重置点。
+			escalated := rt.Pool.CooldownModel(acct.UID, model, h.softRateCooldown(string(respBody)), "429 rate limit")
+			if escalated {
+				log.Printf("model cooldown escalated to account platform=%s uid=%s model=%s", rt.Kind, acct.UID, model)
+			} else {
+				log.Printf("model cooldown platform=%s uid=%s model=%s", rt.Kind, acct.UID, model)
+			}
+		case provider.ErrSessionDead:
 				rt.Pool.Disable(acct.UID, "session dead")
 			case provider.ErrNotFound:
 				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "upstream 404")
@@ -520,8 +593,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			case provider.ErrWafBlock, provider.ErrAccountFault, provider.ErrModelBlocked:
 				// 账号级风控/故障/模型不存在：软冷却，不累计错误计数。
 				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, kind.String())
-				transparentError(w, status, respBody)
-				return
+				if kind != provider.ErrAccountFault {
+					transparentError(w, status, respBody)
+					return
+				}
 			case provider.ErrServer:
 				if rt.NoCooldownOnServerError {
 					// 该渠道声明 5xx 为上游网关抖动（账号本身健康），
@@ -534,10 +609,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			default:
 				rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 			}
-			// 上游错误直接透传给客户端，不做包装
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(status)
-			_, _ = w.Write(respBody)
+			// 账号级错误（限流/欠费/登录态死/5xx/账号故障等）：换下一个账号重试本请求，
+			// 全部候选耗尽后才把最后一个上游错误透传给客户端（-p4 前此处直接 return，
+			// 导致客户端看到本可避免的 429/402）。内容类错误在上方 case 中已提前返回。
+			if kind.Rotatable() {
+				log.Printf("rotate platform=%s uid=%s kind=%s status=%d body=%s",
+					rt.Kind, acct.UID, kind, status, truncateBody(respBody))
+				lastErr = fmt.Errorf("upstream %s (http %d): %s", kind, status, truncateBody(respBody))
+				lastStatus = status
+				lastBody = respBody
+				continue
+			}
+			transparentError(w, status, respBody)
 			return
 		}
 		defer rc.Close()
@@ -552,14 +635,54 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.ledger.AppendUsage(ledger.UsageEntry{Ch: rt.Kind.String(), UID: acct.UID,
 					Model: stripChannel(clientModel), PT: pt, CT: ct, Src: src})
 			}
+			// 运行统计：模型维度记账（有 usage 才计，对齐 sidecar 的 u.found 语义）。
+			// 吞吐仅在流式下有意义：genSec = 总耗时 − TTFB；引擎内对 ≤50ms 的样本只计 TTFB。
+			if h.stats != nil {
+				pt, ct, _ := usageTokens(usage)
+				if pt > 0 || ct > 0 {
+					gen := time.Since(sw.start).Seconds() - float64(sw.ttfbMs)/1000
+					h.stats.AddUsage(clientModel, pt, ct, usageCredit(usage), sw.ttfbMs, gen, time.Now())
+					statRow.Tok = ct
+					if gen > 0 {
+						statRow.TokPerSec = float64(ct) / gen
+					}
+				}
+				statRow.Credit = usageCredit(usage)
+			}
 			if serr != nil {
 				// 上游中断/空流已尽力透传，错误仅在日志可见
 				log.Printf("stream relay end platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
+				// 流内业务错误（traework SOLO 的 event:error，如 3004 限流）：
+				// HTTP 200 与响应头早已发出，无法在同一请求内换号重试；唯一补救是把
+				// 中招账号冷却掉——下次请求挑号会自动换到别的账号（粘性路由见
+				// pickWithSticky 对 status.Cooling 的检查，故无需显式 stickyClear）。
+				var sec provider.StreamErrorClassifier
+				if errors.As(serr, &sec) {
+					kind := sec.Kind()
+					switch kind {
+					case provider.ErrSoftRate:
+						rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "stream business error: "+serr.Error())
+						log.Printf("stream error cooled platform=%s uid=%s kind=%s cooldown=%s",
+							rt.Kind, acct.UID, kind, h.cfg.SoftCooldown)
+					case provider.ErrHardCredit:
+						rt.Pool.Cooldown(acct.UID, pool.CoolHard, h.cfg.HardCooldown, "stream business error: "+serr.Error())
+						log.Printf("stream error cooled platform=%s uid=%s kind=%s cooldown=%s",
+							rt.Kind, acct.UID, kind, h.cfg.HardCooldown)
+					case provider.ErrSessionDead:
+						rt.Pool.Disable(acct.UID, "stream business error: session dead")
+						log.Printf("stream error disabled platform=%s uid=%s", rt.Kind, acct.UID)
+					default:
+						// 其余流内错误（如请求级拒绝）不罚账号，只记日志。
+						log.Printf("stream error ignored platform=%s uid=%s kind=%s",
+							rt.Kind, acct.UID, kind)
+					}
+				}
 			}
 			return
 		}
 		resp, err := rt.Upstream.Aggregate(rc, clientModel)
 		if err != nil {
+			statRow.Status = http.StatusBadGateway
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			return
 		}
@@ -570,19 +693,54 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				Model: stripChannel(clientModel), PT: pt, CT: ct, Src: src})
 		}
 		writeJSON(w, http.StatusOK, resp)
+		// 运行统计：必须在写回之后——此刻 statWriter 才记到首字节，TTFB 为真值；
+		// 一次性写回 gen≈0 由引擎 50ms 守卫兜底（只计 TTFB 不计吞吐——非流式本无吞吐样本，
+		// 若在写回前取值会把 ttfb=0/gen=端到端总时长喂进引擎，污染 AvgTTFB 与吞吐均值）。
+		if h.stats != nil {
+			u, _ := resp["usage"].(map[string]any)
+			pt, ct, _ := usageTokens(u)
+			if pt > 0 || ct > 0 {
+				gen := time.Since(sw.start).Seconds() - float64(sw.ttfbMs)/1000
+				h.stats.AddUsage(clientModel, pt, ct, usageCredit(u), sw.ttfbMs, gen, time.Now())
+				statRow.Tok = ct
+			}
+			statRow.Credit = usageCredit(u)
+		}
 		return
 	}
 	// 渠道没有可用账号：区分「未绑定账号」与「全部冷却/禁用」，给出可操作的引导。
 	// 客户端（如 Claude Code/Codex）只看到这条错误，必须足以让用户知道去面板做什么。
+	// 候选耗尽但轮换中有上游错误：优先透传最后一个上游原始响应（保持上游语义，
+	// 如 429+6004 重置时间；本次请求确实逐号尝试过，包装成 503 反而丢信息）。
+	if lastStatus > 0 && lastBody != nil {
+		transparentError(w, lastStatus, lastBody)
+		return
+	}
+	statRow.Status = http.StatusServiceUnavailable
 	sts := rt.Pool.List()
-	var bound, disabled, cooling int
+	now := time.Now()
+	var bound, disabled, cooling, modelAvail int
+	var earliest time.Time // 全池对该模型最早的解冻时刻（账号级与模型级冷却取最小）
+	consider := func(t time.Time) {
+		if t.After(now) && (earliest.IsZero() || t.Before(earliest)) {
+			earliest = t
+		}
+	}
 	for _, s := range sts {
 		if s.Disabled {
 			disabled++
-		} else if s.Cooling {
+			continue
+		}
+		if s.Cooling {
 			cooling++
+			consider(s.Until)
+			continue
+		}
+		bound++
+		if t, ok := s.ModelCooling[model]; ok {
+			consider(t)
 		} else {
-			bound++
+			modelAvail++
 		}
 	}
 	if len(sts) == 0 {
@@ -596,11 +754,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				rt.Kind, rt.Kind))
 		return
 	}
+	// 账号均健康、但请求模型在全部账号上都处于模型级限流冷却：
+	// 明确告知解冻时间，避免误以为账号故障去重登（2026-09-23 全池 6004 事故的教训）。
+	if bound > 0 && modelAvail == 0 {
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account",
+			fmt.Sprintf("渠道 %s 的 %d 个账号均健康，但模型 %s 已在全部账号上限流冷却：最早约 %s 解冻（到点自动恢复，无需重新登录），也可先切换其他模型",
+				rt.Kind, bound, model, formatUnfreeze(earliest)))
+		return
+	}
 	if bound == 0 {
 		// 匿名渠道没有「重新登录」这个概念，给出针对性提示（否则会误导用户去找登录入口）。
 		hint := fmt.Sprintf("%s 账号需重新登录（日志会有 refresh token is invalid）", rt.Kind)
 		if noLoginChannel(rt.Kind) {
 			hint = "该渠道无需登录，稍后重试即可（若持续失败请查看日志）"
+		}
+		// 多数是限流冷却而非登录态问题：给出最早解冻时间，重登提示仅在无任何冷却时兜底。
+		if cooling > 0 && !earliest.IsZero() {
+			hint = fmt.Sprintf("最早约 %s 解冻（多为限流冷却，到点自动恢复；若长时间未恢复再检查登录态）", formatUnfreeze(earliest))
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account",
 			fmt.Sprintf("渠道 %s 的 %d 个账号当前全部不可用（禁用 %d / 冷却 %d）：可在面板查看原因；%s",
@@ -613,6 +783,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		msg += ": " + lastErr.Error()
 	}
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
+}
+
+// formatUnfreeze 解冻时刻的可读格式：24h 内只报时刻（HH:MM），更远带日期。
+// 零值返回占位文案（调用方一般已排除零值，防御性兜底）。
+func formatUnfreeze(t time.Time) string {
+	if t.IsZero() {
+		return "稍后（请查看面板冷却原因）"
+	}
+	if time.Until(t) < 24*time.Hour {
+		return t.Format("15:04")
+	}
+	return t.Format("2006-01-02 15:04")
 }
 
 // noLoginChannel 报告渠道是否「无登录概念」（不存在凭证文件、也无重登入口）。
@@ -672,13 +854,103 @@ func stripChannel(model string) string {
 	return model
 }
 
+// usageCredit 从 usage 对象取上游下发的单次积分（WorkBuddy 系会回；
+// TraeWork 系 token_usage 帧无此字段 → 0，引擎侧按渠道余额差值分摊估算）。
+func usageCredit(u map[string]any) float64 {
+	if v, ok := u["credit"].(float64); ok {
+		return v
+	}
+	return 0
+}
+
+// statWriter 记录首字节写出时刻（TTFB 口径：客户端等到的第一个响应字节，
+// 含状态行/响应头——WriteHeader/Write/Flush 三者先到先记）。
+type statWriter struct {
+	http.ResponseWriter
+	start   time.Time
+	ttfbMs  int64
+	written bool
+}
+
+func (sw *statWriter) noteFirstByte() {
+	if !sw.written {
+		sw.written = true
+		sw.ttfbMs = time.Since(sw.start).Milliseconds()
+	}
+}
+
+func (sw *statWriter) WriteHeader(code int) {
+	sw.noteFirstByte()
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+func (sw *statWriter) Write(p []byte) (int, error) {
+	sw.noteFirstByte()
+	return sw.ResponseWriter.Write(p)
+}
+
+// Flush 透传给内层 ResponseWriter（流式 SSE 依赖；首帧 flush 也算首字节时机）。
+func (sw *statWriter) Flush() {
+	sw.noteFirstByte()
+	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// rewriteModel 改写发往上游的请求体：修补工具轮的空 content（见
+// normalizeToolTurnContent），并把 model 覆盖为路由后的真实模型名。
 func rewriteModel(body []byte, model string) ([]byte, error) {
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return nil, err
 	}
+	normalizeToolTurnContent(obj)
 	obj["model"] = model
 	return json.Marshal(obj)
+}
+
+// normalizeToolTurnContent 把「content 为 null 或缺失」的工具轮消息补成空串。
+//
+// 上游（实测 qoder/deepseek-flash，2026-09-24）要求带 tool_calls 的 assistant
+// 消息必须携带**字符串** content，null 或字段缺失会让它整请求拒答，并且报一个
+// 完全误导的错：
+//
+//	Messages with role 'tool' must be a response to a preceding message with 'tool_calls'
+//
+// 实测矩阵（同一份客户端真实请求，只改这一处）：
+//
+//	assistant.content = null  → 200 + provider_error 帧（空流）
+//	assistant.content = ""    → 正常出流
+//	content 字段缺失          → 200 + provider_error 帧（空流）
+//
+// 危害在于**中毒进历史**：客户端在「模型只回工具调用、没输出正文」时会把该
+// assistant 消息的 content 落成 null，之后这一轮永远留在 messages 里，于是该
+// 会话的每一发请求都被上游拒（重启客户端也不恢复，只能新建会话）。
+//
+// 放宽到 tool 角色一并处理：工具返回空内容时客户端同样可能给 null，上游对工具
+// 轮是同一套校验。
+func normalizeToolTurnContent(obj map[string]any) {
+	msgs, _ := obj["messages"].([]any)
+	for _, raw := range msgs {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := m["role"].(string)
+		switch role {
+		case "assistant":
+			// 只在真的带 tool_calls 时补：普通 assistant 消息 content=null 无证据会出问题。
+			if tc, ok := m["tool_calls"].([]any); !ok || len(tc) == 0 {
+				continue
+			}
+		case "tool":
+		default:
+			continue
+		}
+		if c, exists := m["content"]; !exists || c == nil {
+			m["content"] = ""
+		}
+	}
 }
 
 // ChannelModels 返回每个渠道当前生效的模型列表，与 /v1/models 同源
@@ -795,6 +1067,65 @@ func transparentError(w http.ResponseWriter, status int, body []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
+}
+
+// softRateResetMaxCap 解析出的重置时长上限：上游时间戳异常（如错给一年后）时不至于把号冻死。
+const softRateResetMaxCap = 24 * time.Hour
+
+// softRateCooldown 从限流响应体提取真实重置时间，冷却到该时刻（而非固定 60s）。
+// 命中形态：WorkBuddy 6004「...将在 2026-09-23 14:47:19 UTC+8 重置...」——该类限流
+// 按重置点解封，60s 软冷却过期后账号会被反复选中反复 429。解析失败/时长为非正值时
+// 回退默认 SoftCooldown。时间戳按 UTC+8 墙钟解析，与到期字段口径一致（AGENTS §6.18）。
+// 已知形态「2026-09-23 14:47:19」可能带「UTC+8」后缀，解析前剥掉。
+func (h *Handler) softRateCooldown(body string) time.Duration {
+	ts, ok := softRateResetTs(body)
+	if !ok {
+		return h.cfg.SoftCooldown
+	}
+	d := time.Until(ts)
+	if d <= 0 {
+		return h.cfg.SoftCooldown
+	}
+	if d > softRateResetMaxCap {
+		d = softRateResetMaxCap
+	}
+	return d
+}
+
+// softRateResetTs 提取「将在 <ts> 重置」中的时间戳（UTC+8 墙钟）；未命中返回 false。
+func softRateResetTs(body string) (time.Time, bool) {
+	const marker = "将在 "
+	i := strings.Index(body, marker)
+	if i < 0 {
+		return time.Time{}, false
+	}
+	rest := body[i+len(marker):]
+	end := strings.Index(rest, " 重置")
+	if end < 0 {
+		return time.Time{}, false
+	}
+	s := strings.TrimSpace(rest[:end])
+	// 「UTC+8」是时区说明而非时间一部分（layout 无法解析），剥掉
+	if suffix := " UTC+8"; strings.HasSuffix(s, suffix) {
+		s = strings.TrimSuffix(s, suffix)
+	}
+	const layout = "2006-01-02 15:04:05"
+	loc := time.FixedZone("UTC+8", 8*3600)
+	reset, err := time.ParseInLocation(layout, s, loc)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return reset, true
+}
+
+// truncateBody 错误日志/聚合 lastErr 用的响应体摘要。
+func truncateBody(body []byte) string {
+	const max = 200
+	s := string(body)
+	if len(s) > max {
+		return s[:max]
+	}
+	return s
 }
 
 func WorkBuddyStaticModels() []provider.ModelInfo {

@@ -46,14 +46,50 @@ function orderGroups(list) {
 // 异常等级：停用 / 冷却中 / 有错。上游用 level 三档映射颜色与文案。
 const LEVEL_TEXT = { disabled: '已停用', cool: '冷却中', err: '有错误' };
 
+// /api/logs 回的是 Go log 的原始文本行（不是对象），必须自己拆前缀：
+// "2026/10/08 14:41:47.062287 pricing fetched platform=oczen count=13"
+// → { time: "10-08 14:41:47", msg: "pricing fetched …" }
+const LOG_LINE_RE = /^(\d{4}\/\d{2}\/\d{2})\s(\d{2}:\d{2}:\d{2})(?:\.\d+)?\s(.*)$/;
+
+// 级别判定：与上游 appLogLevel 同口径（error > warn > info）
+function appLogLevel(text) {
+  if (/code=9074|ok=false|PANIC|FATAL|失败|错误|无效|Error|failed/.test(text)) return 'error';
+  if (/warn|WARN|警告/.test(text)) return 'warn';
+  return 'info';
+}
+
+function parseAppLog(lines) {
+  const out = [];
+  (lines || []).forEach((raw) => {
+    if (!raw) return;
+    const s = String(raw);
+    const m = s.match(LOG_LINE_RE);
+    out.push(m
+      ? { time: `${m[1].slice(5)} ${m[2]}`, msg: m[3], level: appLogLevel(m[3]) }
+      : { time: '', msg: s, level: appLogLevel(s) });
+  });
+  return out;
+}
+
 function AppLog({ lines }) {
-  if (!lines || !lines.length) return <div className="empty">暂无运行日志</div>;
+  const boxRef = useRef(null);
+  const firstRef = useRef(true);
+  const items = lines || [];
+  // 用户上翻阅读时不打扰；贴底（或首帧）才自动吸底
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const pinned = firstRef.current || box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+    firstRef.current = false;
+    if (pinned) box.scrollTop = box.scrollHeight;
+  }, [items]);
+  if (!items.length) return <div className="empty">暂无运行日志</div>;
   return (
-    <pre className="st-applog" id="stApplog">
-      {lines.slice(-APPLOG_MAX_LINES).map((l, i) => (
-        <div key={i} className={`st-applog-line lvl-${(l.level || '').toLowerCase()}`}>
-          <span className="st-applog-lvl">{l.level || ''}</span>
-          <span className="st-applog-msg">{l.msg || ''}</span>
+    <pre className="st-applog" id="stApplog" ref={boxRef}>
+      {items.slice(-APPLOG_MAX_LINES).map((l, i) => (
+        <div key={i} className={`st-applog-line lvl-${l.level}`}>
+          <span className="st-applog-time">{l.time}</span>
+          <span className="st-applog-msg">{l.msg}</span>
         </div>
       ))}
     </pre>
@@ -106,7 +142,7 @@ export default function Stats({ active, onToast }) {
     const loadAppLog = async () => {
       try {
         const d = await api('/api/logs');
-        if (alive) setLogLines((d && d.lines) || []);
+        if (alive) setLogLines(parseAppLog(d && d.lines));
       } catch (e) { /* 同上 */ }
     };
 
@@ -191,21 +227,20 @@ export default function Stats({ active, onToast }) {
         <div className="ucard-label">最近临期</div>
         <table className="table" id="stExpiry">
           <thead><tr>
-            <th>账号</th><th>平台</th><th className="num">余额</th><th className="num">临期</th>
-            <th>到期</th><th className="num">今日已耗</th><th className="num">可用天数</th>
+            <th>账号</th><th>平台</th><th className="num">临期额度</th>
+            <th>到期</th><th className="num">今日已耗</th><th className="num">剩余</th>
           </tr></thead>
           <tbody>
             {(snap.expiry || []).map((r) => (
-              <tr key={r.uid}>
+              <tr key={r.uid} className={r.risk ? 'warn' : ''}>
                 <td title={r.uid}>{r.nickname || shortUid(r.uid)}</td>
                 <td>{chLabel(r.group)}</td>
-                <td className="num">{creditCell(r.group, r.credits != null ? r.credits : r.amount)}</td>
                 <td className="num">{fmtCreditS(r.amount)}</td>
                 <td>{r.expire_at || '—'}</td>
                 <td className="num">{fmtCreditS(r.today_out)}</td>
                 <td className={`num${r.days_left <= 3 ? ' warn' : ''}`}>
-                  {r.days_left != null ? `${r.days_left} 天` : '—'}
-                  {r.burn_forecast ? <span className="muted">{` · ${r.burn_forecast}`}</span> : null}
+                  {r.days_left <= 0 ? '今日到期' : (r.days_left === 1 ? '明日到期' : `${r.days_left} 天后到期`)}
+                  {r.risk ? <span className="muted">{` · 预计作废 ${fmtCreditS(Math.max(0, r.amount - r.burn_forecast))}分`}</span> : null}
                 </td>
               </tr>
             ))}

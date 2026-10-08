@@ -701,6 +701,6 @@ html[data-theme="paper"] .shiny {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px; line-height: 1.7; color: var(--muted);
 }
-.st-applog-lvl { display: inline-block; min-width: 44px; color: var(--text); }
+.st-applog-time { display: inline-block; min-width: 96px; color: var(--text); }
 .st-applog-line.lvl-error .st-applog-msg { color: var(--danger); }
 .st-applog-line.lvl-warn .st-applog-msg { color: var(--warn); }

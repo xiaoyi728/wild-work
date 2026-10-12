@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/cline"
 	"wild-work/internal/config"
 	"wild-work/internal/ledger"
 	"wild-work/internal/login"
@@ -48,7 +49,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.6.2"
+const Version = "2.6.3"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -330,6 +331,16 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 	sort.SliceStable(items, func(i, j int) bool { return channelRank(kindOf(items[i])) < channelRank(kindOf(items[j])) })
 }
 
+// creditsNAKind 判定该渠道的「积分」概念是否不适用（面板显示「不适用」而不是 0）。
+//
+// 两种成因不同，但 UI 处理一致：
+//   - oczen：匆名通道，根本没有账号/余额概念；
+//   - cline：上游**确无余额端点**（/credits /usage /billing /quota /me 等 12 个候选实测全 404），
+//     属于「查不到」。把这种情况显示成 0 会被误读成「额度已用光」，故同样走 NA。
+func creditsNAKind(group string) bool {
+	return group == provider.Oczen.String() || group == provider.Cline.String()
+}
+
 // noExplicitCheckinKinds 不支持显式签到（手动按钮）的渠道。
 // WorkBuddy 国际版改为定时自动对话保活并领取日活奖励（详见 workbuddyai.DailyCheckin），
 // 无需用户手动触发，故也不提供手动签到入口；
@@ -339,9 +350,10 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 // MonkeyCode 一期也不提供手动签到：上游未提供额度或签到端点。
 // 小浣熊一期也不提供手动签到：上游未提供额度或签到端点。
 // Loomy 一期也不提供手动签到：上游未提供额度或签到端点。
+// Cline 走官方 API Key：无签到活动、Key 不过期 ⇒ 既不需手动签到也不需保活。
 // OpenCodeZen 匿名通道无账号概念，既无签到也无积分。
 func noExplicitCheckin(k provider.Kind) bool {
-	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode || k == provider.Raccoon || k == provider.Loomy || k == provider.Oczen
+	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode || k == provider.Raccoon || k == provider.Loomy || k == provider.Oczen || k == provider.Cline
 }
 
 // findRuntimeAuth 按 uid 反查账号归属的 runtime 与凭证。
@@ -496,9 +508,9 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		// 导入型渠道：凭据来自本机已登录的官方客户端，上游没有可复现的 OAuth 流程。
 		return "", fmt.Errorf("%s 渠道无需登录：请在面板点「从本机客户端导入」（复用本机已登录的官方客户端凭据）", k)
 	case provider.Raccoon:
-		// 小浣熊：浏览器授权登录 —— 登录期间临时接管 office-raccoon 协议回调，
-		// 拿到网页授权码后自行兑换 token，随后恢复注册表（见 internal/login_raccoon）。
-		// 面板同时保留「从本机客户端导入」作为回退路径。
+		// 小浣熊：网页版自动登录 —— 拉起独立 profile 的浏览器，用户在网页登录后
+		// 经 CDP 捕获 Cookie 里的 refresh_token 并换取凭据（见 internal/login_raccoon/web.go）。
+		// 面板同时保留「从本机客户端导入」作为替代路径。
 	case provider.Loomy:
 		// 导入型渠道：凭据来自本机已登录的官方客户端，上游没有可复现的 OAuth 流程。
 		return "", fmt.Errorf("%s 渠道无需登录：请在面板点「从本机客户端导入」（复用本机已登录的官方客户端凭据）", k)
@@ -534,7 +546,7 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.QwenWork:
 		a.loginClient = loginqwenwork.NewClient()
 	case provider.Raccoon:
-		a.loginClient = loginraccoon.NewClient()
+		// 网页版登录靠 CDP，不用 HTTP client；置 nil 即可（pollLogin 里也不再用它）。
 	default:
 		a.loginClient = login.NewClient()
 	}
@@ -558,12 +570,8 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.QwenWork:
 		authURL, err = loginqwenwork.Start(a.loginClient, a.loginStateFP)
 	case provider.Raccoon:
-		// 协议回调接管要把「自身 exe 绝对路径」写进注册表命令行，故这里先取 os.Executable。
-		if exe, eerr := os.Executable(); eerr != nil {
-			err = fmt.Errorf("无法确定自身可执行文件路径：%w", eerr)
-		} else {
-			authURL, err = loginraccoon.Start(a.loginClient, a.loginStateFP, a.stateDir(), exe)
-		}
+		// 网页版登录：拉起独立 profile 的浏览器并返回登录页地址（跨平台，无需注册表/客户端）。
+		authURL, err = loginraccoon.Start()
 	default:
 		ep := login.EndpointsForRegion(a.cfg.Region)
 		authURL, err = login.Start(a.loginClient, a.loginStateFP, ep)
@@ -598,9 +606,9 @@ func (a *App) CancelLogin() error {
 	if kind == provider.QwenWork {
 		loginqwenwork.Shutdown()
 	}
-	// 小浣熊授权登录：取消时立刻恢复注册表（幂等；pollLogin 的 defer 还会再兜一次）
+	// 小浣熊网页版登录：取消时关闭浏览器（幂等；pollLogin 的 defer 还会再兜一次）
 	if kind == provider.Raccoon {
-		loginraccoon.Shutdown(a.loginStateFP, a.stateDir())
+		loginraccoon.Shutdown()
 	}
 	log.Printf("登录已取消")
 	return nil
@@ -612,10 +620,10 @@ func (a *App) pollLogin(ctx context.Context) {
 		if r := recover(); r != nil {
 			log.Printf("login poll panic: %v", r)
 		}
-		// 小浣熊授权登录：无论成功、失败、超时、取消还是 panic，
-		// 都必须把 office-raccoon 注册表恢复原状（Shutdown 幂等）。
+		// 小浣熊网页版登录：无论成功、失败、超时、取消还是 panic，
+		// 都必须关闭独立 profile 的浏览器（Shutdown 幂等）。
 		if a.loginKind == provider.Raccoon {
-			loginraccoon.Shutdown(a.loginStateFP, a.stateDir())
+			loginraccoon.Shutdown()
 		}
 		a.finishLogin()
 	}()
@@ -703,14 +711,14 @@ func (a *App) pollLogin(ctx context.Context) {
 			continue
 		}
 		if a.loginKind == provider.Raccoon {
-			r, err := loginraccoon.Poll(a.loginClient, a.loginStateFP, a.stateDir())
+			r, err := loginraccoon.Poll()
 			if err == nil {
 				a.completeRaccoonLogin(r)
 				return
 			}
 			if !errors.Is(err, loginraccoon.ErrPending) {
-				// 终态错误（回调不可用 / 授权码兑换失败）：立即结束轮询，
-				// 由 defer 恢复注册表；继续轮询只会重复报同一个错。
+				// 终态错误（未捕获到账号 / 换取令牌失败 / 已取消）：立即结束轮询，
+				// 由 defer 关闭浏览器；继续轮询只会重复报同一个错。
 				log.Printf("raccoon login poll failed: %v", err)
 				a.setLoginError("登录失败：" + err.Error())
 				return
@@ -728,10 +736,10 @@ func (a *App) pollLogin(ctx context.Context) {
 	}
 }
 
-// completeRaccoonLogin 小浣熊授权登录成功：把网页授权码换来的 token 落成本工具凭据。
+// completeRaccoonLogin 小浣熊网页版登录成功：把捕获并换取的 token 落成本工具凭据。
 // 凭据形态与「从本机客户端导入」完全一致（两者拿到的是同一个上游账号）：
 // uid 取 access_token 的 JWT name claim，domain/apiHost 对齐 internal/raccoon 的调用前缀。
-// 小浣熊无签到活动，故不做首次签到；access_token 约 2h，靠 refresh_token 续期。
+// 小浣熊无签到活动，故不做首次签到；access_token 约 1h，靠 refresh_token 续期。
 func (a *App) completeRaccoonLogin(r loginraccoon.Result) {
 	uid := strings.TrimSpace(jwtClaim(r.AccessToken, "name"))
 	if uid == "" {
@@ -739,7 +747,7 @@ func (a *App) completeRaccoonLogin(r loginraccoon.Result) {
 	}
 	expiresAt := r.ExpiresAt
 	if expiresAt <= 0 {
-		expiresAt = time.Now().Add(2 * time.Hour).Unix() // 实测 access_token 寿命约 2h
+		expiresAt = time.Now().Add(time.Hour).Unix() // 实测 access_token 寿命约 1h
 	}
 	log.Printf("raccoon 登录成功 uid=%s org=%s refresh_token=%t", uid, r.OfficeOrgName, r.RefreshToken != "")
 	doc := authDoc{
@@ -1001,6 +1009,71 @@ func (a *App) SubmitGLMToken(refreshToken string) (string, error) {
 	return r.UID, nil
 }
 
+// SubmitClineKey 提交用户粘贴的 Cline 官方 API Key（sk_…）：验证 → 落盘 → 重载账号池。
+//
+// 验证只调 GET /api/v1/api-keys —— **零 token 消耗**，避免「添加账号即烧额度」。
+// uid 取该端点中 key_prefix 与本 Key 相符那条的 apk- id（实测 key_prefix = Key 前 10 字符）。
+//
+// 第二个返回值是**告警**（非错误，账号照样保存）：官方配额字段名是 `…UsageCostUSDPerUser`，
+// 即上限按 Cline **账号**计 ⇒ 同一账号的多把 Key 共享一份额度。
+// 由于 api-keys 返回的是本账号**全部** Key，可据此发现「两把 Key 同属一个账号」并提醒
+// 用户去注册独立账号，而不是误以为多 Key 等于多额度。
+func (a *App) SubmitClineKey(apiKey string) (string, string, error) {
+	key := strings.TrimSpace(apiKey)
+	res, err := cline.ValidateKey(key)
+	if err != nil {
+		return "", "", err
+	}
+
+	// 同账号检测：新 Key 所在账号的 Key 列表 ∩ 已入库账号的 Key 前缀
+	warn := ""
+	if existing, lerr := auth.LoadClineDir(a.cfg.AuthDir); lerr == nil {
+		family := append([]string{res.KeyPrefix}, res.SiblingKeys...)
+		for _, e := range existing {
+			p := e.AccessTokenValue()
+			if len(p) > cline.KeyPrefixLen {
+				p = p[:cline.KeyPrefixLen]
+			}
+			if p == "" {
+				continue
+			}
+			for _, kp := range family {
+				if kp == p {
+					warn = fmt.Sprintf("这把 Key 与已添加的账号 %s 同属一个 Cline 账号，共享同一份额度"+
+						"（官方按账号计），不会增加可用额度。请注册独立 Cline 账号并各自建 Key。", e.UID)
+					break
+				}
+			}
+			if warn != "" {
+				break
+			}
+		}
+	}
+
+	name := res.AccountName
+	if name == "" {
+		name = "API Key " + res.KeyPrefix
+	}
+	_ = os.MkdirAll(a.cfg.AuthDir, 0o755)
+	ca := &auth.Auth{
+		Kind:        "cline",
+		UID:         res.UID,
+		Nickname:    name,
+		AccessToken: key,
+		// Key 无过期概念：ExpiresAt 必须远期，0 会让 NeedsRefresh 恒真（不变量 21 同款陷阱）
+		ExpiresAt: cline.FarFutureExpiry(),
+		FilePath:  filepath.Join(a.cfg.AuthDir, "cline-"+res.UID+".json"),
+	}
+	if err := ca.SaveAtomic(); err != nil {
+		return "", "", fmt.Errorf("保存 Cline 凭据失败：%w", err)
+	}
+	// 日志零 token（不变量 2）：只打 uid 与展示名，绝不打完整 Key
+	log.Printf("cline 账号已添加（粘贴 Key）uid=%s name=%s 同账号告警=%v", res.UID, name, warn != "")
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.Cline)
+	return res.UID, warn, nil
+}
+
 // StartGLMAutoLogin 发起智谱清言自动登录：拉起独立 profile 的浏览器，
 // 用户在真实浏览器里登录，后台经 CDP 自动捕获 Cookie。
 //
@@ -1238,6 +1311,15 @@ func (a *App) reloadAccounts() {
 			rt.Pool.SyncToDir(auths)
 		}
 	}
+	// Cline：一把官方 API Key = 一个账号，凭据由面板「粘贴 API Key」写入。
+	if rt := a.runtime(provider.Cline); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadClineDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload cline accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
 }
 
 // CheckinAccount 单个账号立即签到。
@@ -1325,25 +1407,40 @@ func (a *App) refreshIfSessionDead(rt *Runtime, au *auth.Auth, err error) bool {
 	return true
 }
 
-// creditTotals 一次上游调用同时取回「可消耗余额」「临期额度」与「不可消耗余额」。
-// 三者同源于 UserResourceDetail 的单次响应：remain 即 pool 路由口径的可消耗余额，
-// 临期额度为其中临期阈值内到期的部分（config.schedule.expiring_threshold_hours，
-// 默认 24h，实际口径「到期日≤今天+阈值」），不可消耗部分由条目的 Usable 标记汇总得到
-// （渠道不区分专用池时为 0；渠道不下发到期时间时临期为 0，如 Qoder）。
-// 遇 401 自动刷新 token 并重试一次（见 refreshIfSessionDead）。
-func (a *App) creditTotals(rt *Runtime, au *auth.Auth) (usable, expiring, unusable int64, err error) {
-	remain, items, err := rt.Upstream.UserResourceDetail(au)
+// creditSnapshot 实时拉取明细并算出「可消耗余额」「临期额度」「不可消耗余额」三口径，
+// 成功即回写 pool 快照 + ledger 差分。三者同源于 UserResourceDetail 的单次响应：remain 即
+// pool 路由口径的可消耗余额，临期额度为其中临期阈值内到期的部分
+// （config.schedule.expiring_threshold_hours，默认 24h，实际口径「到期日≤今天+阈值」），
+// 不可消耗部分由条目的 Usable 标记汇总得到（渠道不区分专用池时为 0；渠道不下发到期时间时
+// 临期为 0，如 Qoder）。遇 401 自动刷新 token 并重试一次（见 refreshIfSessionDead）。
+//
+// 顶层（卡片/汇总条/Pick 选号）与明细弹层从此同源：旧实现里 pool 快照只被「刷新事件」
+// （手动刷新/全部刷新/自动循环）更新，而明细是 hover 时的实时值，两者必然相差区间内消耗量
+// ——面板「同屏两个数字对不上」实为时差而非上游口径问题（已实测同响应内上游汇总字段==明细池
+// 相加）。hover 明细也回写后，弹层展开那一刻全屏数字同源于同一响应。
+func (a *App) creditSnapshot(rt *Runtime, au *auth.Auth) (remain int64, items []provider.ResourceItem, expiring, unusable int64, err error) {
+	remain, items, err = rt.Upstream.UserResourceDetail(au)
 	if err != nil && a.refreshIfSessionDead(rt, au, err) {
 		remain, items, err = rt.Upstream.UserResourceDetail(au)
 	}
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, nil, 0, 0, err
 	}
 	_, unusable = provider.Summarize(items)
 	expiring = provider.ExpiringWithin(items, a.cfg.ExpiringThresholdDur)
 	// 差分记账：与上次快照对比产出 earn/spend/expire 流水（锦上添花，失败不干扰）
 	if a.ledger != nil {
 		a.ledger.DiffCredits(rt.Kind.String(), au.UID, remain, items)
+	}
+	rt.Pool.SetCreditDetail(au.UID, remain, expiring, unusable)
+	return remain, items, expiring, unusable, nil
+}
+
+// creditTotals 取三口径小计（不含 items），并在同一响应上喂入运行统计的最近临期。
+func (a *App) creditTotals(rt *Runtime, au *auth.Auth) (usable, expiring, unusable int64, err error) {
+	remain, items, expiring, unusable, err := a.creditSnapshot(rt, au)
+	if err != nil {
+		return 0, 0, 0, err
 	}
 	// 运行统计：账号最近临期喂入（复用同一响应的 items，免二次上游调用）
 	a.applyExpiryFromItems(au.UID, items)
@@ -1392,7 +1489,6 @@ func (a *App) StartCreditAutoRefresh(ctx context.Context, kinds []provider.Kind,
 						log.Printf("credit auto-refresh failed platform=%s uid=%s err=%v", k, st.UID, err)
 						continue
 					}
-					rt.Pool.SetCreditDetail(st.UID, usable, expiring, unusable)
 					log.Printf("credit auto-refresh platform=%s uid=%s remain=%d expiring=%d unusable=%d", k, st.UID, usable, expiring, unusable)
 				}
 			}
@@ -1476,7 +1572,6 @@ func (a *App) RefreshCredits(uid string) (int64, error) {
 		log.Printf("credits refresh failed platform=%s uid=%s err=%v", rt.Kind, uid, err)
 		return 0, err
 	}
-	rt.Pool.SetCreditDetail(uid, usable, expiring, unusable)
 	log.Printf("credits refresh success platform=%s uid=%s remain=%d expiring=%d unusable=%d", rt.Kind, uid, usable, expiring, unusable)
 	return usable, nil
 }
@@ -1515,8 +1610,7 @@ func (a *App) RefreshAll() RefreshSummary {
 				ps.Accounts = append(ps.Accounts, AccountRefresh{UID: st.UID, OK: false, Msg: "no token"})
 				continue
 			}
-			if usable, expiring, unusable, err := a.creditTotals(rt, au); err == nil {
-				rt.Pool.SetCreditDetail(st.UID, usable, expiring, unusable)
+			if usable, _, _, err := a.creditTotals(rt, au); err == nil {
 				ps.OK++
 				ps.Accounts = append(ps.Accounts, AccountRefresh{UID: st.UID, OK: true, Remain: usable})
 			} else {
@@ -1595,22 +1689,19 @@ func (a *App) DisableAccount(uid string, disabled bool) error {
 	return nil
 }
 
-// ResourceDetail 查询单个账号积分明细（含可用/不可用小计）。
+// ResourceDetail 查询单个账号积分明细（含可用/不可用/临期小计）。
 // 返回的 remain 与 items 同时给出：remain 供 pool 口径对账，items 供 UI 明细展示。
-// 遇 401 自动刷新 token 并重试一次，避免因本地 token 已失效导致明细永远为空。
-func (a *App) ResourceDetail(uid string) (int64, []provider.ResourceItem, error) {
+// 取数经 creditSnapshot：实时拉取的同时把同一响应回写 pool 快照，故面板展开明细后
+// 卡片顶层与弹层同源一致，不再依赖刷新按钮弥合时差；401 自愈亦在 creditSnapshot 内。
+func (a *App) ResourceDetail(uid string) (remain int64, items []provider.ResourceItem, expiring, unusable int64, err error) {
 	rt, au := a.findRuntimeAuth(uid)
 	if rt == nil || au == nil || rt.Upstream == nil {
-		return 0, nil, fmt.Errorf("unknown account %s", uid)
+		return 0, nil, 0, 0, fmt.Errorf("unknown account %s", uid)
 	}
 	if rt.Kind == provider.Oczen {
-		return 0, nil, fmt.Errorf("OpenCodeZen 匿名通道无积分，不适用")
+		return 0, nil, 0, 0, fmt.Errorf("OpenCodeZen 匿名通道无积分，不适用")
 	}
-	remain, items, err := rt.Upstream.UserResourceDetail(au)
-	if err != nil && a.refreshIfSessionDead(rt, au, err) {
-		remain, items, err = rt.Upstream.UserResourceDetail(au)
-	}
-	return remain, items, err
+	return a.creditSnapshot(rt, au)
 }
 
 // ---------------------------------------------------------------------------
@@ -1938,11 +2029,11 @@ type AccountView struct {
 	CreditsStale bool `json:"credits_stale,omitempty"`
 	// CreditsNA 积分概念不适用（如 OpenCodeZen 匿名通道），UI 显示「不适用」
 	// 而非 0，并隐藏刷新积分与明细入口。
-	CreditsNA      bool              `json:"credits_na,omitempty"`
-	Cooling        bool              `json:"cooling"`
-	Until          string            `json:"until"`
-	Reason         string            `json:"reason"`
-	Disabled       bool              `json:"disabled"`
+	CreditsNA bool   `json:"credits_na,omitempty"`
+	Cooling   bool   `json:"cooling"`
+	Until     string `json:"until"`
+	Reason    string `json:"reason"`
+	Disabled  bool   `json:"disabled"`
 	// ModelCooling 模型级冷却（model → 解冻时刻）；仅该账号该模型限流，账号整体仍可用
 	// （429/6004 上游按模型计）。面板据此区分「整号冷却」与「个别模型限流」。
 	ModelCooling   map[string]string `json:"model_cooling,omitempty"`
@@ -2061,7 +2152,7 @@ func (a *App) accountViews() []AccountView {
 			UnusableCredits: s.UnusableCredits,
 			CreditsStale:    s.CreditsStale,
 			// 匿名渠道无积分：前端据此显示「不适用」
-			CreditsNA:      group == provider.Oczen.String(),
+			CreditsNA:      creditsNAKind(group),
 			Cooling:        s.Cooling,
 			Until:          fmtTime(s.Until),
 			Reason:         s.Reason,
@@ -2284,6 +2375,22 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid})
 	})
+	mux.HandleFunc("POST /api/login/cline_key", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			APIKey string `json:"api_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		uid, warn, err := a.SubmitClineKey(req.APIKey)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warning": warn})
+	})
+
 	mux.HandleFunc("POST /api/account/checkin", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UID string `json:"uid"`
@@ -2343,18 +2450,21 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			UID string `json:"uid"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		remain, items, err := a.ResourceDetail(req.UID)
+		remain, items, expiring, _, err := a.ResourceDetail(req.UID)
 		if err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		// 可用/不可用小计在服务端算好，前端只负责展示，避免两边口径漂移。
-		usable, unusable := provider.Summarize(items)
+		usable, unusableSum := provider.Summarize(items)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"remain":          remain,
 			"items":           items,
 			"usable_remain":   usable,
-			"unusable_remain": unusable,
+			"unusable_remain": unusableSum,
+			// 临期小计与 pool 快照同源于本次响应：前端回写卡片时三个数字一起更新，
+			// 避免「可用已同步、临期还是旧值」的半新半旧展示。
+			"expiring_remain": expiring,
 		})
 	})
 	mux.HandleFunc("POST /api/config/checkin_times", func(w http.ResponseWriter, r *http.Request) {

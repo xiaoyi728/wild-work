@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -31,7 +30,8 @@ import (
 //
 // 设计要点：
 //   - 路径**自适应探测**（多候选 + 环境变量覆盖），不做硬编码单一路径；
-//   - 只在 Windows 生效（客户端只有 Windows 版）；
+//   - Windows/macOS 均生效（Loomy/小浣熊/MonkeyCode 官方客户端 2026 年起均有 macOS 版，
+//     凭据路径按平台分别探测；找不到时返回带路径的错误提示）；
 //   - 写入走 tmp+rename 原子替换、0600，并与 internal/auth.Parse 的嵌套格式逐字段对齐；
 //   - **绝不打印凭据值**（日志只记文件名与 uid）。
 
@@ -74,10 +74,16 @@ type accountSection struct {
 }
 
 // ImportLocalCredentials 从本机已安装的官方客户端导入指定渠道凭据。
+//
+// 跨平台口径（issue #75）：不在此处做整体 Windows 门禁——三个导入渠道的
+// 路径探测各自尽力而为、找不到客户端凭据时返回明确错误。
+//  - Raccoon 用 os.UserHomeDir() + BOX_AGENT_CONFIG_DIR，天然跨平台
+//    （macOS/Linux 同样有官方客户端）；
+//  - Loomy / MonkeyCode 的路径候选以 POSIX/Win 通用环境变量为主，
+//    客户端配置落在标准目录即可命中，非 Windows 上找不到时给出明确报错。
+//  注：真正仅 Windows 的是「浏览器授权登录」（raccoon 依赖 HKCU 的
+//  office-raccoon:// 协议注册，见 protocol_windows.go）。
 func (a *App) ImportLocalCredentials(channel string) (*ImportLocalResult, error) {
-	if runtime.GOOS != "windows" {
-		return nil, errors.New("「从本机客户端导入」目前仅支持 Windows（MonkeyCode 客户端只有 Windows 版）")
-	}
 	switch provider.Kind(strings.TrimSpace(channel)) {
 	case provider.MonkeyCode:
 		return a.importMonkeyCode()
@@ -256,6 +262,11 @@ func monkeyCodeCookiePath(file string) (string, error) {
 		cands = append(cands, filepath.Join(local, "com.chaitin.baizhi.monkeycode", file))
 		cands = append(cands, filepath.Join(local, "MonkeyCode", file))
 	}
+	// macOS：Electron 数据目录 `~/Library/Application Support/com.chaitin.baizhi.monkeycode/`
+	// （2026-10-08 实测 macOS 版客户端目录与 Windows 版同名，cookie 文件格式一致）。
+	if home, err := os.UserHomeDir(); err == nil {
+		cands = append(cands, filepath.Join(home, "Library", "Application Support", "com.chaitin.baizhi.monkeycode", file))
+	}
 	for _, p := range cands {
 		if fileExists(p) {
 			return p, nil
@@ -301,6 +312,11 @@ func monkeyCodeSettingsPath() (string, error) {
 	if local := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); local != "" {
 		cands = append(cands, filepath.Join(local, "com.chaitin.baizhi.monkeycode", "ohmyagent", "settings.json"))
 		cands = append(cands, filepath.Join(local, "MonkeyCode", "ohmyagent", "settings.json"))
+	}
+	// macOS：settings.json 在 `~/Library/Application Support/com.chaitin.baizhi.monkeycode/ohmyagent/`
+	// （2026-10-08 实测与 Windows 版同级目录结构一致）。
+	if home, err := os.UserHomeDir(); err == nil {
+		cands = append(cands, filepath.Join(home, "Library", "Application Support", "com.chaitin.baizhi.monkeycode", "ohmyagent", "settings.json"))
 	}
 	for _, p := range cands {
 		if fileExists(p) {
@@ -394,13 +410,18 @@ func loomyClientSessionPath() (string, error) {
 	if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
 		cands = append(cands, filepath.Join(appData, "Loomy", "auth-session.json"))
 	}
+	// macOS：客户端数据目录 `~/Library/Application Support/loomy/`（2026-10-08 实测
+	// 桌面版凭据即该目录下的 auth-session.json，字段与 Windows 版一致）。
+	if home, err := os.UserHomeDir(); err == nil {
+		cands = append(cands, filepath.Join(home, "Library", "Application Support", "loomy", "auth-session.json"))
+	}
 	for _, p := range cands {
 		if fileExists(p) {
 			return p, nil
 		}
 	}
 	if len(cands) == 0 {
-		return "", errors.New("未找到 Loomy 客户端目录（C:\\Users\\Public\\Loomy 不存在）：请先安装并登录 Loomy 客户端")
+		return "", errors.New("未找到 Loomy 客户端目录（C:\\Users\\Public\\Loomy 或 ~/Library/Application Support/loomy 不存在）：请先安装并登录 Loomy 客户端")
 	}
 	return "", fmt.Errorf("未找到 Loomy 会话文件（已尝试 %d 个路径）：请先在客户端完成登录", len(cands))
 }

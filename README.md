@@ -1,18 +1,19 @@
 # wild-work
 
-> 多渠道账号聚合桌面工具——把 WorkBuddy(CodeBuddy) 国内版/国际版、TraeWork、TraeCode、QoderCN、QoderCOM（国际版）、千问办公、智谱清言、MonkeyCode、小浣熊、Loomy 的多个账号聚合成一个 OpenAI 兼容 API，并额外提供**无需账号**的 OpenCodeZen 匿名免费通道；单进程常驻、双击启动、浏览器管理。
+> 多渠道账号聚合桌面工具——把 WorkBuddy(CodeBuddy) 国内版/国际版、TraeWork、TraeCode、QoderCN、QoderCOM（国际版）、千问办公、智谱清言、MonkeyCode、小浣熊、Loomy、Cline 的多个账号聚合成一个 OpenAI 兼容 API，并额外提供**无需账号**的 OpenCodeZen 匿名免费通道；单进程常驻、双击启动、浏览器管理。
 
 ## 本仓库说明
 
-本仓库是 [rockswang/wild-work](https://github.com/rockswang/wild-work) 的增强分支，代码基线已同步至**上游 v2.6.2**（`1bcf5ef`），在此之上保留并扩展了本地能力：
+本仓库是 [rockswang/wild-work](https://github.com/rockswang/wild-work) 的增强分支，代码基线已同步至**上游 v2.6.3+**（`d24e46d`，2026-10-12），在此之上保留并扩展了本地能力：
 
 | 本地能力 | 说明 |
 |---------|------|
-| **React 面板** | 管理面板已从 vanilla JS 重构为 React + Vite（`cmd/wild-work/webui/`），产物 `web-app/` 由 `//go:embed` 打进二进制；带自研渲染闸门 `npm run check`（5 个场景断言可见控件）。`cmd/wild-work/web/` 仅保留为上游面板的 diff 基准，不再参与 embed |
+| **React 面板** | 管理面板已从 vanilla JS 重构为 React + Vite（`cmd/wild-work/webui/`），产物 `web-app/` 由 `//go:embed` 打进二进制；带自研渲染闸门 `npm run check`（6 个场景断言可见控件与完整模型 ID）。`cmd/wild-work/web/` 保留本地视觉层与桌宠，不参与 embed |
 | **桌宠** | 面板内可开关的桌面宠物（`webui/src/pet.js` + `webui/public/pet/` 资源），读取面板下发的流量计数（`GET /api/pulse`）做互动反馈 |
 | **运行统计面板** | 第三个 tab（见下），30s 自动刷新，接 `/api/stats` 与 `/api/stats/logs` |
 | **面板端点防护** | 管理接口的跨源写请求校验、账号列表仅返回本实例自有账号（`ownAccounts`） |
-| **记账修正** | 7 天窗口跨月漏扫修复、Trae 系 Stream usage 恒空修复、新 key 条目计收入账、签到发放权威入账与差分补丁 |
+| **记账修正** | 7 天窗口跨月漏扫修复、月末 `AddDate` 溢出导致误删上月流水的修复、Trae 系 Stream usage 恒空修复、新 key 条目计收入账、签到发放权威入账与差分补丁 |
+| **面板接线闸门** | 静态扫描 `provider` 已声明的渠道，双向锁死「已声明 ⇒ 必须在面板渠道顺序表里」；Cline 曾因漏进该表而完全不出现于 `/api/fees`（费率表、模型查找、用量折线全部拿不到它，且不报错） |
 
 构建产物需**先构建前端再编译 Go**（embed 依赖），完整步骤见 [DEVELOPMENT.md](DEVELOPMENT.md)。本仓库不发布预编译二进制，请自行构建或使用上游 Releases。
 
@@ -20,8 +21,8 @@
 
 - **多协议兼容**：`/v1/chat/completions`（OpenAI Chat）、`/v1/models`、`/v1/responses`（OpenAI Responses）、`/v1/messages` 与 `/v1/messages/count_tokens`（Anthropic Messages）、`/v1/systemone`（Jev 结构化决策），可直接接入 `codex` CLI、`claude` CLI 与需要语义决策的自动化流程
 - **模型前缀路由**：模型 ID 带 `<渠道>/` 前缀，粘性路由优先复用账号以提升会话缓存利用率，临期积分优先消耗
-- **十二渠道聚合**：WorkBuddyCN + WorkBuddyAI + TraeWork + TraeCode + QoderCN + QoderCOM + 千问办公 + 智谱清言（`glm/*`）+ MonkeyCode（`monkeycode/*`）+ 小浣熊（`raccoon/*`）+ Loomy（`loomy/*`）+ OpenCodeZen（`oczen/*`，匿名免费、无需账号）；旧 Qoder（`qoder/*`）路由保留但已从界面下线
-- **导入型渠道**：`/api/account/import_local` 读取本机已登录的官方客户端凭据——MonkeyCode / 小浣熊 / Loomy 走此路径，无需浏览器登录
+- **十三渠道聚合**：WorkBuddyCN + WorkBuddyAI + TraeWork + TraeCode + QoderCN + QoderCOM + 千问办公 + 智谱清言（`glm/*`）+ Cline（`cline/*`，官方 `sk_` API Key 免费池）+ MonkeyCode（`monkeycode/*`）+ 小浣熊（`raccoon/*`）+ Loomy（`loomy/*`）+ OpenCodeZen（`oczen/*`，匿名免费、无需账号）；旧 Qoder（`qoder/*`）路由保留但已从界面下线
+- **三种添加形态**：浏览器授权登录 / **网页版自动登录**（小浣熊：拉起独立 profile 的 Edge/Chrome，登录后经 CDP 捕获凭据，Win/mac/Linux 通用，不再依赖注册表或本机客户端）/ **导入本机客户端凭据**（MonkeyCode / 小浣熊 / Loomy，Windows 与 macOS 路径均已探测）；Cline 走第四种——粘贴官方 API Key（只调 `/api-keys` 验证，零 token 消耗）
 - **账号池调度**：请求级重试 + 粘性路由、账号级错误**在同一请求内换号**（不再一错即禁整号）、**模型级冷却**（429 只冷却命中的模型而非整个账号）、分级冷却状态机（软限流 / 风控 / 账号故障分别处理）
 - **流空闲监控**：连续 300 秒读不到任何字节即判定上游卡死并断流，避免请求无限挂起
 - **请求体指纹脱敏**：自动清除 Claude Code / Codex CLI 注入的模板句与 `<developer>` 角色，降低上游内容拦截误判
@@ -29,7 +30,8 @@
 - **自动签到与保活**：每日定时签到领额度（Qoder 双区含 10:00–12:00 窗口重试），token 保活，WorkBuddy 国际版自动领日活奖励
 - **双口径记账**：token 流水（渠道×模型）与积分流水（入项/消耗/过期）分开记账，面板折线图 + 模型用量榜 + 积分流水对账，临期阈值可配
 - **运行统计面板**（第三 tab）：今日汇总、平台概览、使用中/接棒、最近临期与预计作废、模型消耗（首字延迟/吞吐）、异常账号、最近请求流水、运行日志；里程碑进度以 toast 提示（已读去重）
-- **积分可视化**：账号卡片上的积分汇总条可点击筛选渠道，费率 tab 显示各渠道积分余额，模型标识点击即复制
+- **积分可视化**：账号卡片上的积分汇总条可点击筛选渠道，费率 tab 显示各渠道积分余额；费率表每行模型分两行展示（上行短名 + 上下文/能力/促销标记，下行**完整模型 ID** 一键复制——客户端该填的就是它）；hover 积分区弹明细，临期条目与后端同口径标红并排在最前，展开明细那一刻卡片/汇总条/弹层三个数字同源
+- **模型查找**：费率弹层内的「查找模型」，按关键字（模型名 / 渠道 / 完整 ID）即时过滤全渠道模型，点结果即复制完整模型 ID
 - **Web 管理面板**：账号管理（添加/签到/刷新/停用/删除/改名）、积分明细、模型列表与费率、统一设置弹层；监听非本机地址时强制管理密码登录（HttpOnly cookie 会话）
 - **系统托盘**：常驻右下角（单条目像素图标，打开面板时蓝色、查看日志时灰色、退出时红色），双击打开面板，右键菜单可打开面板/查看日志/退出，退出前先摘图标避免任务栏留残影
 - **跨平台**：Windows（完整支持）、macOS（代码已就绪）、Linux（`--no-tray` 无头模式）
@@ -42,13 +44,13 @@
 cmd/wild-work/          main.go：装配渠道客户端、账号池、系统托盘、HTTP 服务
   webui/                React 面板源码（Vite + 自研渲染闸门）
   web-app/              前端构建产物，//go:embed 的目标（不入库，由 npm run build 生成）
-  web/                  上游 vanilla 面板，仅作 diff 基准（不 embed）
+  web/                  上一代 vanilla 面板 + 本地视觉层与桌宠（不 embed，仅供对照）
 internal/
-  app/                  管理端点与面板 API（34 个 /api/* 路由）、面板鉴权、跨源防护
+  app/                  管理端点与面板 API（37 个 /api/* 路由）、面板鉴权、跨源防护
   server/               OpenAI Chat 端点、账号池调度、粘性路由、错误分类与冷却
   gateway/              Responses / Anthropic Messages / systemone 端点
   provider/             渠道 Kind 枚举、公共接口与流式解析
-  workbuddy|workbuddyai|traework|traecode|qoder|qodercn|qodercom|qwenwork|glm|oczen|monkeycode|raccoon|loomy/
+  workbuddy|workbuddyai|traework|traecode|qoder|qodercn|qodercom|qwenwork|glm|oczen|monkeycode|raccoon|loomy|cline/
                         各渠道客户端与协议实现
   ledger/               token 与积分双流水记账、月度分段查询
   stats/                运行统计引擎（快照、里程碑、请求流水、临期与接棒视图）
@@ -58,7 +60,7 @@ internal/
 
 - **运行时**：Go 1.25，仅两个直接依赖（`github.com/energye/systray`、`golang.org/x/sys`）。
 - **状态落盘**：`data/state-<渠道>.json`（账号状态）、`data/ledger/`（双流水）、`data/stats.json`（运行统计）、`data/app.log`（运行日志）、`auths/`（账号凭据明文 JSON）。
-- **测试**：98 个 `_test.go`；面板侧有路由/字段契约测试（Go 扫 `web-app` 产物）、主题 token 契约测试与可见性测试，前端侧有 props 检查与渲染层闸门。运行 `go test ./...` 与 `npm --prefix cmd/wild-work/webui run check`。
+- **测试**：105 个 `_test.go`（`go test ./...` 全绿，30 个包）；面板侧有路由/字段契约测试（Go 扫 `web-app` 产物）、渠道主题色与渠道接线契约测试，前端侧有 props 检查与渲染层闸门。运行 `go test ./...` 与 `npm --prefix cmd/wild-work/webui run check`。
 
 ## 项目渊源
 
@@ -131,7 +133,7 @@ internal/
 curl -s -H "Authorization: Bearer WildWorkAPI" http://127.0.0.1:7863/v1/models
 ```
 
-模型 ID 需带渠道前缀：`workbuddy/<model>`、`workbuddyai/<model>`、`traework/<model>`、`traecode/<model>`、`qodercn/<model>`、`qodercom/<model>`、`qwenwork/<model>`、`glm/<model>`、`monkeycode/<model>`、`raccoon/<model>`、`loomy/<model>`、`oczen/<model>`（旧 `qoder/<model>` 仍可用，已从界面下线）。
+模型 ID 需带渠道前缀：`workbuddy/<model>`、`workbuddyai/<model>`、`traework/<model>`、`traecode/<model>`、`qodercn/<model>`、`qodercom/<model>`、`qwenwork/<model>`、`glm/<model>`、`cline/<model>`、`monkeycode/<model>`、`raccoon/<model>`、`loomy/<model>`、`oczen/<model>`（旧 `qoder/<model>` 仍可用，已从界面下线）。
 
 ### 2. 其他客户端
 
@@ -284,8 +286,9 @@ curl http://127.0.0.1:7863/v1/chat/completions \
 
 - **添加账号**：点击渠道按钮 → 确认对话框 → 浏览器窗口登录 → 自动完成
   - 「＋ MonkeyCode」「＋ Loomy」是**导入**按钮：读取本机已登录客户端的凭据，不需要浏览器登录
-  - 「＋ 小浣熊」主按钮走浏览器授权（登录期间临时把 `office-raccoon://` 协议回调指向本工具，结束立即恢复注册表），次按钮「从客户端导入」复用本机客户端凭据
-  - ⚠️ **平台限制**：MonkeyCode / 小浣熊 / Loomy 三个渠道**仅支持 Windows**（小浣熊的浏览器授权依赖 Windows 的 `office-raccoon://` 协议注册，且三个官方客户端均只有 Windows 版）。其余渠道跨平台可用
+  - 「＋ 小浣熊」主按钮走**网页版自动登录**：本工具拉起一个独立 profile 的 Edge/Chrome 打开小浣熊网页版，您在其中正常登录后由本工具经 CDP 捕获凭据；次按钮「从客户端导入」复用本机客户端凭据。⚠️ **登录态互踢**：上游刷新会轮换 refresh_token，同一份凭据同时用在本工具与浏览器/官方客户端上会互相挤下线，想两边同时用请在本工具里单独登录一次
+  - 「＋ Cline」是**粘贴 API Key**：在 app.cline.bot 自行注册并创建 `sk_` Key 后粘贴进来（本工具只调 `/api-keys` 验证，不消耗额度）。⚠️ 官方免费额度**按 Cline 账号计**，同一账号下多把 Key 共享一份额度，扩额度请注册多个独立账号
+  - **平台**：小浣熊的登录与三渠道的客户端导入均已跨平台（Windows / macOS 路径各自探测，MonkeyCode / 小浣熊 / Loomy 官方客户端都有 macOS 版）；找不到凭据时返回带路径的明确报错
 - **账号管理**：卡片显示积分、签到状态（WorkBuddy 国际版显示「自动领日活奖励」）；图标按钮操作（签到 ✓ / 刷新 ↻ / 停用 ⏸ / 删除 ✕）
   - **修改显示名**：点击卡片上的账号名即可修改
   - 账号按固定渠道序展示，OpenCodeZen 固定一个匿名条目（不可增删停用、无签到、积分显示「不适用」）

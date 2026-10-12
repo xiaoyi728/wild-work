@@ -457,9 +457,11 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   ```bash
   python3 -c "b=open('dist/wild-work-linux','rb').read();print({k.decode():b.count(k) for k in [b'chatglm',b'admin_password',b'ww_admin',b'npmmirror',b'2.5.2']})"
   ```
-- `internal/cdp` 的 `TestWriteDoesNotHangClose` 在本机失败（**纯上游 master 同样复现**）：
-  `writeTimeout=15s` 大于测试预算 12s，且 `Call(timeout)` 的超时并不约束写入阶段。
-- 故 `go test ./...` 目前**非全绿**（仅此一处），`go build` / `go vet` 全绿。执行 §8「全绿后再构建」时须知悉此条。
+- ~~`internal/cdp` 的 `TestWriteDoesNotHangClose` 在本机失败~~ **已由上游社区 PR #86 修掉（2026-10-12 随 L11 融合采纳）**：
+  根因是断言窗口 12s 小于 `writeTimeout=15s`，上游把测试预算改成 20s；本仓实测 PASS（15.20s）。
+- ~~故 `go test ./...` 目前非全绿~~ **`go test ./...` 自 2026-10-12 起首次全绿**（30 包 0 FAIL，
+  `go build` / `go vet` 同样全绿）。此前 L4/L6.3/L8 三处记的「唯一既有失败」已随本次融合消失，
+  **不要再把它当已知失败预期**——若它再次变红，就是新引入的回归。
 - `index.html` 的 echarts CDN `<script>` 无 SRI/`crossorigin`（上游同款），本机 origin 可被第三方脚本执行；
   上游 09-28 只是把 host 换成 `registry.npmmirror.com`（issue #47 的 3~10s 卡顿修复），未加校验。
 - **`ledger.Query` 的月份分段覆盖循环漏当月（2026-10-01 已在本仓修掉，上游未修）** —— 又一记
@@ -653,8 +655,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 **C. 已知但低影响 / 有意为之**
 5. 我给两个主 tab 加了 `mtabBtnAccounts`/`mtabBtnUsage` 两个 id（vanilla 用 `.main-tabs .mtab` 选类）——
    属新增，非缺失。
-6. `go test ./...` 有**一处既有失败**：`internal/cdp` 的 `TestWriteDoesNotHangClose`
-   （纯上游同样复现，见 §10 L4），非本次引入。
+6. ~~`go test ./...` 有一处既有失败：`internal/cdp` 的 `TestWriteDoesNotHangClose`~~
+   **已于 2026-10-12 随 L11 融合消失**（上游 PR #86 把断言窗口 12s→20s），现全绿，见 §10 L4。
 7. `dist/wild-work.exe`（Windows）只验过**体积与二进制内嵌标记**，从未在本机执行过（Linux 环境）。
    它的实际运行表现要等所有者在 Windows 上确认。
 8. ⚠️ **上面 L6 收尾清单第 3 条（本文件 line ~434）记的 exe 体积不可复现**：用**当前 HEAD 源码**重建
@@ -724,8 +726,9 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 - ⚠️ **`gofmt` 陷阱**：`internal/server/handler.go` 与 `internal/app/app.go` 的**上游 master 版本本身就未 gofmt**
   （`ErrSoftRate` 分支缩进、`AccountView` 字段对齐）。本地刻意**不**重排——重排会让本地 diff 对不上上游，
   下次融合又要重新判读。`go build`/`go vet`/`go test` 不受影响。
-- ⚠️ **L4 增补**：`internal/cdp` 的 `TestWriteDoesNotHangClose`（`writeTimeout=15s` > 测试预算 12s）
-  在 v2.6.2 依旧失败，属**上游自带缺陷**，勿归因于本地改动。
+- ⚠️ ~~**L4 增补**：`internal/cdp` 的 `TestWriteDoesNotHangClose`（`writeTimeout=15s` > 测试预算 12s）
+  在 v2.6.2 依旧失败，属**上游自带缺陷**，勿归因于本地改动。~~
+  → **已被下一轮融合（§10 L11，上游 PR #86）修掉**，v2.6.2 那版确实还红着，当时的记录没错。
 
 ### L9 2026-10-08 前端「只补功能不动设计」：React 侧承接 v2.6.2 的运行统计与三渠道
 
@@ -746,6 +749,9 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   `style.css` 的 `.btn.primary.alt.<kind>` 背景。
 - **导入型渠道的弹层三分支**：普通（浏览器授权）/ 导入型（只打 `/api/account/import_local`）/ 双入口（raccoon，R41 协议回调），
   判据是 `isImportLocal()` 与 `hasProtocolLogin()`；导入失败时后端 `note` 必须透出（已装/未登录官方客户端的降级提示不能吞）。
+  > ⚠️ 这一条**已被 §10 L11 改写**：R44 把小浣熊登录换成网页版 CDP 捕获，`hasProtocolLogin()` 更名 `hasWebLogin()`，
+  > 并新增第四种形态「粘贴凭据型」（Cline，判据 `isPasteKey()`）。历史描述保留在此不删，是为了记下「弹层形态是随渠道协议变的，
+  > 不是一套模板」——但**照这段改代码会写错**。
 
 ### L10 2026-10-08 README 重写为「本仓库视角」+ 删交流群
 - **起因**：README 此前与 `upstream/master` 逐字一致（纯上游文案），既没写本地能力，也把渠道数写成「十一渠道」
@@ -759,3 +765,71 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   （`internal/server/handler.go:144-145` 的 chat/completions + models，`internal/gateway/gateway.go:120-124` 的
   responses/messages/count_tokens/systemone）、`_test.go` 98 个、`data/stats.json`（`internal/stats/stats.go:280`）、
   托盘单条目 `build/trayicon.ico`（`cmd/wild-work/main.go:595`，OpenUI/OpenLog/Quit，退出先 `systray.Quit(3s)` 摘图标）。
+
+### L11 2026-10-12 融合：上游 v2.6.2 → v2.6.3+（`d24e46d`），并查出两个上游侧「不报错但功能到不了」的缺陷
+
+- **形态**：沿用 L8（本地与上游**无共同祖先**，不能 `git merge`）=「整树采纳无冲突文件」+「`git merge-file` 三方」。
+  上游变更面 21 提交 / 55 文件 / +5851−2322；**真实冲突面仅 6 个**（`app.go`、`handler.go`、`main.go`、`AGENTS.md`、
+  `README.md`、`build.yml`），且三方合并**零冲突**——双方 hunk 落在不同区域。上游新增 R44–R48 已并入。
+- **本轮采纳**：Cline 新渠道（R46/R47，`internal/cline` 7 文件 ~1856 行）、小浣熊网页版 CDP 登录（R44，跨平台，
+  废弃注册表协议回调）、小浣熊客户端会话自愈（#85）、`import_local` 移除整体 Windows 门禁 + macOS 路径（#75/PR#93）、
+  明细同源回写 `creditSnapshot`（R45）、`normalizeToolTurnContent` 补空壳 assistant content（R48，修 traecode/SOLO 4001）、
+  单账号渠道流式错误透传（PR#92，运行时 `len(Pool.List())<=1` 判据，与静态 `SingleAccount` 互补）、
+  14 个 `RELEASE-v*.md` 并入统一 `RELEASES.md`。
+- **测试基线变了，别再按旧预期读结果**：上游 PR #86 修掉 `internal/cdp` 的 `TestWriteDoesNotHangClose`
+  （断言窗口 12s→20s，本仓实测 PASS 15.20s）、PR #88 修掉 ledger 签到用例硬编码日期与跨月窗口「每月固定红一个月」的
+  日期炸弹。故 **`go test ./...` 自本轮起全绿（30 包 0 FAIL）**，L4/L6.3/L8 三处「唯一既有失败」的记录已划掉改写。
+- **有意不采纳（四处，均为本地偏离，下次融合仍会撞上，别再重新判读）**：
+  1. `.github/workflows/build.yml` —— **本仓库不带 CI**（`git ls-files .github` 为空，工作流文件从未进过本地历史），
+     上游对它的「从 `RELEASES.md` 截段落当 release note」改造无处生效；
+  2. `scripts/ui-static-check.mjs` 的上游更新 —— 它是**孤儿脚本**（只有 `node ui-static-check.mjs` 手工入口，
+     既不接进 `go test` 也不在 CI），且驱动的是 `cmd/wild-work/web/app.js`，而**本地那份冻结在 v2.6.2 之前的形态**
+     （`grep -c renderStats` = 0，与 v2.5.4 tag 的真实内容差仅 144/24 行本地视觉层）；
+  3. `cmd/wild-work/web/` 整个目录不动 —— 它含本地视觉层 + 桌宠（`pet.js`/`pet.css`/`anim.*`/`theme.js`），
+     既不 embed 也不被服务，采纳上游 vanilla 等于覆盖本地设计；
+  4. `README.md` 以本地为准（L10 刚重写过），`wechat_group.jpg` 保持删除（上游只是把它压到 65 KB）。
+- ⚠️ **换行符陷阱第二次命中同一批文件**：`web/index.html` 的 raw diff 是 512/457，带 `--ignore-cr-at-eol` 后
+  真实内容差只有 **56/1**。凡是比对 `cmd/wild-work/web/` 一律带这个开关（L3 已记过一次，这次又差点误判成「上游重写了前端」）。
+
+- **查出的上游缺陷 ①（Cline 进不了费率面，R34 家族）**：上游给 Cline 配齐了 `internal/cline`、面板「＋ Cline」按钮、
+  `.ch-header.cline` 样式，**却没把它加进 `internal/app/feeChannelOrder`**。而 `buildFeesChannels` 是
+  `for _, k := range order` 的**枚举**语义（不是排序键）⇒ Cline 根本不出现在 `/api/fees`，费率表、模型查找、
+  用量折线全都拿不到它，且**全程不报错**。修法：补 `provider.Cline` +
+  新增 `internal/app/fee_channel_order_test.go`——扫 `provider.go` 的 `Kind = "..."` 常量声明，
+  双向锁死「已声明 ⇒ 必须在面板顺序表里，不在就得进 `feePanelExempt` 并注明缘由」；
+  反向还查「顺序表里有 provider 未声明的键」（拼错的字符串同样静默 continue，不报错）。
+  负向验证：摘掉 `provider.Cline` → 变红并点名 `Cline(cline)`。**判据取源码扫描而非手写清单**，
+  因为手写一份 Kind 列表会和被测对象同错。
+
+- **查出的上游缺陷 ②（复制出来的模型 ID 调不通）**：上游 330ee79 的完整 ID 判据是
+  「`m.model` 含 `/` 就当作已带渠道前缀」。但 `handler.go:runtimeForModel` 用
+  `strings.SplitN(model, "/", 2)` 只切**第一个**斜杠 ⇒ Cline 的 `cline-free/grok-4` 必须写成
+  `cline/cline-free/grok-4` 才路由得到，按上游判据复制到客户端就是 `provider "cline-free" is not configured`。
+  讽刺的是这正命中原文件自己的注释「光复制模型名粘到客户端里是调不通的，这是本页最容易踩的坑」。
+  本地 `Fees.jsx` 抽出 `modelIds()`：短名一律不剥、前缀一律补。
+  闸门：`render-check` 第 6 个场景「完整模型 ID 前缀」，fixture 里**故意放一条带斜杠的 `cline-free/grok-4`**；
+  负向验证：装回上游判据 → `rc=1` 并输出「cline/cline-free/grok-4 → 复制目标算成了 cline-free/grok-4」。
+
+- **顺手修掉本地两处既有缺陷（均为补缺失，不改既有规则）**：
+  ① `monkeycode`/`raccoon`/`loomy` 三渠道上一轮只补了 `.btn.primary.alt.*` 与 `.cs-chip.*`，
+  **漏了 `.badge.*`**——而 `.badge` 基规则带 `color:#fff` 却无背景 ⇒ 这三个渠道的徽章一直是白字透明底（看不见字）。
+  实测补后 MonkeyCode 徽章 = `rgb(192,38,211)`。
+  ② 积分明细缺 `info_only` 分支：后端 `Summarize()` 已把它排除在 `usable_remain` 之外（MonkeyCode 的每日 Token 额度），
+  面板不标注就出现「明细各行相加 ≠ 底部可用小计」。补「仅展示」角标。
+  ③ Cline 的同账号告警**从未露过面**：`submitClineKey` 里连续两句 `toast(warning)` + `toast('已添加')`，
+  同一 tick 内后者覆盖前者，React 只渲染最后一个值。合并成一条才真送得到。
+
+- **验证方式（SSR 闸门覆盖不到的那一类）**：沙箱 `go build -o /tmp/ww-sbx/` + `WILDWORK_HOME=/tmp/ww-sbx/home`
+  + 监听 `127.0.0.1:28763`（生产 daemon 2992445 在 `10.20.15.118:7863`，全程未动），页面内改写 `window.fetch`
+  喂假 state/fees，逐条量：明细 `dx=0` 无漂移、排序「临期→可用→已用完→不可用」、临期行 `rgb(215,0,21)` = `--danger`、
+  R45 卡片 1000→137 且汇总条同源、enter+leave 同 tick 无幽灵浮窗、切主 tab 浮窗即收起、
+  A/B 对照「点登录小浣熊 `window.open` 调用 0 次 / 点登录 WorkBuddyCN 调用 1 次」证明 `hasWebLogin` 分支真在分流。
+  ⚠️ **方法教训**：跨 `evaluate_script` 调用读 toast 读到 null，一度被我当成「toast 没渲染」。真因是本机每次工具往返 >3s
+  而 toast 3s 自动消失；改成单次调用内自采样才看出机制是好的。**判据读不到 ≠ 被测对象坏**，先怀疑观测方式。
+  ⚠️ 另一条：`pkill -f wild-work-sbx` 会匹配到自己的命令行把 shell 杀掉（exit 143），按 L7 只用 `pkill -x`。
+
+- **口径更新（L10 的「现查现写」纪律，本轮重新量过）**：面板 `/api/*` 路由 **34 → 37**（新增 `login/cline_key` 等），
+  `_test.go` **98 → 105**，render-check 场景 **5 → 6**，渠道 **12 → 13**。README 已按新数改写
+  （含删掉「MonkeyCode/小浣熊/Loomy 仅支持 Windows」这条已被 #75/R44 推翻的 FAQ）。
+- **版本常量仍为 `2.6.2`，未 bump、未打 tag**：功能已同步到上游 v2.6.3+ 之后，但发版由所有者定
+  （见 [[feedback-no-invented-releases]]）。面板顶部显示的版本号因此**落后于实际功能**，这是有意的。

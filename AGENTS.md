@@ -674,6 +674,17 @@ git tag vX.Y.Z && git push origin vX.Y.Z
    ——不要误以为是构建出问题，本轮因此只重建了 `dist/wild-work.exe`。
    重启前先按 L7 备份 `dist/data/ledger/` 与 `dist/config.json`，用 `SIGTERM`（不要 `-9`）；
    因监听局域网地址会瞬断其他设备的客户端，**须所有者点头**。
+   > ✅ **2026-10-12 15:42 已按上述流程重启完毕**（所有者点头）：新进程 **PID 3979065**、`SID==PID`、TTY `?`、
+   > 启动约 1s 内旧进程 SIGTERM 优雅退出。L7 四项判据逐项实测通过——① `/proc/exe` 指活路径；
+   > ② 首页引用 `assets/index-BBHauEO7.js`（本轮最新 bundle，服务端取回 676,622 B 与产物同尺寸、旧哈希残留 0）；
+   > ③ 无会话 `/api/state` = 401、`/api/auth/state` = 200；④ bundle 内数得到 `btnAddCline` / `modelSearchOverlay`
+   > 等本轮新增指纹。带 key 的 `GET /v1/models` = 200、188 个模型、6 个渠道前缀（`cline` 因无账号而不出现，符合预期）。
+   > 记账完整性：5 个流水文件 + `credit-snapshot.json` 与备份**逐字节相同**，`app.log` 前缀相同且增长 6,601 B（未截断）。
+   > ⚠️ **重启时踩到一条会骗人的判据**：`app.log` 的时间戳是 **Go 标准 log 的 `2026/10/12 15:42:01` 斜杠格式**，
+   > 而我按平时写的 `2026-10-12` 去 `grep`，**匹配 0 行**——于是「本次启动 0 个 error」看起来像是结论，
+   > 实际是谓词根本没扫到东西（空转的绿）。修法：按**字节偏移**（备份时记下的 size）切出重启后新增的 80 行来扫，
+   > 并**同时拿同一谓词扫全文件做对照**（命中 96 条 ⇒ 证明它能变红）。
+   > 凡是「数某类异常」的判据，报 0 之前先问一句：**它扫到了几条？**
 10. ~~未 push（`xiaoyi728/wild-work` 私有仓仍是旧的）。~~ **2026-10-12 已 push**：
    本轮融合的 5 个提交（后端采纳 / React 移植 / 浏览器实测修正 / 文档 / 版本更正）已进 `origin/main`，
    与本条所属的文档翻新提交随后一并推送；推送前后 `git rev-list --left-right --count origin/main...main`

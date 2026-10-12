@@ -666,10 +666,18 @@ git tag vX.Y.Z && git push origin vX.Y.Z
    原产物已被覆盖，无法归因）。今后做体积对账请现测，不要引用这几个数。
 
 **D. 待办动作**
-9. 生产 daemon（`10.20.15.118:7863`，PID 2948815，2026-09-29 启动）仍在跑旧二进制里的 vanilla 面板，
-   `/proc/<pid>/exe` 指向 `(deleted)`。磁盘上的 `dist/` 已是 React 版 + 本轮三处修复，**要重启才生效**；
-   因监听局域网地址、重启会瞬断其他设备的客户端，须所有者点头。
-10. 未 push（`xiaoyi728/wild-work` 私有仓仍是旧的）。
+9. ~~生产 daemon（PID 2948815，2026-09-29 启动）仍在跑旧二进制里的 vanilla 面板，`/proc/<pid>/exe` 指向 `(deleted)`。~~
+   **2026-10-12 复核已翻新**：现进程是 **PID 2992445**（2026-10-08 14:47:30 启动，`SID==PID` 会话首进程、TTY `?`），
+   `/proc/2992445/exe → dist/wild-work-linux`（**不是** `(deleted)`，即跑的就是磁盘上那份），监听 `10.20.15.118:7863`。
+   它是 10-08 那次重启的产物 = **React 面板 + v2.6.2 代码**；本轮 v2.6.3+ 融合与前端移植**要再重启才生效**。
+   ⚠️ 顺带一条硬约束：daemon 正在执行 `dist/wild-work-linux`，所以 `go build -o dist/wild-work-linux` 会 **ETXTBSY 失败**
+   ——不要误以为是构建出问题，本轮因此只重建了 `dist/wild-work.exe`。
+   重启前先按 L7 备份 `dist/data/ledger/` 与 `dist/config.json`，用 `SIGTERM`（不要 `-9`）；
+   因监听局域网地址会瞬断其他设备的客户端，**须所有者点头**。
+10. ~~未 push（`xiaoyi728/wild-work` 私有仓仍是旧的）。~~ **2026-10-12 已 push**：
+   本轮融合的 5 个提交（后端采纳 / React 移植 / 浏览器实测修正 / 文档 / 版本更正）已进 `origin/main`，
+   与本条所属的文档翻新提交随后一并推送；推送前后 `git rev-list --left-right --count origin/main...main`
+   均为 `0 0`（快进，无分叉）。`config.json` 与 `dist/` 均未被 git 跟踪，凭据与生产数据不在推送内容里。
 
 - **已知有意行为差异**（不是 bug，别再"修回去"）：
   - `echartsCdn` 这个 id 消失（echarts 改 npm 按需引入，不再有 CDN `<script>`，L4 记的无 SRI 隐患随之消除）；

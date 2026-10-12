@@ -335,8 +335,9 @@ export default function App() {
       setFlow((f) => ({ ...f, cline: null }));
       // 同账号多把 Key 共享一份额度（官方按 …UsageCostUSDPerUser 计），
       // 这条告警必须透出——吞掉它就等于默许用户在一个账号下堆 Key 以为能翻倍额度。
-      if (r && r.warning) toast(r.warning);
-      toast('Cline 账号已添加');
+      // ⚠️ 不能写成连续两次 toast()：同一 tick 内后者覆盖前者，React 只渲染最后一个值，
+      //    告警等于从未出现（上游 vanilla 的连续两句 toast 同样中招）。合并成一条才送得到。
+      toast(r && r.warning ? `Cline 账号已添加。${r.warning}` : 'Cline 账号已添加');
       await loadState();
       await loadFees();
     } catch (e) {

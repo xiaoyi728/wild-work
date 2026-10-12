@@ -57,14 +57,23 @@ function RateCell({ m }) {
   return <span className="rate-paid">x{m.rate.toFixed(2)}</span>;
 }
 
+// 费率行 / 查找行的「短名 + 完整 ID」拆分。
+// ⚠️ 不能用「模型名里含 / 就当作已带渠道前缀」这个判据（上游 330ee79 的写法）：
+// internal/server/handler.go:runtimeForModel 用 SplitN(model, "/", 2) 切**第一个**斜杠，
+// 所以 Cline 的 `cline-free/grok-4` 必须写成 `cline/cline-free/grok-4` 才路由得到；
+// 按上游那判据复制出来的是 `cline-free/grok-4` ⇒ 渠道被解析成 "cline-free"，
+// 直接 `provider "cline-free" is not configured`，正是本页注释警告的那个坑。
+// 而 m.model 来自 /api/fees，本就是「该渠道内的模型名」，渠道由 ch.channel 给出，
+// 故前缀一律补上、短名一律不剥。
+export function modelIds(ch, raw) {
+  return { short: raw, full: ch ? `${ch}/${raw}` : raw };
+}
+
 function ModelId({ m, ch, onCopy }) {
   if (!m) return null;
   // 点击复制的是「渠道/模型」完整标识（路由前缀 + 模型名），而不是裸模型名 ——
   // 光复制模型名粘到客户端里是调不通的，这是本页最容易踩的坑。
-  // 少数渠道（如 glm 的智能体）模型名本身就带前缀，此时 raw 即完整 ID，不再重复出行。
-  const raw = m.model;
-  const short = raw.includes('/') ? raw.slice(raw.indexOf('/') + 1) : raw;
-  const full = raw.includes('/') ? raw : (ch ? `${ch}/${raw}` : raw);
+  const { short, full } = modelIds(ch, m.model);
   const copyTip = `点击复制：${full}`;
   return (
     <div className="mcell">
@@ -105,9 +114,7 @@ export function collectAllModels(fees) {
   const out = [];
   for (const ch of (fees && fees.channels) || []) {
     for (const m of ch.models || []) {
-      const raw = m.model;
-      const short = raw.includes('/') ? raw.slice(raw.indexOf('/') + 1) : raw;
-      const full = raw.includes('/') ? raw : (ch.channel ? `${ch.channel}/${raw}` : raw);
+      const { short, full } = modelIds(ch.channel, m.model);
       out.push({ ch: ch.channel, m, short, full });
     }
   }

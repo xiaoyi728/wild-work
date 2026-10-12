@@ -91,13 +91,20 @@ const STATE = {
   autostart: false, checkin_times: ['09:00'], next_checkin: '', expiring_days: 1,
   oczen_api_key: '', channels: ['workbuddy', 'traework'], accounts: ACCOUNTS,
   compat: { default_channel: 'workbuddy', max_tokens_cap: 32000, model_map: {} },
-  fees: { updated_at: '', channels: [] },
+  fees: {
+    updated_at: '', channels: [
+      // 两条都要：一条常规裸名，一条模型名本身含斜杠（Cline 的 cline-free/*）。
+      // 后者专治「含斜杠就当作已带渠道前缀」这个判据 —— 见 Fees.jsx 的 modelIds 注释。
+      { channel: 'qodercn', models: [{ model: 'qwen3.8-flash', priced: true, rate: 0.3, free: false, has_context: true, context_window: 180000 }] },
+      { channel: 'cline', models: [{ model: 'cline-free/grok-4', priced: false, rate: 0, free: true, has_context: false }] },
+    ],
+  },
 };
 const stubActions = new Proxy({}, { get: () => (() => {}) });
 const busy = { refreshAll: false, checkinAll: false, refreshFees: false };
 
 const PANEL_ACTIONS = ['btnRefreshAll', 'btnCheckinAll', 'btnAddWB', 'btnAddQoderCN', 'btnAddTrae',
-  'btnAddWBAI', 'btnAddQoderCOM', 'btnAddQwen', 'btnAddGLM'];
+  'btnAddWBAI', 'btnAddQoderCOM', 'btnAddQwen', 'btnAddGLM', 'btnAddCline'];
 
 const server = await createServer({
   configFile: false, root: ROOT, logLevel: 'silent',
@@ -141,9 +148,26 @@ try {
     })), ['chkPet', 'btnSettingsSave', 'btnSettingsCancel', 'adminPassInput', 'keyInput', 'selHost', 'btnAddTime']);
 
   // 4) 渠道费率弹层
-  check('Fees 弹层', renderToStaticMarkup(
-    React.createElement(Fees, { fees: STATE.fees, refreshBusy: false, onRefresh: noop, onClose: noop })),
-    ['btnRefreshFees', 'btnFeesClose']);
+  const feesHtml = renderToStaticMarkup(
+    React.createElement(Fees, { fees: STATE.fees, refreshBusy: false, onRefresh: noop, onClose: noop }));
+  check('Fees 弹层', feesHtml, ['btnRefreshFees', 'btnFeesClose', 'btnModelSearch']);
+
+  // 5) 复制给客户端的「完整模型 ID」必须始终带渠道前缀。
+  //    internal/server/handler.go:runtimeForModel 用 SplitN(model,"/",2) 只切**第一个**斜杠，
+  //    于是 Cline 的 cline-free/grok-4 必须写成 cline/cline-free/grok-4 才路由得到。
+  //    上游 330ee79 用「模型名含 / 即视为已带前缀」的判据，对这一族会复制出
+  //    provider "cline-free" is not configured —— 不报错，只是粘过去调不通。
+  const { collectAllModels } = await load('/src/components/Fees.jsx');
+  const flat = collectAllModels(STATE.fees);
+  const idProblems = [];
+  // 不变量：完整 ID 恒为「渠道/模型」，与模型名里有没有斜杠无关。
+  for (const x of flat) {
+    if (x.full !== `${x.ch}/${x.m.model}`) idProblems.push(`${x.ch}/${x.m.model} → 复制目标算成了 ${x.full}`);
+  }
+  if (/data-mid="cline-free\/grok-4"/.test(feesHtml)) idProblems.push('费率单元格 data-mid 缺渠道前缀');
+  results.push({ name: '完整模型 ID 前缀', visible: visibleControls(feesHtml).length, missing: idProblems });
+  if (idProblems.length) console.error(`✗ 完整模型 ID 前缀：${idProblems.join('；')}`);
+  else console.log(`✓ 完整模型 ID 前缀：${flat.length} 条全部形如「渠道/模型」（含斜杠名亦不例外）`);
 } finally {
   await server.close();
 }

@@ -704,3 +704,71 @@ html[data-theme="paper"] .shiny {
 .st-applog-time { display: inline-block; min-width: 96px; color: var(--text); }
 .st-applog-line.lvl-error .st-applog-msg { color: var(--danger); }
 .st-applog-line.lvl-warn .st-applog-msg { color: var(--warn); }
+
+/* --- v2.6.3+ 移植：Cline 渠道色（添加按钮 / 徽章 / 汇总条 / 费率标题） --- */
+.btn.primary.alt.cline { background: var(--cline); }
+.badge.cline { background: var(--cline); }
+.cs-chip.cline.active { border-color: var(--cline); }
+.fees .ch-header.cline td { color: var(--cline); }
+
+/* --- 补漏：monkeycode / raccoon / loomy 的徽章与费率标题色 ---
+   上一轮加这三个渠道时补了 .btn.primary.alt.* 与 .cs-chip.*，漏了 .badge.* 与
+   .fees .ch-header.*。而 .badge 基规则带 color:#fff 却没有背景，于是这三个渠道的
+   徽章一直是白字透明底（等于看不见字）。这里只补缺失的选择器，不动任何既有规则。 */
+.badge.monkeycode { background: var(--monkeycode); }
+.badge.raccoon { background: var(--raccoon); }
+.badge.loomy { background: var(--loomy); }
+.fees .ch-header.monkeycode td { color: var(--monkeycode); }
+.fees .ch-header.raccoon td { color: var(--raccoon); }
+.fees .ch-header.loomy td { color: var(--loomy); }
+
+/* --- 费率表模型单元格双行（上游 PR #89）---
+   上行短名 + 上下文/能力/促销标记，下行完整模型 ID（客户端该填的名字）一键复制。
+   长 ID 与标记挤在一行会互相误点，故拆开；裸名模型（完整 ID == 短名）不重复出第二行。 */
+.fees .mcell { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+.fees .mline { display: inline-flex; align-items: baseline; flex-wrap: wrap; }
+.fees .full-id {
+  display: inline-block; padding: 1px 7px; border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px; line-height: 1.5; white-space: nowrap;
+  color: var(--muted); background: var(--chip-bg); border: 1px solid var(--chip-border);
+  cursor: pointer; user-select: all; transition: all .2s;
+}
+.fees .full-id:hover { color: var(--accent); border-color: var(--accent); }
+
+/* --- 模型查找弹层（上游 5f380e3：纯前端从最近一次 /api/fees 结果过滤全渠道模型）---
+   固定尺寸 + 结果限量（见 constants.js MODEL_SEARCH_MAX），超出只在底部提示未显示数，
+   不让对话框随结果多少跳变。观感按本地变量重写，不照抄上游的 #eff6ff / --primary。 */
+.modal.modal-search {
+  width: 460px; max-width: 94vw; height: 460px; max-height: 86vh;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.modal-search .modal-title { margin-bottom: 12px; }
+.modal-search .ms-input { width: 100%; box-sizing: border-box; margin-bottom: 10px; flex: none; }
+.ms-list { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.ms-row {
+  display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+  border-radius: 8px; cursor: pointer; font-size: 13px; line-height: 1.5;
+}
+.ms-row:hover { background: var(--chip-bg); }
+.ms-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ms-name {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.ms-tags { flex: none; color: var(--muted); font-size: 11px; }
+.ms-rate { flex: none; font-weight: 600; font-size: 12px; color: var(--accent); font-variant-numeric: tabular-nums; }
+.ms-empty { color: var(--muted); font-size: 13px; padding: 14px 8px; text-align: center; }
+.ms-foot { flex: none; margin-top: 8px; min-height: 18px; color: var(--muted); font-size: 12px; }
+
+/* --- 积分明细：临期条目（上游 PR #90）---
+   与后端 ExpiringWithin 同口径判定，视觉与卡片/汇总条的「临期」同色系（都是 --danger）。
+   行底用 --chip-bg 而非上游的 #fef2f2：后者是硬编码浅红，暗色/Paper 主题下会糊成一块。
+   醒目度由「到期日红字 + 临期红章」承担，行底只做分组。 */
+.detail-table td:last-child { min-width: 112px; }
+.detail-table tr.detail-exp-row { background: var(--chip-bg); }
+.detail-table td.detail-exp { color: var(--danger); }
+.detail-exp-tag {
+  font-size: 10px; padding: 1px 5px; margin-left: 5px; border-radius: 8px;
+  color: var(--danger); border: 1px solid var(--danger); white-space: nowrap;
+}

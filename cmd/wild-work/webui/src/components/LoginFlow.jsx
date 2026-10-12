@@ -1,32 +1,46 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
-import { chLabel, hasProtocolLogin, isImportLocal, NO_CHECKIN_LOGIN_HINT } from '../constants.js';
+import { chLabel, hasWebLogin, isImportLocal, isPasteKey, NO_CHECKIN_LOGIN_HINT } from '../constants.js';
 
 // 添加账号：确认弹层 → login/start → 轮询 /api/state 的 login_busy。
 // 智谱清言走另一条路：CDP 自动捕获 Cookie（独立 profile），手工粘贴 refresh_token 为兜底。
 //
-// 三种添加形态（对应 constants.js 的两个判据集）：
+// 四种添加形态（对应 constants.js 的判据集）：
 //   ① 普通：浏览器授权登录（workbuddy 系 / qoder 系 / traework / qwenwork）；
-//   ② 导入型：凭据只在本机已登录的官方客户端里（monkeycode / loomy / raccoon），
+//   ② 导入型：凭据只在本机已登录的官方客户端里（monkeycode / loomy），
 //      没有授权 URL，直接调 /api/account/import_local 读本机配置；
-//   ③ 浏览器授权 + 导入两条路都有（raccoon，AGENTS.md R41 的协议回调）——弹层给两个按钮，
-//      主按钮走授权、次按钮走导入，不替用户猜哪条路可用。
+//   ③ 网页版自动登录 + 导入两条路都有（raccoon，AGENTS.md R44）——浏览器由后端拉起
+//      （独立 profile + CDP），弹窗给两个按钮，并必须写明「登录态互踢」的风险；
+//   ④ 粘贴凭据型（cline）：Key 在官方站点创建，本工具只做一次「验证 + 落盘」。
 export default function LoginFlow({ flow, actions }) {
   const {
     confirm, // {channel} 待确认
-    pending, // {channel, url} 进行中
+    pending, // {channel, url, web} 进行中（web=true ⇒ 浏览器已由后端拉起）
     glm, // null | {status, uid, nickname, error, manualOpen}
+    cline, // null | {key, err, busy} 粘贴官方 API Key
   } = flow;
 
   const ch = confirm && confirm.channel;
   const canImport = !!ch && isImportLocal(ch);
-  const canLogin = !!ch && !isImportLocal(ch) || hasProtocolLogin(ch);
+  const canLogin = !!ch && (!isImportLocal(ch) || hasWebLogin(ch));
   const hint = ch ? (NO_CHECKIN_LOGIN_HINT[ch] || '') : '';
   const msg = !ch ? '' : canLogin && !canImport
     ? `点击「登录${chLabel(ch)}」将打开浏览器窗口，请按照指示正常登录${chLabel(ch)}账号，登录成功后关闭浏览器窗口即可。${hint}`
     : canImport && !canLogin
       ? `点击「导入${chLabel(ch)}」将从<b>本机已登录的 ${chLabel(ch)} 官方客户端</b>读取凭据并添加账号，无需浏览器登录。${hint}`
-      : `两个入口任选其一：浏览器授权登录（登录期间本工具会临时接管 ${chLabel(ch)} 的协议回调以接住授权码），或从本机已登录的官方客户端直接导入凭据。${hint}`;
+      : `点击「登录${chLabel(ch)}」会打开一个<b>独立的浏览器窗口</b>（不影响你日常浏览器的登录态），`
+        + `请在其中正常登录（扫码 / 手机号 / 微信均可），登录完成后本工具会自动捕获凭据并保存账号。`
+        // 互踢必须写在弹层里：上游 refresh 会轮换 refresh_token，同一份凭据被本工具与
+        // 浏览器/官方客户端共用就会互相挤下线。不告知的话用户只会看到「莫名其妙掉线」。
+        + `<div class="glm-warn" style="margin-top:10px">`
+        + `<div class="glm-warn-title">⚠️ 关于登录态互踢</div>`
+        + `本工具会用捕获到的凭据<b>自动续期</b>（上游刷新时会轮换 refresh_token）。`
+        + `若你把这个账号的凭据<b>同时</b>用在本工具和浏览器 / 官方客户端上，两边会争抢同一个 refresh_token，`
+        + `可能出现<b>其中一侧被挤下线</b>的情况（上游可能对同一账号限制单会话）。`
+        + `想两边同时用，请在本工具里点「登录${chLabel(ch)}」<b>单独登录一次</b>（本流程新建独立会话），`
+        + `而不是从浏览器复制凭据粘进来。`
+        + `</div>`
+        + `也可以改用「从客户端导入」：直接读取本机已登录客户端的凭据。`;
 
   return (
     <>
@@ -65,7 +79,11 @@ export default function LoginFlow({ flow, actions }) {
           <div className="modal">
             <div className="modal-title" id="loginTitle">{`添加 ${chLabel(pending.channel)} 账号`}</div>
             <div className="modal-body">
-              <div id="loginMsg">请在浏览器新窗口中完成登录…</div>
+              <div id="loginMsg">
+                {pending.web
+                  ? `已为你打开一个独立的浏览器窗口，请在其中完成${chLabel(pending.channel)}登录；登录完成后无需任何操作，本工具会自动捕获凭据并添加账号。`
+                  : '请在浏览器新窗口中完成登录…'}
+              </div>
               <div className="login-buttons">
                 <button className="btn small glare" id="btnCopyUrl" onClick={() => actions.copyUrl(pending.url)}>复制链接</button>
                 <button className="btn small danger" id="btnCancelLogin" onClick={actions.cancelLogin}>取消</button>
@@ -138,6 +156,62 @@ export default function LoginFlow({ flow, actions }) {
           </div>
         </div>
       ) : null}
+      {cline ? <ClineModal cline={cline} /> : null}
     </>
+  );
+}
+
+// 粘贴型渠道（Cline）的专用弹层：没有浏览器编排，只有一次「验证 + 落盘」。
+// 文案里的两条约束是这渠道最容易踩的坑，缺一条就会有用户在一个账号下堆 Key 以为能翻倍额度：
+//   ① 额度按 Cline **账号**计（官方字段 …UsageCostUSDPerUser）；
+//   ② Key 只在创建时完整显示一次，错过就得重建。
+function ClineModal({ cline }) {
+  const inputRef = useRef(null);
+  useEffect(() => { if (inputRef.current) inputRef.current.focus(); }, []);
+  return (
+    <div className="overlay" id="clineOverlay"
+         onClick={(e) => { if (e.target.id === 'clineOverlay') cline.cancel(); }}>
+      <div className="modal modal-wide">
+        <div className="modal-title">添加 Cline 账号</div>
+        <div className="modal-body settings-body">
+
+          <div className="cfg-section">
+            <div className="cfg-heading">申请办法</div>
+            <ol className="glm-steps">
+              <li>打开 <a href="https://app.cline.bot/" target="_blank" rel="noopener noreferrer">app.cline.bot</a>，自行注册一个 Cline 账号。</li>
+              <li>进入 <code>Settings</code> → <code>API Keys</code> → 创建 Key（用途选 <code>Direct API calls / scripts / CI-CD</code>）。</li>
+              <li>Key（形如 <code>sk_</code> + 64 位十六进制）<b>只在创建时完整显示一次</b>，请立即复制粘贴到下面。</li>
+            </ol>
+            <input id="clineKeyInput" className="input grow" spellCheck="false" autoComplete="off" ref={inputRef}
+                   placeholder="粘贴 API Key（sk_…）" style={{ fontFamily: 'ui-monospace,monospace' }}
+                   value={cline.key} onChange={(e) => cline.setKey(e.target.value)} />
+          </div>
+
+          <div className="glm-warn">
+            <div className="glm-warn-title">⚠️ 必须使用多个独立账号各自的 Key</div>
+            <ol>
+              <li>官方免费额度<b>按 Cline 账号计</b>（其权益字段名为 <code>…UsageCostUSDPerUser</code>）。</li>
+              <li>同一个账号下创建多把 Key <b>共享同一份额度</b>，不会增加可用额度。
+                  本工具在检测到多把 Key 同属一个账号时会给出提示。</li>
+              <li>想扩额度请<b>注册多个独立 Cline 账号</b>，每个账号各建一把 Key，逐个粘贴添加。</li>
+            </ol>
+          </div>
+
+          <div className="hint">
+            本渠道只调度 <b>免费模型</b>（上游无余额/额度查询接口，故积分显示「不适用」；
+            实际花费见「用量与流水」）。订阅池 <code>cline-pass</code> 与付费模型不在本渠道使用范围内。
+            Key 不过期、不轮换，也不会与浏览器/客户端互相挤下线。
+          </div>
+
+          <div className="hint" id="clineErr" style={{ color: 'var(--danger)' }}>{cline.err}</div>
+        </div>
+        <div className="modal-actions">
+          <button className="btn" id="btnClineCancel" onClick={cline.cancel}>取消</button>
+          <button className="btn primary" id="btnClineSubmit" disabled={cline.busy} onClick={cline.submit}>
+            {cline.busy ? '验证中…' : '添加'}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

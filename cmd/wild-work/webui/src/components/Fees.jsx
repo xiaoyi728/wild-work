@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { chLabel, chClass, UNKNOWN_TIP } from '../constants.js';
+import { chLabel, chClass, UNKNOWN_TIP, MODEL_SEARCH_MAX } from '../constants.js';
 import { fmtTokens } from '../format.js';
 
 // 能力图标：模型 ID 后的小标记，title 提供文字描述。
@@ -61,14 +61,28 @@ function ModelId({ m, ch, onCopy }) {
   if (!m) return null;
   // 点击复制的是「渠道/模型」完整标识（路由前缀 + 模型名），而不是裸模型名 ——
   // 光复制模型名粘到客户端里是调不通的，这是本页最容易踩的坑。
-  const full = `${ch}/${m.model}`;
+  // 少数渠道（如 glm 的智能体）模型名本身就带前缀，此时 raw 即完整 ID，不再重复出行。
+  const raw = m.model;
+  const short = raw.includes('/') ? raw.slice(raw.indexOf('/') + 1) : raw;
+  const full = raw.includes('/') ? raw : (ch ? `${ch}/${raw}` : raw);
+  const copyTip = `点击复制：${full}`;
   return (
-    <>
-      <code className="fee-model-copy" title={`${modelTip(m)}\n\n点击复制：${full}`} onClick={() => onCopy && onCopy(full)}>{m.model}</code>
-      <CtxTag m={m} />
-      <CapIcons m={m} />
-      {m.note ? <span className="rate-note" style={m.color ? { color: m.color } : undefined}> {m.note}</span> : null}
-    </>
+    <div className="mcell">
+      <span className="mline">
+        <code className="fee-model-copy" data-mid={full} role="button" tabIndex={0}
+              title={`${modelTip(m)}\n${copyTip}`}
+              onClick={() => onCopy && onCopy(full)}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onCopy && onCopy(full); } }}>{short}</code>
+        <CtxTag m={m} />
+        <CapIcons m={m} />
+        {m.note ? <span className="rate-note" style={m.color ? { color: m.color } : undefined}> {m.note}</span> : null}
+      </span>
+      {/* 完整 ID 单独一行：客户端实际要填的名字。仅在与短名不同才出，避免裸名重复。 */}
+      {full !== short ? (
+        <span className="full-id" data-mid={full} title={`点击复制完整模型 ID：${full}`}
+              onClick={() => onCopy && onCopy(full)}>{full}</span>
+      ) : null}
+    </div>
   );
 }
 
@@ -85,12 +99,81 @@ function channelCredits(state, ch) {
   return any ? sum : null;
 }
 
+// collectAllModels 展平全渠道模型，附带裸名 short 与完整 ID full（= 渠道/模型，客户端该填的名字）。
+// 数据源就是费率弹层已经在用的那份 /api/fees 响应 —— 查找面板纯前端，不新增后端接口。
+export function collectAllModels(fees) {
+  const out = [];
+  for (const ch of (fees && fees.channels) || []) {
+    for (const m of ch.models || []) {
+      const raw = m.model;
+      const short = raw.includes('/') ? raw.slice(raw.indexOf('/') + 1) : raw;
+      const full = raw.includes('/') ? raw : (ch.channel ? `${ch.channel}/${raw}` : raw);
+      out.push({ ch: ch.channel, m, short, full });
+    }
+  }
+  return out;
+}
+
+// 模型查找弹层：按关键字（模型名 / 渠道 / 完整 ID）即时过滤，点击复制完整模型 ID。
+// 关键字同时匹配裸名与完整 ID —— 两处都含渠道名，故搜渠道亦可。
+// 结果限量、超出只提示不纵向滚动，配合固定高度的 .modal-search，避免对话框随结果跳变。
+function ModelSearch({ fees, onClose, onCopy }) {
+  const [q, setQ] = useState('');
+  const inputRef = useRef(null);
+  useEffect(() => { if (inputRef.current) inputRef.current.focus(); }, []);
+
+  const all = collectAllModels(fees);
+  const kw = String(q || '').trim().toLowerCase();
+  const hit = kw ? all.filter((x) => x.full.toLowerCase().includes(kw) || x.short.toLowerCase().includes(kw)) : all;
+  const shown = hit.slice(0, MODEL_SEARCH_MAX);
+  const hidden = hit.length - shown.length;
+
+  const foot = !all.length ? ''
+    : hit.length === 0 ? '无匹配'
+      : hidden > 0
+        ? (kw ? `命中 ${hit.length} 个，仅显示前 ${shown.length} 个，还有 ${hidden} 个未显示，请细化关键字`
+              : `共 ${hit.length} 个模型，仅显示前 ${shown.length} 个，输入关键字可缩小范围`)
+        : `共 ${hit.length} 个匹配`;
+
+  return (
+    <div className="overlay" id="modelSearchOverlay"
+         onClick={(e) => { if (e.target.id === 'modelSearchOverlay') onClose(); }}>
+      <div className="modal modal-search">
+        <div className="modal-title">查找模型</div>
+        <input id="modelSearchInput" className="input ms-input" type="text" spellCheck="false" autoComplete="off"
+               ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)}
+               placeholder="输入关键字过滤（模型名 / 渠道 / 完整 ID）" />
+        <div className="ms-list" id="modelSearchList">
+          {shown.length === 0 ? (
+            <div className="ms-empty">{all.length ? '无匹配模型' : '费率数据尚未加载，请点「刷新费率」后再试'}</div>
+          ) : shown.map(({ ch, m, short, full }) => (
+            <div key={`${ch}-${full}`} className="ms-row" data-mid={full} role="button" tabIndex={0}
+                 title={`点击复制完整模型 ID：${full}`}
+                 onClick={() => onCopy(full)}
+                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onCopy(full); } }}>
+              <span className={`badge ${chClass(ch)}`}>{chLabel(ch)}</span>
+              <span className="ms-name">{short}</span>
+              <span className="ms-tags">
+                {(m.has_context && m.context_window) ? `(${fmtTokens(m.context_window)})` : ''}
+                {m.supports_images ? '👁' : ''}{m.supports_reasoning ? '🧠' : ''}
+              </span>
+              <span className="ms-rate">{m.free ? 'Free' : (m.priced ? `x${m.rate.toFixed(2)}` : 'unknown')}</span>
+            </div>
+          ))}
+        </div>
+        <div className="ms-foot" id="modelSearchFoot">{foot}</div>
+      </div>
+    </div>
+  );
+}
+
 // 渠道费率弹层内部。L1 约束：本地是弹层、上游是页内多标签 ——
 // 保留本地 feesOverlay 外壳，内部承载上游 .fees-tabs 渲染，渲染目标仍是 feesBox。
 export default function Fees({ fees, state, refreshBusy, onRefresh, onCopy, onClose }) {
   const channels = (fees && fees.channels) || [];
   // 记住上次选中的渠道，重渲染后自动恢复（后台刷新不打断用户浏览）。
   const [lastCh, setLastCh] = useState(null);
+  const [searchOpen, setSearchOpen] = useState(false);
   const boxRef = useRef(null);
 
   const active = channels.some((c) => c.channel === lastCh) ? lastCh : (channels[0] && channels[0].channel);
@@ -100,11 +183,17 @@ export default function Fees({ fees, state, refreshBusy, onRefresh, onCopy, onCl
   useEffect(() => { if (boxRef.current) boxRef.current.scrollTop = 0; }, [active]);
 
   return (
+    <>
     <div className="overlay" id="feesOverlay" onClick={(e) => { if (e.target.id === 'feesOverlay') onClose(); }}>
       <div className="modal" style={{ width: '920px', maxWidth: '94vw' }}>
         <div className="modal-head">
           <div className="modal-title shiny" style={{ marginBottom: 0 }}>渠道费率</div>
-          <button className="btn small" id="btnRefreshFees" disabled={refreshBusy} onClick={onRefresh}>刷新费率</button>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            <button className="btn small" id="btnModelSearch"
+                    title="按关键字快速定位全渠道模型，结果点击即复制完整模型 ID"
+                    onClick={() => setSearchOpen(true)}>查找模型</button>
+            <button className="btn small" id="btnRefreshFees" disabled={refreshBusy} onClick={onRefresh}>刷新费率</button>
+          </div>
         </div>
         <div className="modal-body fees" id="feesBox" ref={boxRef}>
           {channels.length === 0 ? (
@@ -167,5 +256,7 @@ export default function Fees({ fees, state, refreshBusy, onRefresh, onCopy, onCl
         </div>
       </div>
     </div>
+    {searchOpen ? <ModelSearch fees={fees} onClose={() => setSearchOpen(false)} onCopy={onCopy} /> : null}
+    </>
   );
 }

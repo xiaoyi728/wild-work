@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, setOnUnauthorized } from './api.js';
 import { shortUid, isWildcardHost } from './format.js';
-import { noExplicitCheckin, chLabel } from './constants.js';
+import { noExplicitCheckin, chLabel, isPasteKey, hasWebLogin } from './constants.js';
 import { reveal, magnetic } from './anim.js';
 import Accounts from './components/Accounts.jsx';
 import Usage from './components/Usage.jsx';
@@ -123,7 +123,7 @@ export default function App() {
   const [usageNonce, setUsageNonce] = useState(0);
   const [sinceText, setSinceText] = useState('');
   const [busy, setBusy] = useState({ refreshAll: false, checkinAll: false, refreshFees: false });
-  const [flow, setFlow] = useState({ confirm: null, pending: null, glm: null });
+  const [flow, setFlow] = useState({ confirm: null, pending: null, glm: null, cline: null });
 
   const [theme, toggleTheme] = useTheme();
   const knownUids = useRef(new Set());
@@ -316,7 +316,33 @@ export default function App() {
   const loginPoll = useRef(null);
   function stopLoginPoll() { if (loginPoll.current) { clearInterval(loginPoll.current); loginPoll.current = null; } }
 
-  function promptLogin(channel) { setFlow((f) => ({ ...f, confirm: { channel } })); }
+  // ④ 粘贴型（Cline）：Key 的创建动作发生在 app.cline.bot 网页里，本工具无法代劳，
+  //    所以这条没有轮询/回调，只有一次「验证 + 落盘」（后端只调 /api-keys，零 token 消耗）。
+  function promptLogin(channel) {
+    if (isPasteKey(channel)) {
+      setFlow((f) => ({ ...f, cline: { key: '', err: '', busy: false } }));
+      return;
+    }
+    setFlow((f) => ({ ...f, confirm: { channel } }));
+  }
+
+  async function submitClineKey(rawKey) {
+    const key = (rawKey || '').trim();
+    if (!key) { setFlow((f) => f.cline ? { ...f, cline: { ...f.cline, err: '请粘贴 API Key（sk_ 开头）' } } : f); return; }
+    setFlow((f) => ({ ...f, cline: { ...f.cline, busy: true, err: '验证中…' } }));
+    try {
+      const r = await api('/api/login/cline_key', { api_key: key });
+      setFlow((f) => ({ ...f, cline: null }));
+      // 同账号多把 Key 共享一份额度（官方按 …UsageCostUSDPerUser 计），
+      // 这条告警必须透出——吞掉它就等于默许用户在一个账号下堆 Key 以为能翻倍额度。
+      if (r && r.warning) toast(r.warning);
+      toast('Cline 账号已添加');
+      await loadState();
+      await loadFees();
+    } catch (e) {
+      setFlow((f) => f.cline ? { ...f, cline: { ...f.cline, busy: false, err: e.message || '验证失败' } } : f);
+    }
+  }
 
   // 导入型渠道（monkeycode / raccoon / loomy）：凭据只在本机已登录的官方客户端里，
   // 没有授权 URL，直接打 /api/account/import_local（后端 internal/app/import_local.go）。
@@ -336,8 +362,11 @@ export default function App() {
       const r = await api('/api/login/start', { channel });
       const url = r.auth_url;
       if (!url) { toast('无法获取登录链接'); return; }
-      setFlow((f) => ({ ...f, confirm: null, pending: { channel, url } }));
-      window.open(url, '_blank', 'noopener,noreferrer');
+      setFlow((f) => ({ ...f, confirm: null, pending: { channel, url, web: hasWebLogin(channel) } }));
+      // 网页版登录渠道（小浣熊 R44）：浏览器由后端拉起（独立 profile + CDP 调试端口），
+      // 这里不能再 window.open —— 那会在用户日常浏览器里多开一个没有调试端口的标签页，
+      // 后端根本捕获不到，用户却以为已经在「按指示登录」了。
+      if (!hasWebLogin(channel)) window.open(url, '_blank', 'noopener,noreferrer');
       stopLoginPoll();
       loginPoll.current = setInterval(async () => {
         try {
@@ -430,6 +459,13 @@ export default function App() {
     cancel: cancelGLMLogin,
   } : null;
 
+  const clineView = flow.cline ? {
+    ...flow.cline,
+    setKey: (v) => setFlow((f) => (f.cline ? { ...f, cline: { ...f.cline, key: v } } : f)),
+    submit: () => submitClineKey(flow.cline.key),
+    cancel: () => setFlow((f) => ({ ...f, cline: null })),
+  } : null;
+
   // 顶栏渲染已收敛到 NavShell（登录态与非登录态共用）。
 
   const actions = useMemo(() => ({
@@ -467,7 +503,7 @@ export default function App() {
             {/* 未登录也要把整幅操作区摆出来：vanilla 的面板 DOM 是静态的，
                 会话探针只是不填数据。少了这些控件就是可见退化（实测 20 → 8 个）。 */}
             <div className="mtab-body" id="mtabAccounts">
-              <Accounts state={null} actions={actions} knownUids={knownUids.current} />
+              <Accounts state={null} actions={actions} knownUids={knownUids.current} active />
             </div>
             <div className="mtab-body hidden" id="mtabUsage" />
             <div className="mtab-body hidden" id="mtabStats" />
@@ -505,7 +541,7 @@ export default function App() {
           </div>
 
           <div className={`mtab-body${mainTab === 'accounts' ? '' : ' hidden'}`} id="mtabAccounts">
-            <Accounts state={state} actions={actions} knownUids={knownUids.current} />
+            <Accounts state={state} actions={actions} knownUids={knownUids.current} active={mainTab === 'accounts'} />
           </div>
           <div className={`mtab-body${mainTab === 'usage' ? '' : ' hidden'}`} id="mtabUsage">
             <Usage active={mainTab === 'usage'} usageDays={usageDays} setUsageDays={setUsageDays}
@@ -533,7 +569,7 @@ export default function App() {
                     catch (e) { toast(e.message); }
                   }} />
       ) : null}
-      <LoginFlow flow={{ ...flow, glm: glmView }} actions={{
+      <LoginFlow flow={{ ...flow, glm: glmView, cline: clineView }} actions={{
         closeConfirm: () => setFlow((f) => ({ ...f, confirm: null })),
         confirmLogin: () => flow.confirm && startLogin(flow.confirm.channel),
         confirmImport: () => flow.confirm && importLocal(flow.confirm.channel),

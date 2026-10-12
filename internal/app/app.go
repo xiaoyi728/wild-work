@@ -313,6 +313,7 @@ var channelOrder = map[provider.Kind]int{
 var feeChannelOrder = []provider.Kind{
 	provider.Oczen, provider.WorkBuddy, provider.WorkBuddyAI, provider.QoderCN,
 	provider.QoderCOM, provider.TraeWork, provider.TraeCode, provider.QwenWork, provider.GLM,
+	provider.Cline,
 	provider.MonkeyCode,
 	provider.Raccoon,
 	provider.Loomy,

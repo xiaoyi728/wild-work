@@ -21,6 +21,7 @@ export const CH_VAR = {
   raccoon: '--raccoon',
   loomy: '--loomy',
   oczen: '--oczen',
+  cline: '--cline',
 };
 
 // 把 CSS 变量名解析成实际色值：echarts 只吃具体颜色，不吃 var()。

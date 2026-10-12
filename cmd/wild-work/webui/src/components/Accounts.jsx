@@ -47,11 +47,25 @@ function CreditValue({ a, shownRef }) {
 
 // hover 积分区弹出的明细浮窗。条数可能很多（TraeWork 每个签到奖励都是独立条目，常见 30+），
 // 故分页；翻页不重新请求（detailCache 已缓存该账号的完整响应）。
-function CreditTip({ data, uid, anchorRect, onClose }) {
+function CreditTip({ data, uid, anchorRect, expiringDays, onClose }) {
   const [page, setPage] = useState(0);
   const tipRef = useRef(null);
-  const items = (data && data.items) || [];
-  if (!items.length) return null;
+  const rawItems = (data && data.items) || [];
+  if (!rawItems.length) return null;
+
+  // 排序：临期（可消耗、有剩余、窗口内到期）→ 可用 → 已用完/不可用/仅展示垫底；组内按到期日升序。
+  // 临期判定与后端 ExpiringWithin 同口径：北京时间墙钟 now + 阈值天数，到期日当天零点前即临期。
+  // 判据必须与后端一致，否则「卡片标了临期、明细里却不红」这种自相矛盾又会回来。
+  const expDays = expiringDays || 1;
+  const bjNow = Date.now() + new Date().getTimezoneOffset() * 60000 + 8 * 3600 * 1000;
+  const expDeadline = bjNow + expDays * 24 * 3600 * 1000;
+  const expUtcOf = (it) => {
+    if (!it.expire_at) return Infinity;
+    const [ey, em, ed] = it.expire_at.split('-').map(Number);
+    return ey && em && ed ? Date.UTC(ey, em - 1, ed) : Infinity;
+  };
+  const groupOf = (it) => (it.usable && it.remain > 0) ? (expUtcOf(it) < expDeadline ? 0 : 1) : 2;
+  const items = rawItems.slice().sort((a, b) => groupOf(a) - groupOf(b) || expUtcOf(a) - expUtcOf(b));
 
   const pages = Math.max(1, Math.ceil(items.length / DETAIL_PAGE_SIZE));
   const cur = Math.min(Math.max(0, page), pages - 1);
@@ -109,13 +123,32 @@ function CreditTip({ data, uid, anchorRect, onClose }) {
           <tr><th>套餐</th><th>总额</th><th>已用</th><th>剩余</th>{hasExpiry ? <th>有效期</th> : null}</tr>
         </thead>
         <tbody>
-          {slice.map((it, i) => (
-            <tr key={i} className={it.usable ? '' : 'detail-unusable'}>
-              <td>{it.name}{it.usable ? null : <span className="detail-tag" title="该额度仅供官方客户端使用，本工具无法消耗">不可用</span>}</td>
-              <td>{it.total}</td><td>{it.used}</td><td>{it.remain}</td>
-              {hasExpiry ? <td>{it.expire_at || '-'}</td> : null}
-            </tr>
-          ))}
+          {slice.map((it, i) => {
+            // 临期行：可消耗、有剩余、且到期日在阈值窗口内（判据与上方排序同一函数，不另立一套）。
+            const isExp = it.usable && it.remain > 0 && it.expire_at && expUtcOf(it) < expDeadline;
+            const rowCls = isExp ? 'detail-exp-row' : (it.usable ? '' : 'detail-unusable');
+            return (
+              <tr key={i} className={rowCls}>
+                <td>{it.name}
+                  {!it.usable
+                    ? <span className="detail-tag" title="该额度仅供官方客户端使用，本工具无法消耗">不可用</span>
+                    : (it.info_only
+                      // 单位与积分不同（如 MonkeyCode 的每日 Token 额度）：展示但不计入合计。
+                      // 后端 Summarize() 已把它排除在 usable_remain 之外，面板不标注就会出现
+                      // 「明细各行相加 ≠ 底部可用小计」的自相矛盾。
+                      ? <span className="detail-tag" title="单位与积分不同，仅作展示，不计入合计">仅展示</span>
+                      : null)}
+                </td>
+                <td>{it.total}</td><td>{it.used}</td><td>{it.remain}</td>
+                {hasExpiry ? (
+                  <td className={isExp ? 'detail-exp' : ''}>
+                    {it.expire_at || '-'}
+                    {isExp ? <span className="detail-exp-tag" title={`${expDays} 天内到期，优先消耗`}>临期</span> : null}
+                  </td>
+                ) : null}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
       <div className="detail-sum">
@@ -228,9 +261,12 @@ function channelSummary(acc) {
   return [...known, ...rest].map((k) => map.get(k));
 }
 
-export default function Accounts({ state, actions, knownUids }) {
+export default function Accounts({ state, actions, knownUids, active }) {
   const [tipState, setTipState] = useState(null); // {uid, rect, data}
   const [filter, setFilter] = useState(null); // null = 全部；否则为渠道 key
+  // uid -> {credits, unusable_credits, expiring_credits}：明细响应的同源值，
+  // 只覆盖展示，不回写 state（state 是 /api/state 的快照，前端不该伪造它）。
+  const [synced, setSynced] = useState({});
   const cache = useRef({});
   const hideTimer = useRef(null);
 
@@ -238,22 +274,55 @@ export default function Accounts({ state, actions, knownUids }) {
     clearTimeout(hideTimer.current);
     hideTimer.current = setTimeout(() => setTipState(null), 300);
   };
-  const cancelHide = () => { clearTimeout(hideTimer.current); };
+  const cancelHide = () => { clearTimeout(hideTimer.current); hideTimer.current = null; };
   hide.cancel = cancelHide;
-  hide.now = () => { clearTimeout(hideTimer.current); setTipState(null); };
+  hide.now = () => { clearTimeout(hideTimer.current); hideTimer.current = null; setTipState(null); };
+
+  // 账号数据已变（刷新/签到/增删/自动循环）⇒ 明细缓存与同源覆盖一并作废。
+  // 少作废缓存这一条，「刷新后顶层是新值、弹层还是旧余额」的打架就会重现。
+  useEffect(() => { cache.current = {}; setSynced({}); }, [state]);
+
+  // 切走「账号管理」主 tab 时立刻收起浮窗。浮窗是 portal 挂到 document.body 的
+  // （见 CreditTip 里那段包含块说明），不随 mtab-body 的 hidden 一起消失，
+  // 不主动收起就会残留在其它页签上（上游 PR #90 第 ② 条）。
+  useEffect(() => {
+    if (!active) { clearTimeout(hideTimer.current); hideTimer.current = null; setTipState(null); }
+  }, [active]);
 
   const show = async (uid, rect) => {
     cancelHide();
     if (cache.current[uid]) { setTipState({ uid, rect, data: cache.current[uid] }); return; }
     try {
       const d = await api('/api/account/resource_detail', { uid });
+      // 竞态守卫：等待接口期间鼠标已移开（hide 已排定关闭且未被 tip 的 hover/翻页取消）
+      // ⇒ 不再弹出。少了这一条，快速划过多个账号就会留下一个「幽灵浮窗」显示错账号。
+      if (hideTimer.current !== null) return;
       if (!d || !d.items || !d.items.length) return;
       cache.current[uid] = d;
       setTipState({ uid, rect, data: d });
+      applySync(uid, d);
     } catch (e) { /* 明细失败不影响卡片 */ }
   };
 
-  const acc = state ? (state.accounts || []) : [];
+  // 把卡片与汇总条的积分数字回写成明细响应的同源代码（R45）。
+  // 顶层原本是 pool 快照（仅刷新事件更新），明细是 hover 实时值，区间内的消耗
+  // 会让「同屏两个数字对不上」；后端 ResourceDetail 现已把同一响应回写 pool 快照，
+  // 这里补齐前端那一半，弹层展开那一刻全屏数字一致。
+  const applySync = (uid, d) => {
+    const a = (state && state.accounts || []).find((x) => x.uid === uid);
+    if (!a || a.credits_na) return;
+    setSynced((m) => ({
+      ...m,
+      [uid]: {
+        credits: d.usable_remain || 0,
+        unusable_credits: d.unusable_remain || 0,
+        expiring_credits: d.expiring_remain || 0,
+      },
+    }));
+  };
+
+  const rawAcc = state ? (state.accounts || []) : [];
+  const acc = rawAcc.map((a) => (synced[a.uid] ? { ...a, ...synced[a.uid], credits_stale: false } : a));
   const rows = channelSummary(acc); // state 为 null 时是空数组 ⇒ 汇总条不渲染（未登录）
   const shown = filter ? acc.filter((a) => a.group === filter) : acc;
   const totals = rows.reduce((t, s) => ({ n: t.n + s.n, num: t.num + s.num }), { n: 0, num: 0 });
@@ -274,6 +343,9 @@ export default function Accounts({ state, actions, knownUids }) {
             <button className="btn primary alt qodercom" id="btnAddQoderCOM" onClick={() => actions.promptLogin('qodercom')}>＋ QoderCOM</button>
             <button className="btn primary alt qwenwork" id="btnAddQwen" onClick={() => actions.promptLogin('qwenwork')}>＋ 千问办公</button>
             <button className="btn primary alt glm" id="btnAddGLM" title="体验渠道：仅文本对话，不支持工具调用/多模态" onClick={actions.startGLMLogin}>＋ 智谱清言</button>
+            {/* 粘贴型渠道：凭据是官方 sk_ API Key，创建动作发生在 app.cline.bot 网页里，本工具无法代劳 */}
+            <button className="btn primary alt cline" id="btnAddCline" title="免费池渠道：粘贴官方 API Key，须为多个独立账号各自的 Key"
+                    onClick={() => actions.promptLogin('cline')}>＋ Cline</button>
             {/* 导入型渠道：凭据来自本机已登录的官方客户端，没有浏览器授权流 */}
             <button className="btn primary alt monkeycode" id="btnAddMonkeyCode" title="从本机已登录的 MonkeyCode 客户端导入凭据"
                     onClick={() => actions.promptLogin('monkeycode')}>＋ MonkeyCode</button>
@@ -319,7 +391,8 @@ export default function Accounts({ state, actions, knownUids }) {
           根本不执行，#acctEmpty 一直带着 hidden 类。所以判据是「state 存在且为空」，
           不是「数组为空」——后者会让未登录页面凭空多出一行提示。 */}
       {state && !acc.length ? <div id="acctEmpty" className="empty">还没有账号，点击上方按钮添加</div> : null}
-      {tipState ? <CreditTip data={tipState.data} uid={tipState.uid} anchorRect={tipState.rect} onClose={hide} /> : null}
+      {tipState ? <CreditTip data={tipState.data} uid={tipState.uid} anchorRect={tipState.rect}
+                             expiringDays={state && state.expiring_days} onClose={hide} /> : null}
     </>
   );
 }

@@ -14,14 +14,37 @@ function CapIcons({ m }) {
   return <> <span className="cap-icons">{caps}</span></>;
 }
 
-// 上下文标记：只在上游接口真实返回时展示（has_context），不拿估算值充数。
+// 上下文标记：有上下文才展示，且不拿估算值充数。
+// 来源有两种，口径不同必须标出来：context_from_api = 上游接口返回；
+// hand_measured = 本工具手工实测（cline 免费池上游根本不返回，只能实测）。
+// 实测值一律带 * 并在 title 里写明来源——把实测冒充成官方声明正是 R46/issue #40 禁止的做法。
 function CtxTag({ m }) {
   if (!m || !m.has_context || !m.context_window) return null;
-  return <> <span className="ctx-tag" title={`上下文窗口：${fmtTokens(m.context_window)} tokens`}>({fmtTokens(m.context_window)})</span></>;
+  const src = m.hand_measured ? '本工具实测值（仅供参考，非上游官方声明）' : '上游接口返回';
+  return (
+    <> <span className={`ctx-tag${m.hand_measured ? ' hand' : ''}`}
+               title={`上下文窗口：${fmtTokens(m.context_window)} tokens（${src}）`}>
+      ({fmtTokens(m.context_window)}{m.hand_measured ? '*' : ''})
+    </span></>
+  );
+}
+
+// 思考档位小标（issue #96）：只在上游目录声明时展示，未声明就整个不出现。
+// 把「未声明」显示成任何具体档位都是编造，与 ContextFromAPI 同一哲学。
+function EffortTag({ m }) {
+  if (!m || !m.reasoning_efforts || !m.reasoning_efforts.length) return null;
+  const list = m.reasoning_efforts.join('·')
+    + (m.default_reasoning_effort ? `（默认 ${m.default_reasoning_effort}）` : '');
+  return (
+    <> <span className="effort-tag"
+              title={`思考档位（上游目录声明）：${list}；客户端传 reasoning_effort 即可调档`}>
+      [{m.reasoning_efforts.join('·')}]
+    </span></>
+  );
 }
 
 // 能力文字摘要。措辞说明：上游未声明某能力时不自行断言其「不支持」，只说「未声明」
-// ——避免把缺失信息当成否定结论。
+// ——避免把缺失信息当成否定结论。hand_measured 时改说「实测不支持」，如实标出来源。
 function capText(m) {
   if (!m) return null;
   const yes = [], unknown = [];
@@ -29,14 +52,19 @@ function capText(m) {
   (m.supports_reasoning ? yes : unknown).push('思考模式');
   const parts = [];
   if (yes.length) parts.push(`支持：${yes.join('、')}`);
-  if (unknown.length) parts.push(`上游未声明：${unknown.join('、')}`);
+  if (unknown.length) parts.push(`${m.hand_measured ? '实测不支持' : '上游未声明'}：${unknown.join('、')}`);
+  if (m.reasoning_efforts && m.reasoning_efforts.length) {
+    parts.push(`思考档位：${m.reasoning_efforts.join('/')}${m.default_reasoning_effort ? `（默认 ${m.default_reasoning_effort}）` : ''}`);
+  }
+  if (m.hand_measured) parts.push('（能力与上下文为本工具实测值，仅供参考）');
   return parts.join('；');
 }
 
 function modelTip(m) {
   const parts = [`模型：${m.model}`];
   if (m.has_context && m.context_window) {
-    parts.push(`上下文窗口：${fmtTokens(m.context_window)}`);
+    const src = m.hand_measured ? '（本工具实测，非上游官方值）' : '';
+    parts.push(`上下文窗口：${fmtTokens(m.context_window)}${src}`);
     if (m.max_tokens) parts.push(`最大输出：${fmtTokens(m.max_tokens)}`);
   } else {
     parts.push('上下文窗口：未知');
@@ -65,8 +93,10 @@ function RateCell({ m }) {
 // 直接 `provider "cline-free" is not configured`，正是本页注释警告的那个坑。
 // 而 m.model 来自 /api/fees，本就是「该渠道内的模型名」，渠道由 ch.channel 给出，
 // 故前缀一律补上、短名一律不剥。
+// 唯一的例外是「裸名自己就以渠道前缀开头」——上游 R52 定的契约，防重复拼接
+// （否则已带双层路径的名字会被拼成 `cline/cline/cline-free/*`）。
 export function modelIds(ch, raw) {
-  return { short: raw, full: ch ? `${ch}/${raw}` : raw };
+  return { short: raw, full: ch && !raw.startsWith(`${ch}/`) ? `${ch}/${raw}` : raw };
 }
 
 function ModelId({ m, ch, onCopy }) {
@@ -83,6 +113,7 @@ function ModelId({ m, ch, onCopy }) {
               onClick={() => onCopy && onCopy(full)}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onCopy && onCopy(full); } }}>{short}</code>
         <CtxTag m={m} />
+        <EffortTag m={m} />
         <CapIcons m={m} />
         {m.note ? <span className="rate-note" style={m.color ? { color: m.color } : undefined}> {m.note}</span> : null}
       </span>
@@ -164,6 +195,12 @@ function ModelSearch({ fees, onClose, onCopy }) {
                 {(m.has_context && m.context_window) ? `(${fmtTokens(m.context_window)})` : ''}
                 {m.supports_images ? '👁' : ''}{m.supports_reasoning ? '🧠' : ''}
               </span>
+              {m.reasoning_efforts && m.reasoning_efforts.length ? (
+                <span className="ms-eff"
+                      title={`思考档位：${m.reasoning_efforts.join('·')}${m.default_reasoning_effort ? `（默认 ${m.default_reasoning_effort}）` : ''}`}>
+                  {m.reasoning_efforts.join('·')}
+                </span>
+              ) : null}
               <span className="ms-rate">{m.free ? 'Free' : (m.priced ? `x${m.rate.toFixed(2)}` : 'unknown')}</span>
             </div>
           ))}

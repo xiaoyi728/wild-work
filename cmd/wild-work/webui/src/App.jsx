@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, setOnUnauthorized } from './api.js';
 import { shortUid, isWildcardHost } from './format.js';
-import { noExplicitCheckin, chLabel, isPasteKey, hasWebLogin } from './constants.js';
+import { noExplicitCheckin, chLabel, isPasteKey, hasWebLogin, USAGE_DAYS_KEY, USAGE_DAYS_VALID } from './constants.js';
 import { reveal, magnetic } from './anim.js';
 import Accounts from './components/Accounts.jsx';
 import Usage from './components/Usage.jsx';
@@ -119,7 +119,17 @@ export default function App() {
   const [showHelp, setShowHelp] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
   const [mainTab, setMainTab] = useState('accounts');
-  const [usageDays, setUsageDays] = useState(7);
+  // 用量区间记忆：初值现读 localStorage（隐私模式/被禁用时静默回退默认 7，不阻塞渲染）。
+  const [usageDays, setUsageDays] = useState(() => {
+    try {
+      const v = parseInt(localStorage.getItem(USAGE_DAYS_KEY) || '', 10);
+      return USAGE_DAYS_VALID.includes(v) ? v : 7;
+    } catch { return 7; }
+  });
+  const pickUsageDays = (d) => {
+    setUsageDays(d);
+    try { localStorage.setItem(USAGE_DAYS_KEY, String(d)); } catch { /* 存不下不影响本次切换 */ }
+  };
   const [usageNonce, setUsageNonce] = useState(0);
   const [sinceText, setSinceText] = useState('');
   const [busy, setBusy] = useState({ refreshAll: false, checkinAll: false, refreshFees: false });
@@ -545,7 +555,7 @@ export default function App() {
             <Accounts state={state} actions={actions} knownUids={knownUids.current} active={mainTab === 'accounts'} />
           </div>
           <div className={`mtab-body${mainTab === 'usage' ? '' : ' hidden'}`} id="mtabUsage">
-            <Usage active={mainTab === 'usage'} usageDays={usageDays} setUsageDays={setUsageDays}
+            <Usage active={mainTab === 'usage'} usageDays={usageDays} setUsageDays={pickUsageDays}
                    bump={usageNonce + (mainTab === 'usage' ? 1 : 0)} sinceSink={setSinceText} />
           </div>
           <div className={`mtab-body${mainTab === 'stats' ? '' : ' hidden'}`} id="mtabStats">

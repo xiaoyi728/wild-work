@@ -75,6 +75,8 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
   const [oczenKey, setOczenKey] = useState(state.oczen_api_key || ''); // 回显脱敏值
   const oczenTouched = useRef(false);
   const [autostart, setAutostart] = useState(!!state.autostart);
+  // 思考链防癫：后端缺省（旧 config.json 无 features 段）按开启显示，与 config.Default() 一致。
+  const [loopGuard, setLoopGuard] = useState(state.loop_guard !== false);
   const [expiring, setExpiring] = useState(String(state.expiring_days || 1));
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -197,6 +199,13 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
       if (expDays !== (state.expiring_days || 1)) {
         try {
           await api('/api/config/expiring_days', { days: expDays });
+        } catch (e) { onToast(e.message); return; }
+      }
+
+      // 4.5) 思考链防癫开关（独立端点，atomic 全局开关即时生效，无需重启）
+      if (loopGuard !== (state.loop_guard !== false)) {
+        try {
+          await api('/api/config/loop_guard', { on: loopGuard });
         } catch (e) { onToast(e.message); return; }
       }
 
@@ -369,6 +378,15 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
                 <span className="slider"></span>
               </label>
               <span className="hint" style={{ marginLeft: 8 }}>程序随系统启动自动运行</span>
+            </div>
+            <div className="row" style={{ marginTop: 8 }}>
+              <label className="lbl wide" title="流式生成中检测思考链复读/空转（发癫），命中即中断并返回错误，由下游 AI 客户端自行重试恢复">思考链防癫</label>
+              <label className="switch">
+                <input type="checkbox" id="chkLoopGuard" checked={loopGuard}
+                       onChange={(e) => setLoopGuard(e.target.checked)} />
+                <span className="slider"></span>
+              </label>
+              <span className="hint" style={{ marginLeft: 8 }}>检测模型思维链死循环，命中即中断；不罚账号</span>
             </div>
           </div>
 

@@ -97,6 +97,10 @@ const STATE = {
       // 后者专治「含斜杠就当作已带渠道前缀」这个判据 —— 见 Fees.jsx 的 modelIds 注释。
       { channel: 'qodercn', models: [{ model: 'qwen3.8-flash', priced: true, rate: 0.3, free: false, has_context: true, context_window: 180000 }] },
       { channel: 'cline', models: [{ model: 'cline-free/grok-4', priced: false, rate: 0, free: true, has_context: false }] },
+      // 上游目录声明了思考档位 + 上下文来自本工具实测：两条各治一个「冒充」——
+      // 档位不得给未声明的渠道编出来，实测值不得画成上游官方声明（R46/issue #40、R49）。
+      { channel: 'workbuddy', models: [{ model: 'deepseek-v4', priced: true, rate: 0.2, free: false, has_context: true, context_window: 1000000, reasoning_efforts: ['low', 'high', 'max'], default_reasoning_effort: 'high' }] },
+      { channel: 'raccoon', models: [{ model: 'sn-sensenova-6-8-flash', priced: false, rate: 0, free: true, has_context: true, context_window: 524288, hand_measured: true }] },
     ],
   },
 };
@@ -145,7 +149,7 @@ try {
     React.createElement(Settings, {
       state: STATE, onClose: noop, onSaved: noop, onToast: noop, onEnsureSession: async () => true,
       setAuthSession: noop, onLogout: noop, onShowLogin: noop, onSaveTimes: async () => {},
-    })), ['chkPet', 'btnSettingsSave', 'btnSettingsCancel', 'adminPassInput', 'keyInput', 'selHost', 'btnAddTime']);
+    })), ['chkPet', 'chkLoopGuard', 'btnSettingsSave', 'btnSettingsCancel', 'adminPassInput', 'keyInput', 'selHost', 'btnAddTime']);
 
   // 4) 渠道费率弹层
   const feesHtml = renderToStaticMarkup(
@@ -168,6 +172,35 @@ try {
   results.push({ name: '完整模型 ID 前缀', visible: visibleControls(feesHtml).length, missing: idProblems });
   if (idProblems.length) console.error(`✗ 完整模型 ID 前缀：${idProblems.join('；')}`);
   else console.log(`✓ 完整模型 ID 前缀：${flat.length} 条全部形如「渠道/模型」（含斜杠名亦不例外）`);
+
+  // 6) 缓存利用率三态（上游 v2.7.0 的缓存列）。判据做在纯函数 cacheRate 上而不是端到端：
+  //    Usage/Stats 两张表都是取数驱动的分支，SSR 不跑 useEffect，渲不出行来。
+  //    「命中 0」与「上游不提供」必须画成两样——后者若画 0%，用户会去优化一个
+  //    上游根本不回报的指标（internal/server/cacheusage.go 的 reported 标志就是为它设的）。
+  const { cacheRate } = await load('/src/components/CacheCell.jsx');
+  const { modelIds } = await load('/src/components/Fees.jsx');
+  const v7 = [];
+  const say = (cond, msg) => { if (!cond) v7.push(msg); };
+  const count = (re) => (feesHtml.match(new RegExp(re.source, 'g')) || []).length;
+  say(cacheRate({ cr_cov: 0, cr: 0, cr_reqs: 0 }) === null, 'cr_cov=0 应判「不提供」(null)');
+  say(cacheRate({}) === null, '字段整体缺失（旧流水）应判「不提供」');
+  say(cacheRate(null) === null, '行缺失不应抛，应判「不提供」');
+  const cZero = cacheRate({ cr_cov: 1000, cr: 0, cr_reqs: 3 });
+  say(cZero && cZero.shown === '0.00%', `有样本且真未命中应显示 0.00%，实际 ${cZero && cZero.shown}`);
+  const cHit = cacheRate({ cr_cov: 1283, cr: 1218, cr_reqs: 9 });
+  say(cHit && cHit.shown === '94.9%', `1218/1283 应显示 94.9%，实际 ${cHit && cHit.shown}`);
+
+  // 7) 思考档位与实测来源（R49 / R46）：声明了才渲染，未声明的一律不出现。
+  say(modelIds('cline', 'cline-free/grok-4').full === 'cline/cline-free/grok-4',
+    `自带命名空间的上游 ID 必须补成双层路径，实际 ${modelIds('cline', 'cline-free/grok-4').full}`);
+  say(modelIds('workbuddy', 'workbuddy/deepseek-v4').full === 'workbuddy/deepseek-v4',
+    `已带渠道前缀的名字不得重复拼接，实际 ${modelIds('workbuddy', 'workbuddy/deepseek-v4').full}`);
+  say(/\[low·high·max\]/.test(feesHtml), '上游声明的档位没渲染出 [low·high·max]');
+  say(count(/class="effort-tag"/) === 1, `effort-tag 应只在「上游声明了档位」的那一行出现，实际 ${count(/class="effort-tag"/)} 次`);
+  say(count(/class="ctx-tag hand"/) === 1, `hand_measured 的上下文应带 hand 类，实际 ${count(/class="ctx-tag hand"/)} 次`);
+  results.push({ name: '缓存三态 + 档位/实测来源标注', visible: visibleControls(feesHtml).length, missing: v7 });
+  if (v7.length) console.error(`✗ 缓存三态 + 档位/实测来源标注：${v7.join('；')}`);
+  else console.log('✓ 缓存三态（0% 与「—」分流）、档位只在声明时出现、实测值带来源标、双层 ID 前缀护栏均通过');
 } finally {
   await server.close();
 }

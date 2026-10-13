@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { chLabel, CH_SUMMARY_ORDER, STATS_POLL_MS, APPLOG_POLL_MS, APPLOG_MAX_LINES, STATS_LOGS_URL, STATS_TOAST_SEEN_KEY } from '../constants.js';
 import { fmtTokensFull, shortUid } from '../format.js';
+import { cacheRate, cacheNoneTitle } from './CacheCell.jsx';
 
 // 运行统计（上游 v2.5.5–v2.6.2 新增）：把服务端账本 internal/stats 的快照摊成人看的表。
 // 数据全部由后端算好（platforms/models/expiry/rotation/abnormal），前端只负责排版，
@@ -254,15 +255,21 @@ export default function Stats({ active, onToast }) {
         <div className="ucard-label">模型消耗</div>
         <table className="table" id="stModels">
           <thead><tr>
-            <th>模型</th><th className="num">请求</th><th className="num">tokens</th><th className="num">消耗积分</th>
+            <th>模型</th><th className="num">请求</th><th className="num">tokens</th><th className="num">缓存</th><th className="num">消耗积分</th>
             <th className="num">首字延迟</th><th className="num">tok/s</th>
           </tr></thead>
           <tbody>
-            {(snap.models || []).map((m) => (
+            {(snap.models || []).map((m) => {
+              const cr = cacheRate(m);
+              return (
               <tr key={m.model}>
                 <td>{m.model}</td>
                 <td className="num">{m.reqs}</td>
                 <td className="num">{fmtTokensFull(m.tokens)}</td>
+                <td className={`num${cr ? '' : ' zero'}`}>
+                  {cr ? <span className="cache-pct" title={cr.title}>{cr.shown}</span>
+                      : <span className="muted" title={cacheNoneTitle}>—</span>}
+                </td>
                 <td className={`num${m.credit ? '' : ' zero'}`}>{fmtCreditS(m.credit)}</td>
                 <td className={`num${m.avg_ttfb_ms ? '' : ' zero'}`}>{m.avg_ttfb_ms ? `${m.avg_ttfb_ms} ms` : '—'}</td>
                 <td className={`num${m.avg_tok_per_sec ? '' : ' zero'}`}>
@@ -270,7 +277,8 @@ export default function Stats({ active, onToast }) {
                   {m.perf_samples ? <span className="muted">{` (${m.perf_samples})`}</span> : null}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
         {!(snap.models || []).length ? <div className="empty">暂无模型用量</div> : null}

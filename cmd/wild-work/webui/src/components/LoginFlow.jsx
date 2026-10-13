@@ -178,13 +178,38 @@ function ClineModal({ cline }) {
           <div className="cfg-section">
             <div className="cfg-heading">申请办法</div>
             <ol className="glm-steps">
-              <li>打开 <a href="https://app.cline.bot/" target="_blank" rel="noopener noreferrer">app.cline.bot</a>，自行注册一个 Cline 账号。</li>
-              <li>进入 <code>Settings</code> → <code>API Keys</code> → 创建 Key（用途选 <code>Direct API calls / scripts / CI-CD</code>）。</li>
+              <li>打开 <a href="https://app.cline.bot/" target="_blank" rel="noopener noreferrer">app.cline.bot</a> 并注册账号。</li>
+              <li>进入 <code>Account / API Keys</code> → <code>Create API Key</code>。</li>
               <li>Key（形如 <code>sk_</code> + 64 位十六进制）<b>只在创建时完整显示一次</b>，请立即复制粘贴到下面。</li>
             </ol>
             <input id="clineKeyInput" className="input grow" spellCheck="false" autoComplete="off" ref={inputRef}
-                   placeholder="粘贴 API Key（sk_…）" style={{ fontFamily: 'ui-monospace,monospace' }}
+                   placeholder="粘贴 API Key（sk_…）" style={{ width: '100%', fontFamily: 'ui-monospace,monospace' }}
                    value={cline.key} onChange={(e) => cline.setKey(e.target.value)} />
+          </div>
+
+          {/* 实测参数表：上游 recommended-models 的 free[] 只给 id/name/description/tags，
+              完全不返回上下文与能力字段，而客户端靠 /v1/models 的 context_length /
+              input_modalities 判断压缩时机与能否收图 —— 只能本工具逐个实测后写进去。
+              措辞按 R46 的裁定写「向上取一档」（上游面板文案此处仍写着向下取档，与实测值不符）。 */}
+          <div className="cfg-section">
+            <div className="cfg-heading">免费模型参数（本工具实测验证值，仅供参考）</div>
+            <table className="table cline-caps">
+              <thead><tr><th>模型</th><th>上下文</th><th>图像</th><th>工具</th><th>备注</th></tr></thead>
+              <tbody>
+                <tr><td><code>mimo-v2.6-flash</code></td><td>1M</td><td>✅</td><td>✅</td><td></td></tr>
+                <tr><td><code>step-5-preview</code></td><td>1M</td><td>✅</td><td>✅</td><td></td></tr>
+                <tr><td><code>muse-spark-1.3-contributor</code></td><td>1M</td><td>✅</td><td>✅</td>
+                    <td className="dim">地区限制，国内需配 <b>渠道上游代理</b> 才可用</td></tr>
+                <tr><td><code>solar-mini4</code></td><td>512K</td><td>—</td><td>✅</td>
+                    <td className="dim">上游明确不接受图像输入</td></tr>
+              </tbody>
+            </table>
+            <div className="hint">
+              以上为 2026-10-12 实测结果（「头/中/尾三暗号」回忆验证，排除上游静默截断）：
+              上下文按实测通过值<b>向上取一档</b>，超大 prompt（&gt;~700K）首字节常需 &gt;90s，
+              已超出本工具 90s 响应头超时，故实测值本身是<b>下界</b>；
+              <b>非官方值，仅作参考</b>，上游随时可能调整。
+            </div>
           </div>
 
           <div className="glm-warn">

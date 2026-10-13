@@ -113,6 +113,11 @@ export const APPLOG_MAX_LINES = 200; // 渲染上限（后端最多回 300 行�
 export const STATS_LOGS_URL = '/api/stats/logs?limit=15';
 export const STATS_TOAST_SEEN_KEY = 'stats-toast-seen'; // 里程碑 toast 已读去重
 
+// 用量区间记忆：面板默认 7 日，但用户选了「今日」后刷新页面不该被重置回去。
+// 合法值与 Usage.jsx 的分段按钮同源（本仓比上游多一个 30 日档）。
+export const USAGE_DAYS_KEY = 'usage-range-seen';
+export const USAGE_DAYS_VALID = [1, 7, 30];
+
 export const ledgerKinds = { earn: '↑签到/发放', spend: '↓消耗', expire: '✖过期' };
 
 // 脱敏哨兵：后端回显形如 sk-xxx…尾4位，含省略号即代表「用户未改动」。

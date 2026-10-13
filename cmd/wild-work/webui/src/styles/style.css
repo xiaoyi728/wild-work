@@ -381,7 +381,7 @@ body {
 .seg-btn + .seg-btn { border-left: 1px solid var(--card-hairline); }
 .seg-btn.active { background: var(--accent); color: #fff; }
 
-.usage-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+.usage-cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 18px; }  /* 第 5 张 = 缓存利用率卡（上游 v2.7.0）；窄屏的 2 列媒体查询在后面，仍会覆盖 */
 .ucard {
   background: var(--card-bg); border: 1px solid var(--card-hairline); border-radius: 18px;
   padding: 14px 18px; box-shadow: var(--shadow-card);
@@ -772,3 +772,32 @@ html[data-theme="paper"] .shiny {
   font-size: 10px; padding: 1px 5px; margin-left: 5px; border-radius: 8px;
   color: var(--danger); border: 1px solid var(--danger); white-space: nowrap;
 }
+
+/* ============================================================
+   上游 v2.7.0/v2.7.1 功能移植（2026-10-13）：思考档位标 / 实测值来源标 /
+   缓存利用率三态 / Cline 实测参数表。
+   仅新增类，不改动任何既有规则；色值一律走本地 token，不引入上游的硬编码紫。
+   ============================================================ */
+
+/* 上下文窗口来源区分：实测值（带 *）用警示色 + 虚下划线，避免与上游官方声明混淆 */
+.fees .ctx-tag.hand { color: var(--warn); border-bottom: 1px dotted var(--warn); }
+
+/* 思考档位标记（issue #96）：模型 ID 后的 [low·high·max] 小字标。
+   上游用 #7c3aed 与灰字 ctx-tag 区分，本地改走 --accent —— 同为「与灰字可读地区分」，
+   但不新增 token（否则六套主题块都要各插一个值并做 oklch 对账）。 */
+.fees .effort-tag {
+  font-size: 11px; color: var(--accent); margin-left: 2px;
+  font-family: ui-monospace, monospace; cursor: help;
+}
+.fees code + .ctx-tag, .fees code + .effort-tag { vertical-align: baseline; }
+/* 模型查找行的同款档位（紧凑，只列档位名） */
+.ms-eff { color: var(--accent); font-family: ui-monospace, monospace; font-size: 11px; cursor: help; }
+
+/* 缓存利用率：数字对齐，三态中的「—」走 .muted，不在这里带 display */
+.cache-pct { font-variant-numeric: tabular-nums; }
+
+/* Cline 免费模型实测参数表（弹层内，上游 free[] 不返回上下文/能力，只能实测） */
+.cline-caps { font-size: 12.5px; }
+.cline-caps th, .cline-caps td { padding: 5px 8px; }
+.cline-caps code { font-size: 11.5px; }
+.cline-caps td.dim { color: var(--muted); font-size: 11.5px; }

@@ -72,9 +72,13 @@ Wild-Work 是 WorkBuddy（国内版+国际版）/TraeWork/Qoder 多渠道账号�
 | R43 | **运行统计（`internal/stats`）与用量流水（`internal/ledger`）是两套并列口径，不合并、不互校**（2026-10-07，PR #71–#73） | **背景**：新增「运行统计」tab 时引入了第二套统计面。分工：`ledger` = 磁盘 JSONL 双流水（`data/ledger/{usage,credit}-*.jsonl`），账号**条目差分**口径，按需扫描聚合（R17）；`stats` = 内存实时 + 按日归档 `data/stats.json`，「今日」口径——消耗走**余额下降差值**、收入走**日志签到事件**（`events.go` 正则解析 `app.log`，因「登录即自动签到」等场景条目晚于入账建立，差值恒 0 漏记）、逐请求 token 走 **usage 帧精确值**（`usage.go`）。**决议**：两者**零共享状态、零互相写入**（stats 仅只读 `ledger.Query(1)` 取当日作废），各自标注口径、互不引用；**数字天然不同是设计而非缺陷**（差值含积分包到期作废，ledger 已拆 spend/expire），**不追求对齐**。**边界**：`ledger` 仍是面板「用量与积分」的数据源与 issue #67 等待修的口径；`stats` 只服务「运行统计」tab。新增统计需求时**先明确归属**（精确拆分→ledger；实时/今日/趋势→stats），**不得**为对齐数字而改动另一侧。**注入纪律**：stats 全部数据输入走**进程内直调**（`allStatuses` / `handler.StickySnapshot` / `ledger.Query`），**不得** HTTP 自环（R13）；`main.go` 须 `go appInst.StartStatsFeeders(sctx)`（漏接线即静默无数据，同 R34 家族） |
 | R44 | **小浣熊登录改用「网页版 CDP 捕获」，废弃桌面协议回调**（2026-10-10） | **背景**：原「浏览器授权登录」靠改写 HKCU 的 `office-raccoon://` 协议注册来接住深链授权码（R41），仅 Windows 可用、要求本机装官方客户端、且与客户端抢协议。**实测**（`ref/xiaohuanxiong_web_20261010.saz`）：网页版登录成功后前端 JS 会把凭据写进 Cookie `raccoon_refresh_token`（域 `.xiaohuanxiong.com`），且该凭据与桌面端**同一套**（JWT 无平台声明）——实测目录/余额/推理/刷新四项全通，`model_catalog` 的 **9 个模型全部可用**。**修法**：`internal/login_raccoon` 改为网页版流程（`web.go`）——拉起**独立 profile** 的 Edge/Chrome（复用 `internal/cdp`）打开 `office.xiaohuanxiong.com/home?loginModal=true` → CDP 轮询 Cookie → **判据是 JWT `owner_type==users`**（访客也下发 Cookie，见 R28 同款教训）→ 调 `/api/web/auth/v1/refresh` 换取并落盘凭据。**跨平台**（纯 HTTP + 系统浏览器，不再依赖注册表）；桌面协议登录代码（`protocol*.go` 的 Hijack/Backup/restore、`--raccoon-callback` 入口）**保留但不再调用**，仅作旧版注册表残留的启动自愈（`healRaccoonProtocol`）。**「从客户端导入」路径保留**（`import_local.go`）。**已知限制（面板弹窗已告知）**：上游 refresh **轮换 refresh_token**，若同账号凭据被本工具与浏览器/客户端**共用**会互踢；要并存须用本流程**单独登录一次**（新建独立会话，`sid` 不同）。回归测试 `internal/login_raccoon/login_test.go`（owner_type 甄别 / Poll 状态机 / 并发拒绝 / 幂等 Shutdown） |
 | R45 | **明细与刷新路径同源回写 pool 快照（`creditSnapshot`）**（2026-10-11） | **背景**：面板「同屏两个数字对不上」——账号卡片/汇总条的积分与 hover 明细弹层的数字不一致。**实测**：同一响应内上游汇总字段==明细池相加，确认非上游口径漂移；差异实为时差——旧实现里 pool 快照只被「刷新事件」（手动刷新/全部刷新/自动循环）更新，而明细是 hover 时的实时值，两者必然相差区间内消耗量。**修法**：`app.creditSnapshot` 取数成功即 `SetCreditDetail` + ledger 差分（`creditTotals` 与 `ResourceDetail` 共用，删掉三处各自回写）；`ResourceDetail` 扩展返回 expiring/unusable，`/api/account/resource_detail` 响应新增 `expiring_remain`；前端 `showCreditDetail` 用响应的 `usable_remain/expiring_remain/unusable_remain` 回写卡片与汇总条（`data-uid` 定位，不全量重绘以免丢失正在 hover 的 tooltip 锚点），`checkin/refreshOne/checkinAll/refreshAll` 成功后清 `detailCache`。回归测试 `TestResourceDetailWritesBackPoolSnapshot`（去掉回写即失败） |
-| R46 | **Cline 渠道（`cline/*`）= 多账号官方 API Key 池 + 免费模型调度器**（2026-10-10） | 凭据是**官方文档化的 `sk_` API Key**（app.cline.bot → Settings → API Keys），**不是** cline2api 那套 WorkOS device-code OAuth：实测两者模型面等价，而 Key 不过期、**不轮换** ⇒ R26/R44 的「同凭据多处使用互踢」在本渠道不存在，且零登录编排。**必带非空 `X-CLIENT-TYPE` 头**（值随意，实测 `bogus-value` 也放行；缺失/空值 ⇒ 全部 `cline-free/*` 返回 403 `API_REQUEST_ERROR_CODE`，且**不报错不崩溃**、只表现为免费模型消失，属 R34 家族的静默失效；由 `TestChatStreamAlwaysSendsClientTypeHeader` + live 的 `TestLiveAliasNeedsClientType` 双重锁死）。模型面**不做任何本地假设**（2026-10-12 简化，用户裁定）：**绑死上游** `recommended-models` 的 `free[]` 数组**原样透传**——ID 保留 `cline-free/*` 别名不改写（不用厂商真实名：用户在 Cline 后台实测，免费入口是别名条目而真实名会扣费，但计价逐请求抽签，本渠道不承诺价格）、不做基名去重、不按 tag/后缀过滤；**删除**硬编码静态表与 `/api/v1/models` 拉取（458 条 OpenRouter 镜像对免费池定位无信息量）。本地校验集 = 暴露集 = `free[]`（构造即一致）；**冷启动放行**（目录未拉到过时不拦，否则 daemon 重启后第一批请求全被本地 404，放行的最坏结果只是让上游给权威错误）；上游抖动时用已知集兑底不掏空面板。上游**确无余额/额度端点**（`/credits` `/usage` `/billing` `/quota` `/me` 等 12 个候选实测全 404，只有 `/api-keys` 与 `/plans` 存在）⇒ `UserResource` 恒 0 且**不得返回 error**，面板积分位「不适用」（`creditsNAKind`），实际花费只来自逐请求 `usage.cost`（入 ledger）。签到/保活/定时任务**全关**（`CheckinHours`/`KeepaliveHours` = `[]int{}`，R39）+ **`go clineSch.Run(sctx)`**（R34）；`noExplicitCheckin` 含 Cline。**不承诺价格**：`free` 命名空间与 `is_byok`/`provider` 实测**都不能**当判据（同前缀有扣费、非 free 后缀反倒 cost=0，且同一 ID 相邻两笔计价会漂移）⇒ 费率表标「不适用」，一切以实测 `usage.cost` 为准。面板文案必须写明「额度按**账号**计（官方字段 `…UsageCostUSDPerUser`），同账号多把 Key 共享一份额度」，并在检测到同账号时告警（依据 `/api-keys` 返回本账号全部 Key）。 |
+| R46 | **Cline 渠道（`cline/*`）= 多账号官方 API Key 池 + 免费模型调度器**（2026-10-10） | 凭据是**官方文档化的 `sk_` API Key**（app.cline.bot → Settings → API Keys），**不是** cline2api 那套 WorkOS device-code OAuth：实测两者模型面等价，而 Key 不过期、**不轮换** ⇒ R26/R44 的「同凭据多处使用互踢」在本渠道不存在，且零登录编排。**必带非空 `X-CLIENT-TYPE` 头**（值随意，实测 `bogus-value` 也放行；缺失/空值 ⇒ 全部 `cline-free/*` 返回 403 `API_REQUEST_ERROR_CODE`，且**不报错不崩溃**、只表现为免费模型消失，属 R34 家族的静默失效；由 `TestChatStreamAlwaysSendsClientTypeHeader` + live 的 `TestLiveAliasNeedsClientType` 双重锁死）。模型面**不做任何本地假设**（2026-10-12 简化，用户裁定）：**绑死上游** `recommended-models` 的 `free[]` 数组**原样透传**——ID 保留 `cline-free/*` 别名不改写（不用厂商真实名：用户在 Cline 后台实测，免费入口是别名条目而真实名会扣费，但计价逐请求抽签，本渠道不承诺价格）、不做基名去重、不按 tag/后缀过滤；**删除**硬编码静态表与 `/api/v1/models` 拉取（458 条 OpenRouter 镜像对免费池定位无信息量）。本地校验集 = 暴露集 = `free[]`（构造即一致）；**冷启动放行**（目录未拉到过时不拦，否则 daemon 重启后第一批请求全被本地 404，放行的最坏结果只是让上游给权威错误）；上游抖动时用已知集兑底不掏空面板。上游**确无余额/额度端点**（`/credits` `/usage` `/billing` `/quota` `/me` 等 12 个候选实测全 404，只有 `/api-keys` 与 `/plans` 存在）⇒ `UserResource` 恒 0 且**不得返回 error**，面板积分位「不适用」（`creditsNAKind`），实际花费只来自逐请求 `usage.cost`（入 ledger）。签到/保活/定时任务**全关**（`CheckinHours`/`KeepaliveHours` = `[]int{}`，R39）+ **`go clineSch.Run(sctx)`**（R34）；`noExplicitCheckin` 含 Cline。**不承诺价格**：`free` 命名空间与 `is_byok`/`provider` 实测**都不能**当判据（同前缀有扣费、非 free 后缀反倒 cost=0，且同一 ID 相邻两笔计价会漂移）⇒ 费率表标「不适用」，一切以实测 `usage.cost` 为准。面板文案必须写明「额度按**账号**计（官方字段 `…UsageCostUSDPerUser`），同账号多把 Key 共享一份额度」，并在检测到同账号时告警（依据 `/api-keys` 返回本账号全部 Key）。 **2026-10-12 压测订正三条（随 v2.7.0 采纳）**：① 发往上游的 body 必须强制 `stream:true`——handler 对上游响应一律按 SSE 解析，客户端发 `stream:false` 时上游回 JSON 信封 ⇒ `errEmptyStream` ⇒ 502 并被计账号连续错误，实测一次非流式请求后 4 个免费模型全 503 约 60s（`sse.go` 的 Aggregate 注释早已假定该不变量却未落实，已补 `forceStream`）；② 地区限制模型（`muse-spark-1.3-contributor` 国内直连恒 403 `not available in your region`）归 `ErrPassthrough` **不罚号**，落 ErrClient 会重试耗尽后冷却整条渠道；③ 上游 `free[]` 不返回上下文/能力字段 ⇒ 本渠道维护 `measuredCaps` 实测表，配 `provider.ModelInfo.HandMeasured` 如实标来源（与 `ContextFromAPI` 互斥），面板上下文带 `*` 且 tooltip 写明「本工具实测值」；Key 创建入口是 `Account / API Keys`（旧记 `Settings → API Keys` 有误） |
 | R47 | **Cline 的 429 分两类：OpenRouter 侧共享上限不得软化账号**（2026-10-10，R38 同族扩展） | 上游把真实状态**压平成 HTTP 500**（`… from Openrouter: request failed with status 429 …`）⇒ `Classify` 必须正则取**内层**三位状态码，否则 429 被归成 5xx（违反不变量 15 的「429 优先」）。挖开后是两种语义相反的 429：① **共享出口上限**——`limit_rpd` / `Daily limit reached` / `temporarily rate-limited`，落在「Cline 自己的 OpenRouter key」上（路由判据：响应 `id` 前缀 `gen-` = OpenRouter，`gen_` = Cline 自有网关，实测 9 个 ID 零反例，是成功路径上**唯一可用**的聚合器标识；`is_byok`/`provider` 均已被证伪）⇒ **换 Cline 账号必然复现** ⇒ 归 `ErrPassthrough`（不计账号错、不冷却、不换号），并把该 model 记入渠道内 `capped`（期间从 `/v1/models` 摘除，TTL 1h 自愈；实测 `gemma-4-26b` 上轮 429、本轮 200，故必须可恢复）；② 无上述文案的 429 ⇒ 才是真账号级（依据 `plans` 的 `…UsageCostUSDPerUser`）⇒ `ErrSoftRate` 冷却 + 同请求换号（R29 全量适用，本渠道**不置** `SingleAccount`）。**不区分的后果**：渠道只有 3 个模型，`pool.CooldownModel` 在 ≥2 模型冷却时升级整号冷却 ⇒ 所有 Key 被逐个轮空 → `503 no_healthy_account`（正是 R16/R38 的误伤形态）。另一族必须处理的是 **HTTP 200 + 流内 `error` 帧 + 上游自己发 `[DONE]`**（`stream_initialization_failed`，实测另有数字 `502`）：R36 的「截断时不发 [DONE]」在此不适用（上游已发），需要识别 error 帧 → 返回 `StreamError`（实现 `StreamErrorClassifier`，R40）；为此在 `internal/upstream` 新增最小导出 `StreamWith`（同时带 hintFn 与 onUsage 两个钩子，既有三个导出各只带一个）。`max_tokens` 实测：8→上游 400、16→500 `empty response content`（推理吃光预算 ⇒ 可见内容为 0）、64~200000 全通、1e6→拒 ⇒ `PrepareBody` 缺省**不传**、<64 抬到 64、>200000 压到 200000；**强制 stream=true 并不能豁免这条**。 |
 | R48 | **`normalizeToolTurnContent` 给 assistant 补 content 不再以 tool_calls 为前提**（2026-10-11） | **实测**：CodeBuddy 客户端在「思考中途被打断」时，会把半截思考存成 `{"role":"assistant","reasoning":"…"}`（**无 content、无 tool_calls**）；该空壳留在历史里后，traecode/SOLO 对**每一发**请求都回流内 `event:error` `4001 the param is invalid`（与「中毒进历史」同类，重启客户端也不恢复，只能新建会话）。旧实现只在 assistant **带 tool_calls** 时补空串，普通 assistant 刻意放过（注释「无证据会出问题」）⇒ 空壳原样透传。**修法**：`case "assistant", "tool"` 一律补 `content:""`，不再判 tool_calls。**重放坐实**（一份 129 条消息的完整会话，同一条畸形消息）：原样 → 0.6s 即 4001；删掉空壳或补 `content:""` → 均正常出流 ⇒ 上游接受空串，故补空串（保留历史结构）而非丢消息。回归测试 `internal/server/handler_tool_content_test.go`（含 reasoning-only 空壳用例，断言 reasoning 字段不被误删） |
+| R49 | **思考档位只透传上游声明，绝不编造**（2026-10-12，issue #96；随 v2.7.0 采纳） | `provider.ModelInfo` 新增 `ReasoningEfforts` / `DefaultReasoningEffort` / `CanDisableThinking`（三态指针）。**上游目录声明了才透出，未声明时整个 reasoning 对象不出现**——把「未声明」显示成任何具体档位都是编造（同 `ContextFromAPI` 哲学）。接线 workbuddy CN（`reasoning.supportedEfforts/defaultEffort/canDisableThinking`，deepseek 系只有老式 `effort` 默认档时回退取它）、workbuddyai（mergeV3 非空者优先）、loomy（`reasoning_efforts` 为上游权威）。透出：`/v1/models` 加 `supports_reasoning` + `reasoning{}`，`/api/fees` 加 `reasoning_efforts`。`provider.CleanEfforts` 去空白/去重/丢空串（上游实测下发过 `"max","max",""`）。qoder 系 / qwenwork / glm / raccoon / oczen / cline / monkeycode 无档位声明，不参与。回归 `internal/upstream/reasoning_test.go` 等 |
+| R50 | **思考链死循环（发癫）检测：流式逐帧判据 + 中断 SSE + 不罚账号**（2026-10-13，随 v2.7.1 采纳） | 新模块 `internal/loopguard`（算法移植自 dsh-attention-health 的 `lib/guard.js`，只取死循环检测）：四条判据（同行连续重复≥8 且行长≥12 / 60 行窗口内同短行≥30 / 40 行滑窗唯一率≤0.25 / 行内周期 p∈[2,40] 重复≥16 且累计≥160 字）+ 防误杀护栏（周期单元须含字母或汉字、十六进制字节周期豁免、代码围栏内豁免）。接线 `internal/upstream/sse.go` streamCore（九渠道）+ traework `solosse.go` + qoder 系四路 `streamAsOpenAI` + raccoon/loomy；**glm 跳过**。**命中**：发一帧 `code=upstream_reasoning_loop` 的 OpenAI 规范 error、**不补 `[DONE]`**、返回 `*loopguard.Error`。**不罚账号**：该类型**刻意不实现** `provider.StreamErrorClassifier`——死循环是模型/请求级问题，换号必然复现，冷却只会把后续请求挡成 `503 no_healthy_account`（R16/R38 同族）。**零误伤**：只在 `reasoning_content` 非空时喂入。开关 `config.features.loop_guard`（默认 true）+ `POST /api/config/loop_guard` 热切换（atomic 全局，无需重启）+ env `WILDWORK_LOOP_GUARD=0`。⚠️ **上游未做实盘触发验证**（死循环难以稳定复现），阈值待社区反馈校准 |
+| R51 | **OpenRouter 系思考字段归一化到 `reasoning_content` 单字段下发**（2026-10-13，PR #100，随 v2.7.1 采纳） | Cline 免费池（Cline→OpenRouter→Meta）的思考增量字段是 `delta.reasoning` / `delta.reasoning_details`，**不是**本仓历史唯一形态 `delta.reasoning_content` ⇒ 思考文本被**静默丢弃**（客户端看不到思考、`usage.reasoning_tokens` 却非零），且 loopguard 在该渠道**永远喂不进**——同一根因的两面。新增 `upstream.reasoningDeltaOf`（优先级 `reasoning_content` > `reasoning` > `reasoning_details[type=reasoning.summary]`；三者同帧并存时逐字相同故取首个，`reasoning.encrypted` 是回放密文、无可读文本不取），流式逐帧 `normalizeFrame` 与非流式 `Aggregate`/`mergeMessageFields` 两路同改；`loopguard.ReasoningDeltaOf` 同步三字段。方向选「归一化**到** `reasoning_content`」而非透出 `reasoning`：九渠道白名单、loopguard、gateway Anthropic 转换共同认定它是唯一字段 |
+| R52 | **「完整模型 ID」补渠道前缀的判据是「是否已以该渠道前缀开头」，不是「ID 含 `/`」**（2026-10-13，PR #102 + 补漏，随 v2.7.1 采纳） | **这条命中的正是本地 §10 L11 缺陷②**：本地 `Fees.jsx:modelIds()` 先修掉了「含斜杠即视为已带前缀」的错判据（那会复制出 `cline-free/grok-4`，而 `runtimeForModel` 按**第一个** `/` 拆渠道 ⇒ `provider "cline-free" is not configured`）。上游的契约更完整一层：**已以 `ch/` 开头的名字必须原样保留**，否则重复拼接成 `workbuddy/workbuddy/*`。本地 `modelIds()` 已按此补 `startsWith` 护栏，费率表与模型查找两处同源（`collectAllModels` 也走它）。回归 `webui/tools/render-check.mjs` 场景 6 的双向用例 |
 
 ## 2. 架构选型（依据）
 
@@ -144,6 +148,7 @@ POST /api/config/api_key           # {key}
 POST /api/config/autostart         # {on:bool}
 POST /api/config/compat            # 模型路由（默认渠道 / 封顶 tokens / 映射表）
 POST /api/config/expiring_days     # {days} 临期阈值
+POST /api/config/loop_guard        # {on:bool} 思考链防癫热切换（R50，atomic 全局、无需重启；GET /api/state 回读 loop_guard）
 POST /api/config/proxies           # {proxies:{channel:url}} 单渠道上游代理
 POST /api/config/oczen_test        # {api_key} OpenCodeZen 凭证连通性测试
 GET  /api/fees                     # 渠道费率（本地缓存 + 按需刷新）
@@ -372,7 +377,7 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项（R1–R48）、架构选型、不变量
+- [AGENTS.md](AGENTS.md) — 本文件：决议项（R1–R52）、架构选型、不变量
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 - [docs/前端React重构架构计划.md](docs/前端React重构架构计划.md) — React 重构的选型签核（R5 被推翻的那次）、逐阶段 DoD 判定、
@@ -859,3 +864,63 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 - 顺带记一条**融合纪律的新教训**（比结论更重要）：三方合并里「本地没改 = 上游改动静默生效」是正确默认，
   但它意味着**语义敏感的常量（版本号、开关默认值、渠道清单）不会给你任何冲突信号**。
   以后每轮融合后应显式 `grep 'const Version' internal/app/app.go` 对一次账，别只盯着冲突文件清单。
+
+### L12 2026-10-13 融合：上游 v2.6.3+ → v2.7.1（`5bca0a7c`），并订正上一条对 `modelIds()` 的判据缺口
+
+- **形态**：沿用 L8/L11（本地与上游**无共同祖先**，不能 `git merge`）=「整树采纳无冲突文件」+「`git merge-file` 三方」。
+  上游变更面 31 提交 / 55 文件（含 v2.7.0、v2.7.1 两次发布）；**真冲突面 10 个，其中 Go 只有 4 个**
+  （`main.go`、`app.go`、`ledger.go`、`handler.go`），三方合并**唯一一处冲突**是 `provider.Cline,` 那行的注释差异。
+  其余 34 个文件本地一字节未动 ⇒ 直接覆盖；21 个是上游新文件。
+- **本轮采纳**：R49 思考档位透传、R50 `internal/loopguard` 思考链防癫、R51 OpenRouter 思考字段归一化、
+  R52 完整 ID 前缀契约、缓存利用率统计（`internal/server/cacheusage.go` + `ledger` 的 `CR/CRC` +
+  `internal/monkeycode/cacheusage.go` 修「本渠道重建 usage 时丢掉 `input_tokens_details`」+ `stats/persist.go`
+  持久化缓存样本，PR #105）、Cline 三条压测订正（`forceStream` / 地区限制不罚号 / `measuredCaps`）、
+  `internal/devdump`（`-tags devdump` 才生效，发布构建是空桩；接线点在 `proxy.go` 的 `applyProxyToKind`，
+  那是唯一对全部渠道统一改 Transport 处，故各渠道包零改动）。上游 R49–R52 已并入 §1。
+- ⚠️ **`ledger.go` 仍然必须以本地为准 + 只叠加缓存字段**：本轮实测 `grep -c prevMonthCutoff / monthSegments` 在
+  上游 master 上**都是 0** —— L4 记的两个月末 `AddDate` 溢出与跨月漏扫，上游到 v2.7.1 **依旧未修**。
+  这次它因 `CR/CRC` 进了冲突面，**整文件采纳上游会把 2026-10-31 删上月流水的 bug 改回来**。
+- **本地专有在三方合并后仍在**（逐项实测，不是假设）：`main.go` 的 `//go:embed all:web-app` +
+  `fs.Sub(webFS, "web-app")`（上游是 `all:web`，它没有 React 面板）、`handleRaccoonCallback` 前置拦截、
+  `app.go` 的 `ownAccounts()`（**上游把同一判据内联在 4 处**，语义相同、形态不同 ⇒ 每轮融合都会重新撞上，
+  下次仍保留本地函数形态）、`/api/pulse` 与 `handler.go` 的 `Traffic()`/`traffic`/`lastReq`
+  （上游删了 `sync/atomic` import，本地必须留）、`SingleAccount: true` 仍只有一处（oczen，R24）。
+- **有意不采纳（本轮新增一项设计面裁定）**：`cmd/wild-work/web/`、`scripts/ui-static-check.mjs`、
+  `README.md` 沿用 L11；**新增**：上游本轮的三项设计改动经所有者 2026-10-13 裁定**不移植** ——
+  手机竖屏响应式布局、渠道添加按钮改 6 列两行、**积分明细浮窗由 hover 改点击式**。
+  同理**不加第 4 个主 tab**：上游把「模型列表和费率」升为主 tab，本地费率仍是弹层（L1 的本地形态），
+  档位小标、缓存列、实测表都进弹层内容而非改 tab 结构。
+- **React 侧移植清单**（只补功能，`pet.js`/`pet.css`/`public/pet/`/`anim.css`/`tokens.css` 既有色值
+  一律未动，已用 `git status -- <这些路径>` 证空）：`Usage.jsx` 缓存列 + 平均速度列 + 缓存利用率卡 +
+  区间 `localStorage` 记忆；`Stats.jsx` 模型消耗表缓存列；`Fees.jsx` 档位小标 + `hand_measured` 来源标 +
+  `modelIds()` 补 `startsWith` 护栏；`Settings.jsx` 防癫开关；`LoginFlow.jsx` Cline 实测参数表；
+  新建 `components/CacheCell.jsx`（**三态判据必须 Usage 与 Stats 同源**，否则「不知道」在哪一侧被画成 0% 会分叉）。
+- **R52 对本地的实际意义**（上一条的缺口）：本地 `modelIds()` 当初是**无条件补前缀**，比上游的错判据对，
+  但缺上游那层「已以 `ch/` 开头则原样保留」的护栏 ⇒ 若 `/api/fees` 给出已带前缀的名字会拼成
+  `workbuddy/workbuddy/*`。本轮按 R52 补齐，并把两个方向都做成断言。
+- **平均速度列的数据来源**：速度只存在于 `internal/stats` 引擎内存（ledger 只扫文件、无速度字段），
+  上游 vanilla 靠常驻 30s 轮询把 `perfLookup` 喂给用量 tab；本地 React 里 Usage 从未取 `/api/stats`，
+  故移植成「用量 tab 每次取数时并拉一次 `/api/stats` 建索引」，拉不到本列自己降级成「—」，不影响其它列。
+- **闸门**：`webui/tools/render-check.mjs` 场景 **6 → 7**，第 7 场景断言缓存三态（`cr_cov=0`→「—」而非 0%）、
+  档位只在声明行出现（数 `class="effort-tag"` 恰 1 次）、实测值带 `hand` 类、`modelIds()` 双向用例；
+  第 3 场景控件清单加 `chkLoopGuard`。**三项负向均已验证会变红**（把「不提供」改成 0% → 红；
+  装回「含斜杠即视为已带前缀」→ 红且点名 `cline-free/grok-4`；摘掉 `chkLoopGuard` → 红报缺失控件）。
+  `web_field_contract_test.go` 的 `uiWantsState` **补 `loop_guard`**：面板读的是 `state.loop_guard !== false`，
+  Go 若漏发该字段则读出 `undefined`、判据仍成立 ⇒ **开关恒显示「开」而实际配置可能是关**，
+  这是本条最容易静默的形态；负向验证用假字段 `loop_guard_zzz` 装入清单 ⇒ 闸门变红。
+  路由契约在移植前后各红过一次（`POST /api/config/loop_guard` 无人引用），即它天然能拦「后端有接口面板不接」。
+  `TestDOMIdParity` 方向性核实过：只对「vanilla 有而 React 无」报错，新增 id 仅提示 ⇒ 本地新增
+  `ucCache`/`chkLoopGuard` 不会假绿也不会假红。
+- **口径更新**（L10 的「现查现写」纪律）：面板 `/api/*` 路由 **37 → 38**、`_test.go` **105 → 118**、
+  `go test ./...` 包数 **30 → 32**（新增 `loopguard`、`devdump`，实测各跑 15 / 2 个用例，非空绿）、
+  render-check 场景 **6 → 7**、版本常量 **2.6.3 → 2.7.1**（同 L11 先例由 `git merge-file` 带成上游值，
+  本地**未**打 tag、**未**发布；`RELEASES.md` 里 v2.7.0/v2.7.1 两段是上游写的，本轮纯 append 采纳）。
+- **沙箱浏览器实测**（`/tmp/ww-sbx` + `127.0.0.1:28763`，生产 daemon 3979065 全程未动）：缓存列三态逐条对上
+  （`0.00%` 真未命中 / 「—」不提供 / `94.9%` `97.5%` 命中）、汇总卡 94.9%、`(524k*)` 带 `ctx-tag hand`
+  与「本工具实测值」措辞、同表未声明档位的模型 `effort-tag` 计数为 0、`cline/cline-free/mimo-v2.6-flash`
+  双层 ID 正确、搜索面板同口径、防癫开关真写穿 `home/config.json`（`features.loop_guard=false`）并经
+  `/api/state` 回读、区间记忆跨 reload 生效（`days=1` 实请求）且非法种子 `__probe__` 回退 7 不崩、
+  桌宠节点（`pet`/`petEyeL`…）在场、控制台零报错。
+- **顺手查出的一处上游文案自相矛盾**：上游 `index.html` 的 Cline 实测表提示写「上下文取实测通过值**向下**取档」，
+  与其自己的 R46 裁定「按用户裁定**向上**取一档」（mimo 728K→报 1M、solar 400K→报 512K）相反。
+  本地弹层按 R46 写，并注明实测值本身是 90s 响应头超时压制下的下界。

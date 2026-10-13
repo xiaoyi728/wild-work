@@ -4,11 +4,11 @@
 
 ## 本仓库说明
 
-本仓库是 [rockswang/wild-work](https://github.com/rockswang/wild-work) 的增强分支，代码基线已同步至**上游 v2.6.3+**（`d24e46d`，2026-10-12），在此之上保留并扩展了本地能力：
+本仓库是 [rockswang/wild-work](https://github.com/rockswang/wild-work) 的增强分支，代码基线已同步至**上游 v2.7.1**（`5bca0a7c`，2026-10-13），在此之上保留并扩展了本地能力：
 
 | 本地能力 | 说明 |
 |---------|------|
-| **React 面板** | 管理面板已从 vanilla JS 重构为 React + Vite（`cmd/wild-work/webui/`），产物 `web-app/` 由 `//go:embed` 打进二进制；带自研渲染闸门 `npm run check`（6 个场景断言可见控件与完整模型 ID）。`cmd/wild-work/web/` 保留本地视觉层与桌宠，不参与 embed |
+| **React 面板** | 管理面板已从 vanilla JS 重构为 React + Vite（`cmd/wild-work/webui/`），产物 `web-app/` 由 `//go:embed` 打进二进制；带自研渲染闸门 `npm run check`（7 个场景断言可见控件、完整模型 ID、缓存三态与思考档位标注）。`cmd/wild-work/web/` 保留本地视觉层与桌宠，不参与 embed |
 | **桌宠** | 面板内可开关的桌面宠物（`webui/src/pet.js` + `webui/public/pet/` 资源），读取面板下发的流量计数（`GET /api/pulse`）做互动反馈 |
 | **运行统计面板** | 第三个 tab（见下），30s 自动刷新，接 `/api/stats` 与 `/api/stats/logs` |
 | **面板端点防护** | 管理接口的跨源写请求校验、账号列表仅返回本实例自有账号（`ownAccounts`） |
@@ -25,6 +25,9 @@
 - **三种添加形态**：浏览器授权登录 / **网页版自动登录**（小浣熊：拉起独立 profile 的 Edge/Chrome，登录后经 CDP 捕获凭据，Win/mac/Linux 通用，不再依赖注册表或本机客户端）/ **导入本机客户端凭据**（MonkeyCode / 小浣熊 / Loomy，Windows 与 macOS 路径均已探测）；Cline 走第四种——粘贴官方 API Key（只调 `/api-keys` 验证，零 token 消耗）
 - **账号池调度**：请求级重试 + 粘性路由、账号级错误**在同一请求内换号**（不再一错即禁整号）、**模型级冷却**（429 只冷却命中的模型而非整个账号）、分级冷却状态机（软限流 / 风控 / 账号故障分别处理）
 - **流空闲监控**：连续 300 秒读不到任何字节即判定上游卡死并断流，避免请求无限挂起
+- **思考链防癫检测**：逐帧监测思维链复读/空转，命中即中断 SSE 并返回 `upstream_reasoning_loop`，**不罚账号**（死循环是模型级问题，换号必然复现）；设置里可热切换，默认开启
+- **思考档位透传**：`/v1/models` 与费率表透出上游目录**声明**的 `reasoning_effort` 档位与默认档；上游未声明时整个对象不出现，前端也不编造
+- **缓存利用率**：「用量与流水」与「运行统计」新增缓存列及汇总卡，严格区分「命中 0%」与「上游不提供该维度（显示「—」）」
 - **请求体指纹脱敏**：自动清除 Claude Code / Codex CLI 注入的模板句与 `<developer>` 角色，降低上游内容拦截误判
 - **上游协议头仿真**：出站自动注入官方客户端指纹头（`X-CodeBuddy-Request`、`X-Machine-ID` 等），降低风控误判风险
 - **自动签到与保活**：每日定时签到领额度（Qoder 双区含 10:00–12:00 窗口重试），token 保活，WorkBuddy 国际版自动领日活奖励
@@ -46,12 +49,14 @@ cmd/wild-work/          main.go：装配渠道客户端、账号池、系统托�
   web-app/              前端构建产物，//go:embed 的目标（不入库，由 npm run build 生成）
   web/                  上一代 vanilla 面板 + 本地视觉层与桌宠（不 embed，仅供对照）
 internal/
-  app/                  管理端点与面板 API（37 个 /api/* 路由）、面板鉴权、跨源防护
+  app/                  管理端点与面板 API（38 个 /api/* 路由）、面板鉴权、跨源防护
   server/               OpenAI Chat 端点、账号池调度、粘性路由、错误分类与冷却
   gateway/              Responses / Anthropic Messages / systemone 端点
   provider/             渠道 Kind 枚举、公共接口与流式解析
   workbuddy|workbuddyai|traework|traecode|qoder|qodercn|qodercom|qwenwork|glm|oczen|monkeycode|raccoon|loomy|cline/
                         各渠道客户端与协议实现
+  loopguard/            思考链死循环（发癫）检测：流式逐帧判据与防误杀护栏
+  devdump/            开发期上游原文落盘（仅 -tags devdump 构建生效，发布版为空桩）
   ledger/               token 与积分双流水记账、月度分段查询
   stats/                运行统计引擎（快照、里程碑、请求流水、临期与接棒视图）
   idle/                 流空闲监控
@@ -60,7 +65,7 @@ internal/
 
 - **运行时**：Go 1.25，仅两个直接依赖（`github.com/energye/systray`、`golang.org/x/sys`）。
 - **状态落盘**：`data/state-<渠道>.json`（账号状态）、`data/ledger/`（双流水）、`data/stats.json`（运行统计）、`data/app.log`（运行日志）、`auths/`（账号凭据明文 JSON）。
-- **测试**：105 个 `_test.go`（`go test ./...` 全绿，30 个包）；面板侧有路由/字段契约测试（Go 扫 `web-app` 产物）、渠道主题色与渠道接线契约测试，前端侧有 props 检查与渲染层闸门。运行 `go test ./...` 与 `npm --prefix cmd/wild-work/webui run check`。
+- **测试**：118 个 `_test.go`（`go test ./...` 全绿，32 个包）；面板侧有路由/字段契约测试（Go 扫 `web-app` 产物）、渠道主题色与渠道接线契约测试，前端侧有 props 检查与渲染层闸门。运行 `go test ./...` 与 `npm --prefix cmd/wild-work/webui run check`。
 
 ## 项目渊源
 

@@ -32,10 +32,12 @@ import (
 	"wild-work/internal/auth"
 	"wild-work/internal/cline"
 	"wild-work/internal/config"
+	"wild-work/internal/devdump"
 	"wild-work/internal/gateway"
 	"wild-work/internal/glm"
 	"wild-work/internal/ledger"
 	"wild-work/internal/loomy"
+	"wild-work/internal/loopguard"
 	"wild-work/internal/monkeycode"
 	"wild-work/internal/oczen"
 	"wild-work/internal/platform"
@@ -111,6 +113,11 @@ func main() {
 	}
 	if cfg.AdminPass != "" && len(cfg.AdminPass) < 8 {
 		log.Printf("警告：管理员密码不足 8 位，建议使用更长口令（面板鉴权已生效）")
+	}
+	// 思考链死循环检测（发癫拦截）开关：启动时按配置初始化，面板可运行时切换。
+	loopguard.SetEnabled(cfg.Features.LoopGuard)
+	if !cfg.Features.LoopGuard {
+		log.Printf("思考链死循环检测已关闭（features.loop_guard=false）")
 	}
 	_ = os.MkdirAll(cfg.AuthDir, 0o755)
 	_ = os.MkdirAll(filepath.Dir(cfg.StateFile), 0o755)
@@ -282,6 +289,14 @@ func main() {
 	// 长回答会在超时点被掐断且无终止帧（实测 2026-09-27 触发 5 次）。
 	// 注意：这**不**意味着代理只套 HTTP 就够 —— 恰恰相反，见下方 applyProxies（R35）。
 	glmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+
+	// 开发期调试开关：把各渠道出站对话请求的**上游原始响应**落盘（仅 -tags devdump
+	// 构建有效，见 internal/devdump）。这里只做一次启动期读取与提示；真正的接线在
+	// applyProxies → applyProxyToKind（唯一统一改 Transport 处）。
+	devdump.Refresh()
+	if devdump.Enabled() {
+		log.Printf("devdump enabled: 上游原始响应落盘至 %s（仅开发构建；含 token，勿外传）", os.Getenv("WILDWORK_DUMP_DIR"))
+	}
 
 	// 单渠道上游代理：config.proxies 按 kind 套到各渠道 HTTP client 上（未配置 = 直连）。
 	// traework / glm 的 StreamHTTP 与主 client 共用出厂 Transport，先切独立再套代理，

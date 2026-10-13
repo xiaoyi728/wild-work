@@ -84,6 +84,10 @@ var uiWantsState = []string{
 	"accounts", "checkin_times", "next_checkin", "login_busy",
 	"admin_pass_set", "auth_enabled", "auth_session", "auth_required",
 	"autostart", "expiring_days", "proxies", "oczen_api_key",
+	// loop_guard 自 R50 起被 Settings.jsx 的「思考链防癫」开关读取。它必须进这张表：
+	// 面板用的是 `state.loop_guard !== false`，Go 侧哪天漏发这个字段，读出来是 undefined，
+	// 判据照样成立 ⇒ 开关恒显示「开」而实际配置可能是关 —— 静默的错，正是本闸门要拦的形态。
+	"loop_guard",
 	"compat", "compat.default_channel", "compat.max_tokens_cap",
 	"compat.model_map", "compat.channels",
 	"accounts.uid", "accounts.group", "accounts.nickname", "accounts.disabled",

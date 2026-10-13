@@ -32,6 +32,7 @@ import (
 	loginraccoon "wild-work/internal/login_raccoon"
 	logintrae "wild-work/internal/login_trae"
 	"wild-work/internal/login_wbai"
+	"wild-work/internal/loopguard"
 	"wild-work/internal/oczen"
 	"wild-work/internal/platform"
 	"wild-work/internal/pool"
@@ -49,7 +50,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.6.3"
+const Version = "2.7.1"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -313,7 +314,7 @@ var channelOrder = map[provider.Kind]int{
 var feeChannelOrder = []provider.Kind{
 	provider.Oczen, provider.WorkBuddy, provider.WorkBuddyAI, provider.QoderCN,
 	provider.QoderCOM, provider.TraeWork, provider.TraeCode, provider.QwenWork, provider.GLM,
-	provider.Cline,
+	provider.Cline, // 漏在此表 = 面板永远不出该渠道 tab（buildFeesChannels 只遍历本表）
 	provider.MonkeyCode,
 	provider.Raccoon,
 	provider.Loomy,
@@ -1760,6 +1761,22 @@ func (a *App) SetExpiringDays(days int) error {
 	return nil
 }
 
+// SetLoopGuard 更新思考链死循环检测（发癫拦截）开关：保存配置并即时生效。
+// 生效机制：loopguard 的全局 atomic 开关，各渠道 Stream 在每次请求时读取，
+// 热切换无需重启（下一个流式请求即按新值）。
+func (a *App) SetLoopGuard(on bool) error {
+	a.mu.Lock()
+	a.cfg.Features.LoopGuard = on
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	loopguard.SetEnabled(on)
+	log.Printf("思考链死循环检测已%s", map[bool]string{true: "开启", false: "关闭"}[on])
+	return nil
+}
+
 // SetListen 修改 API 监听主机 + 端口：保存配置并热切换监听。
 func (a *App) SetListen(host string, port int) error {
 	if port <= 0 || port > 65535 {
@@ -2087,6 +2104,9 @@ type State struct {
 
 	// OczenAPIKey OpenCodeZen 自定义 API key（只读脱敏回显：sk-xxx…尾4位；保存走同端点）。
 	OczenAPIKey string `json:"oczen_api_key"`
+
+	// LoopGuard 思考链死循环检测（发癫拦截）是否开启（只读，保存走 POST /api/config/loop_guard）。
+	LoopGuard bool `json:"loop_guard"`
 }
 
 // GetState 返回面板初始数据。
@@ -2118,6 +2138,7 @@ func (a *App) GetState() State {
 		Running:        a.ServerRunning(),
 		LanIP:          lanIP(),
 		ExpiringDays:   int(a.cfg.ExpiringThresholdDur / (24 * time.Hour)),
+		LoopGuard:      a.cfg.Features.LoopGuard,
 	}
 	st.Compat.DefaultChannel = a.cfg.Compat.DefaultChannel
 	st.Compat.MaxTokensCap = a.cfg.Compat.MaxTokensCap
@@ -2490,6 +2511,17 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
+	mux.HandleFunc("POST /api/config/loop_guard", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			On bool `json:"on"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetLoopGuard(req.On); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
 	mux.HandleFunc("POST /api/config/listen", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Host      string  `json:"host"`
@@ -2731,15 +2763,22 @@ type feesModelRow struct {
 	Note   string  `json:"note,omitempty"` // 促销/标签说明（已剔除颜色）
 	// Color 为促销标签颜色（形如 "#FF0000"），无则空。
 	Color string `json:"color,omitempty"`
-	// HasContext 标记该模型的上下文窗口/最大输出是否来自上游接口。
-	// false 表示无可靠数据（硬编码估算或上游不返回），前端提示「未知」而非展示数字。
+	// HasContext 标记该模型的上下文窗口/最大输出是否可展示：
+	// 上游接口真实返回（ContextFromAPI）或本工具手工实测（HandMeasured）均置 true。
+	// false 表示无可靠数据（硬编码估算或上游不返回且未实测），前端提示「未知」而非展示数字。
 	HasContext    bool  `json:"has_context"`
 	ContextWindow int64 `json:"context_window,omitempty"`
 	MaxTokens     int64 `json:"max_tokens,omitempty"`
+	// HandMeasured 标记上述上下文值是**本工具实测**（非上游声明），前端据此加「实测」标注。
+	HandMeasured bool `json:"hand_measured,omitempty"`
 	// 能力标记（与 /v1/models 同源），供 UI 在模型 ID 后展示图标。
 	SupportsImages    bool `json:"supports_images"`
 	SupportsReasoning bool `json:"supports_reasoning"`
 	SupportsTools     bool `json:"supports_tools"`
+	// 思考档位（issue #96，与 /v1/models 同源）：上游声明的可选档位与默认档，
+	// 空表 = 上游未声明（前端不展示，不编造）。
+	ReasoningEfforts       []string `json:"reasoning_efforts,omitempty"`
+	DefaultReasoningEffort string   `json:"default_reasoning_effort,omitempty"`
 }
 
 // buildFeesChannels 以「渠道 models 列表」为基准组表：
@@ -2777,11 +2816,17 @@ func buildFeesChannels(modelsByKind map[provider.Kind][]provider.ModelInfo,
 				ContextWindow: mi.ContextWindow,
 				MaxTokens:     mi.MaxTokens,
 				// 仅上游接口返回的上下文可信；硬编码估算值不展示数字。
-				HasContext: mi.ContextFromAPI,
+				// 上游声明（API）或本工具手工实测均视为「有上下文可展示」；
+				// 前端据 hand_measured 区分并加「实测」标注，不把实测冒充成官方值。
+				HasContext:   mi.ContextFromAPI || mi.HandMeasured,
+				HandMeasured: mi.HandMeasured,
 				// 能力标记与 /v1/models 同源，保证 UI 图标与接口声明一致。
 				SupportsImages:    mi.SupportsImages,
 				SupportsReasoning: mi.SupportsReasoning,
 				SupportsTools:     mi.SupportsTools,
+				// 思考档位（issue #96）与 /v1/models 同源透传
+				ReasoningEfforts:       mi.ReasoningEfforts,
+				DefaultReasoningEffort: mi.DefaultReasoningEffort,
 			}
 			if p, ok := prices[mi.ID]; ok {
 				row.Priced = p.IsExplicit() // 缺倍率字段（如 auto）不算已定价

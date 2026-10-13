@@ -17,6 +17,7 @@ import (
 
 	"wild-work/internal/auth"
 	"wild-work/internal/ledger"
+	"wild-work/internal/loopguard"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
 	// 别名 statsEngine：与运行统计引擎包名一致（本包无同名局部变量，别名仅为与 app 包对齐可读）
@@ -349,6 +350,8 @@ func (h *Handler) modelList() []map[string]any {
 // OpenAI 官方仅规定 id/object/created/owned_by，未定义能力字段；
 // 多模态能力按 OpenRouter / llama.cpp 通行的 architecture.input_modalities 透传。
 // 上游模型列表接口未返回能力信息时，按惯例回退为 ["text"]。
+// 思考档位（issue #96）：按 Buddy2api v2.1.11 口径透传 reasoning 对象，
+// 上游未声明档位时整个对象不出现（不编造；supports_reasoning 同理不输出）。
 func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
 	id := k.String() + "/" + mi.ID
 	entry := map[string]any{"id": id, "object": "model", "created": 1753600000, "owned_by": k.String()}
@@ -361,6 +364,20 @@ func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
 	entry["architecture"] = map[string]any{
 		"input_modalities": mi.InputModalities(),
 		"modality":         mi.Modality(),
+	}
+	if len(mi.ReasoningEfforts) > 0 || mi.DefaultReasoningEffort != "" {
+		reasoning := map[string]any{}
+		if len(mi.ReasoningEfforts) > 0 {
+			reasoning["supported_efforts"] = mi.ReasoningEfforts
+		}
+		if mi.DefaultReasoningEffort != "" {
+			reasoning["default_effort"] = mi.DefaultReasoningEffort
+		}
+		if mi.CanDisableThinking != nil {
+			reasoning["can_disable_thinking"] = *mi.CanDisableThinking
+		}
+		entry["reasoning"] = reasoning
+		entry["supports_reasoning"] = true
 	}
 	return entry
 }
@@ -628,12 +645,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.stickySuccess(rt)
 		if peek.Stream {
 			usage, serr := rt.Upstream.Stream(w, rc, clientModel)
+			cu := cacheUsageOf(usage) // 缓存命中（上游未上报时 reported=false，面板显示「—」）
 			// 记 token 流水（成功请求口径；usage 缺失记 0 token 仅计请求数）。
 			// 记账失败不干扰主流程——锦上添花功能。
 			if h.ledger != nil {
 				pt, ct, src := usageTokens(usage)
 				h.ledger.AppendUsage(ledger.UsageEntry{Ch: rt.Kind.String(), UID: acct.UID,
-					Model: stripChannel(clientModel), PT: pt, CT: ct, Src: src})
+					Model: stripChannel(clientModel), PT: pt, CT: ct, CR: cu.cached, CRC: cu.reported, Src: src})
 			}
 			// 运行统计：模型维度记账（有 usage 才计，对齐 sidecar 的 u.found 语义）。
 			// 吞吐仅在流式下有意义：genSec = 总耗时 − TTFB；引擎内对 ≤50ms 的样本只计 TTFB。
@@ -641,7 +659,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				pt, ct, _ := usageTokens(usage)
 				if pt > 0 || ct > 0 {
 					gen := time.Since(sw.start).Seconds() - float64(sw.ttfbMs)/1000
-					h.stats.AddUsage(clientModel, pt, ct, usageCredit(usage), sw.ttfbMs, gen, time.Now())
+					h.stats.AddUsage(clientModel, pt, ct, usageCredit(usage), sw.ttfbMs, gen, cu.cached, cu.reported, time.Now())
 					statRow.Tok = ct
 					if gen > 0 {
 						statRow.TokPerSec = float64(ct) / gen
@@ -650,6 +668,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				statRow.Credit = usageCredit(usage)
 			}
 			if serr != nil {
+				// 思考链死循环（发癫）命中：模型/请求级问题，不罚账号（换号必然复现），
+				// 错误帧已透传给客户端，由下游 agent 自行重试。仅记日志。
+				var lge *loopguard.Error
+				if errors.As(serr, &lge) {
+					log.Printf("reasoning loop intercepted platform=%s uid=%s model=%s kind=%s reason=%s",
+						rt.Kind, acct.UID, clientModel, lge.Hit.Kind, lge.Hit.Reason)
+					return
+				}
 				// 上游中断/空流已尽力透传，错误仅在日志可见
 				log.Printf("stream relay end platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
 				// 流内业务错误（traework SOLO 的 event:error，如 3004 限流）：
@@ -705,8 +731,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if h.ledger != nil {
 			u, _ := resp["usage"].(map[string]any)
 			pt, ct, src := usageTokens(u)
+			cu := cacheUsageOf(u)
 			h.ledger.AppendUsage(ledger.UsageEntry{Ch: rt.Kind.String(), UID: acct.UID,
-				Model: stripChannel(clientModel), PT: pt, CT: ct, Src: src})
+				Model: stripChannel(clientModel), PT: pt, CT: ct, CR: cu.cached, CRC: cu.reported, Src: src})
 		}
 		writeJSON(w, http.StatusOK, resp)
 		// 运行统计：必须在写回之后——此刻 statWriter 才记到首字节，TTFB 为真值；
@@ -717,7 +744,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			pt, ct, _ := usageTokens(u)
 			if pt > 0 || ct > 0 {
 				gen := time.Since(sw.start).Seconds() - float64(sw.ttfbMs)/1000
-				h.stats.AddUsage(clientModel, pt, ct, usageCredit(u), sw.ttfbMs, gen, time.Now())
+				cu := cacheUsageOf(u)
+				h.stats.AddUsage(clientModel, pt, ct, usageCredit(u), sw.ttfbMs, gen, cu.cached, cu.reported, time.Now())
 				statRow.Tok = ct
 			}
 			statRow.Credit = usageCredit(u)
@@ -788,7 +816,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 被禁用只会是「Key 无效/已被删除」，唯一补救是换一把有数 Key 粘进来。
 		// 照搬「需重新登录」会把用户引到一个不存在的入口（R41 同族的文案误导）。
 		if keyPasteChannel(rt.Kind) {
-			hint = fmt.Sprintf("请在面板粘贴一把有效的 %s API Key（sk_…，在 app.cline.bot → Settings → API Keys 创建）", rt.Kind)
+			hint = fmt.Sprintf("请在面板粘贴一把有效的 %s API Key（sk_…，在 app.cline.bot → Account / API Keys 创建）", rt.Kind)
 		}
 		// 多数是限流冷却而非登录态问题：给出最早解冻时间，重登提示仅在无任何冷却时兜底。
 		if cooling > 0 && !earliest.IsZero() {

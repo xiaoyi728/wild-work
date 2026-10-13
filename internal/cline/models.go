@@ -36,6 +36,59 @@ type recommendResp struct {
 // （与 qodercn/qodercom 同款先例）。
 func StaticModels() []provider.ModelInfo { return nil }
 
+// measuredCap 是**手工实测**的模型元数据（非上游下发、非官方值）。
+type measuredCap struct {
+	ctx    int64 // 实测通过的最大 prompt_tokens，已向下取整到档位
+	images bool  // 发图是否被上游接受
+}
+
+// measuredCaps 上下文/多模态的实测结果（2026-10-12，经本工具网关 127.0.0.1:7863 实测）。
+//
+// **为什么必须本地维护这张表**：上游 `recommended-models` 的 free[] 条目只含
+// id/name/description/tags，**完全不返回上下文窗口与能力字段**（实测），
+// 而客户端（Claude Code / Codex 等）靠 `/v1/models` 的 context_length 与
+// architecture.input_modalities 决定何时压缩、能否收图，故只能本地实测补全。
+//
+// 口径与边界（勿当官方值，也勿当作永久真值）：
+//  1. ctx = 实测「成功返回且三暗号（头/中/尾）全部回忆正确」的最大 prompt_tokens，
+//     再**向上取到常用档位并留一档余量**（用户裁定 2026-10-12）：实测值被本工具
+//     90s 响应头超时与探针阶梯双重压制，必然偏低；且客户端把 context_length 当作
+//     「可用输入上限」用于压缩时机，略微宽报比偏窄更贴合上游真实容量（上游超限会
+//     给出权威错误，不会静默错误回答）。具体：mimo 实测 728K → 报 1M；
+//     muse 实测 928K → 报 1M；step-5 实测 800K → 报 1M；solar 实测 400K → 报 512K。
+//     三暗号验证是为了排除上游静默截断（只保留尾部）把实测值抬高到虚假水平。
+//  2. 超大 prompt（>~700k）常因上游首字节耗时过长而被本工具 client 的
+//     90s ResponseHeaderTimeout 中断 —— 故实测值只是**下界**（第 1 条已据此上取
+//     一档），且 >90s 首字节本身已无实用意义，不再继续抬高求证。
+//  3. images 由「发图是否被上游接受」实测；solar-mini4 上游明确回
+//     404 `No endpoints found that support image input`。
+//     mimo / muse / step 三者的实测均能正确识别图片内容（红/蓝/黄圆）。
+//  4. tools：四个模型均实测返回标准 tool_calls 并正确消费 tool 结果，故未单列开关
+//     （provider.ModelInfo 的 SupportsTools 保持 false = 「未声明」，不虚报）。
+//  5. 地区限制：muse-spark-1.3-contributor 对国内直连恒回 403
+//     `not available in your region`，需在「设置 → 渠道上游代理」给 cline 配代理才可用（实测）。
+//  6. 未列入本表的模型（上游新增）仍然照常暴露，但没有上下文/能力声明 ——
+//     这与 R46「模型面绑死上游 free[]」不矛盾：本表只补元数据，不增删模型。
+var measuredCaps = map[string]measuredCap{
+	"cline-free/mimo-v2.6-flash":            {ctx: 1_000_000, images: true},
+	"cline-free/muse-spark-1.3-contributor": {ctx: 1_000_000, images: true},
+	"cline-free/solar-mini4":                {ctx: 512_000, images: false},
+	"cline-free/step-5-preview":             {ctx: 1_000_000, images: true},
+}
+
+// modelInfoOf 组装单条模型信息：基础字段来自上游 free[]，上下文/能力来自实测表（若有）。
+// ContextFromAPI 保持 false：这些值确实不来自上游接口；另置 HandMeasured=true 如实标注
+// 来源（面板据此展示数字并标注「实测」，/v1/models 也照常带上，供客户端判断压缩时机）。
+func modelInfoOf(id, name string) provider.ModelInfo {
+	mi := provider.ModelInfo{ID: id, Name: name}
+	if c, ok := measuredCaps[id]; ok {
+		mi.ContextWindow = c.ctx
+		mi.SupportsImages = c.images
+		mi.HandMeasured = true
+	}
+	return mi
+}
+
 // FetchModels 返回暴露集 = recommended-models 的 free 数组**原样透传**：
 //  1. 不碰 /models（458 条 OpenRouter 镜像，对「免费池」定位无信息量）；
 //  2. ID 不改名不改前缀（free[] 本身就是 `cline-free/*` 别名空间）；
@@ -54,9 +107,9 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 		// 兜底：free[] 为空但缓存尚有内容 ⇒ 返回缓存（上游目录瞬时抖动不掏空面板）
 		c.knownMu.RLock()
 		cached := make([]provider.ModelInfo, 0, len(c.knownIDs))
-		for id := range c.knownIDs {
+		for id, name := range c.knownIDs {
 			if !c.isCapped(id) {
-				cached = append(cached, provider.ModelInfo{ID: id, Name: c.nameOf(id)})
+				cached = append(cached, modelInfoOf(id, name))
 			}
 		}
 		c.knownMu.RUnlock()
@@ -81,7 +134,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 		if name == "" || name == id {
 			name = prettifyID(id)
 		}
-		out = append(out, provider.ModelInfo{ID: id, Name: name})
+		out = append(out, modelInfoOf(id, name))
 		c.rememberLiveModel(id, name)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })

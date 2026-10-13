@@ -16,17 +16,20 @@ import { cacheRate, cacheNoneTitle } from './CacheCell.jsx';
 
 // perfCell 取「平均速度」：速度只存在于运行统计引擎内存（ledger 只扫文件、没有速度字段），
 // 所以本表按 "channel/model" 去 /api/stats 的 models[] 里匹配。
+// ⚠️ 口径不对称且**不可修**（除非给 ledger 加速度字段）：本表按所选区间统计 token，
+// 而 stats 引擎只有「今日」口径 ⇒ 选 7日/30日 时这一列仍只反映今天。所以措辞里必须写明「今日」，
+// 否则读者会以为这是整段区间的均值（上游 vanilla 的 tooltip 就没写，本地补上）。
 // 无样本显示「—」而不是 0 tok/s —— 与缓存列同款三态，同一个道理。
 function perfCell(perf, channel, model) {
   const m = perf && perf[`${channel}/${model}`];
-  if (!m) return <span className="muted" title="该模型暂无成功请求的速度样本">—</span>;
+  if (!m) return <span className="muted" title="该模型今日暂无成功请求的速度样本">—</span>;
   const tps = Number(m.avg_tok_per_sec) || 0;
   const ttfb = Number(m.avg_ttfb_ms) || 0;
   const parts = [];
   if (tps > 0) parts.push(`${tps.toFixed(1)} tok/s`);
   if (ttfb > 0) parts.push(`${fmtCredits(ttfb)}ms`);
-  if (!parts.length) return <span className="muted" title="无速度样本">—</span>;
-  return <span title={`样本 ${fmtCredits(m.perf_samples || 0)} 次成功请求`}>{parts.join(' · ')}</span>;
+  if (!parts.length) return <span className="muted" title="今日无速度样本">—</span>;
+  return <span title={`今日样本 ${fmtCredits(m.perf_samples || 0)} 次成功请求`}>{parts.join(' · ')}</span>;
 }
 
 // chartBase 返回通用配色段，调用方展开后再补自己的 type/data/series。
@@ -303,7 +306,7 @@ export default function Usage({ active, usageDays, setUsageDays, bump, sinceSink
           <thead><tr>
             <th>模型</th><th>渠道</th><th className="num">请求数</th><th className="num">Token</th><th className="num">日均</th>
             <th className="num" title="缓存命中 token ÷ 该模型「上报了缓存字段」的请求的 prompt token（加总口径，非逐请求平均）。上游不提供该维度时显示「—」。">缓存</th>
-            <th className="num" title="成功请求实测均值（来自运行统计引擎）：tok/s = 生成 token ÷ 生成耗时（按时长加权）；TTFB = 首字节耗时算术平均">平均速度</th>
+            <th className="num" title="口径：本列取自运行统计引擎的「今日」快照（ledger 只记 token、没有速度字段），不随上面的今日/7日/30日区间变化。数值为成功请求实测均值：tok/s = 生成 token ÷ 生成耗时（按时长加权）；TTFB = 首字节耗时算术平均；无样本显示「—」。">平均速度</th>
           </tr></thead>
           <tbody>
             {top.length === 0 ? (

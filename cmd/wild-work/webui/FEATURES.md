@@ -269,10 +269,11 @@ ledger kinds(earn/spend/expire) :1378 · glm 状态串 :759 · 掩码哨兵 `"�
 
 `npm --prefix cmd/wild-work/webui run check` 一次跑 `check-props` + `render-check`。
 `render-check` 用 vite `ssrLoadModule` 载源码、`react-dom/server` 渲真实分支，按
-「interactive 元素且不在 `.hidden` 子树内」数可见控件，五个场景：App 未登录外壳 /
-Accounts 未登录 / Accounts 有数据（fixture 覆盖正常·停用·签到失败·`credits_na`·不支持签到·匿名
-六种卡片分支，补的正是 5.2 第 1 条「沙箱只有匿名卡所以永远到不了那段」的盲区）/
-Settings 弹层 / Fees 弹层。
+「interactive 元素且不在 `.hidden` 子树内」数可见控件。**场景数已随融合轮次增长，现查现写**：
+2026-10-01 五个 → 2026-10-12 六个（加「完整模型 ID 前缀」，缘由见 AGENTS.md §10 L11 缺陷②）→ 2026-10-13 **七个**。
+当前七个：App 未登录外壳 / Accounts 未登录 / Accounts 有数据（fixture 覆盖正常·停用·签到失败·
+`credits_na`·不支持签到·匿名六种卡片分支，补的正是 5.2 第 1 条「沙箱只有匿名卡所以永远到不了那段」
+的盲区）/ Settings 弹层 / Fees 弹层 / 完整模型 ID 前缀 / 缓存三态+档位与实测来源标注。
 
 控件口径已与浏览器对齐：`button|input|select|textarea` + `.icon-op|.icon-link` +
 `code.info-value`（顶栏两格「点击复制」）。同一条规则在真浏览器实测同为 **20**、id 列表逐项一致。
@@ -280,7 +281,10 @@ Settings 弹层 / Fees 弹层。
 别急着怀疑界面退化。
 
 已负向验证：把 5.2 第 2 条那个缺陷（未登录 early-return 成裸登录层）临时装回去，闸门 `exit 1`
-并点名缺失的 18 个控件；还原后 5/5 绿。
+并点名缺失的 18 个控件；还原后全绿。
+2026-10-13 另做三组负向（均为**本轮新加的判据**）：① 把缓存「不提供」改成也画 0% → 红并点名三条用例；
+② 装回「模型名含 `/` 即视为已带渠道前缀」的旧判据 → 红并输出 `cline/cline-free/grok-4 → 算成了
+cline-free/grok-4`；③ 把 `chkLoopGuard` 改名 → 红并报「应渲染却没渲染的控件 → chkLoopGuard」。
 
 ### 5.5 闸门自己也会假绿：`check-props.mjs` 的 cwd 陷阱（2026-10-01 修）
 
@@ -318,3 +322,32 @@ Settings 弹层 / Fees 弹层。
 `html[data-theme="paper"]`（541 起）三处各一份，每份都含
 `--wb --trae --qoder --wbai --traecode --qodercn --qodercom --qwenwork --glm --oczen`。
 paper 的纸质噪点背景、学术衬线标题、去玻璃拟态**全部保留**。新增渠道色必须三处同步。
+
+
+---
+
+## 7. 基线之后的增补（React-only，**不进 §1 的 114 个对账**）
+
+§1 是 2026-09-30 那次 vanilla → React 移植的功能基准，判据是「vanilla 有而 React 无 ⇒ 功能掉了」。
+此后各轮融合与本地新增在 React 侧又长出了节点，它们**在冻结的 `cmd/wild-work/web/` 基准里不存在**，
+所以不能塞回 §1（那会污染下次的 diff 基准），单独记在这里。
+
+实测口径（2026-10-13 现查，扫 `webui/src/**/*.jsx` 的 `id="…"` 与 `cmd/wild-work/web/index.html` 对集合差）：
+**vanilla 基准 114 个 / React 现有 166 个 / React-only 新增 53 个 / 丢失仅 1 个**（`echartsCdn`，
+D3 签核：echarts 改 npm 按需引入后 CDN `<script>` 必须消失，已进 `TestDOMIdParity` 白名单）。
+
+`TestDOMIdParity` 的方向性正是为此设的：只对「vanilla 有而 React 无」报错，React-only 的新增仅提示。
+⇒ 新增节点不会假红，也不会因为「闸门没管这个方向」而假装被验证过。
+
+| 分组 | 新增 id | 出处 |
+|------|---------|------|
+| 桌宠（本地专有） | `petEyeL/R` `petBlushL/R` `petPop` `pp*`（9 个）`swRing/swCrescent/swBurst/swMotif` | AGENTS §10 L2、L6.3 第 4 条 |
+| 运行统计 tab | `stSum` `stPlat` `stModels` `stExpiry` `stRotation` `stAbnormal` `stLogs` `stApplog` `stLoading` `stDisabled` | L9（承接上游 v2.5.5–v2.6.2 的 `internal/stats`） |
+| 导入型 / 新渠道按钮与弹层 | `btnAddMonkeyCode` `btnAddLoomy` `btnAddRaccoon` `btnAddCline` `btnLoginImport` `btnLoginImportAlt` `clineOverlay` `clineKeyInput` `clineErr` `btnClineSubmit` `btnClineCancel` | L9、L11（Cline 见 R46） |
+| 积分汇总条与模型查找 | `creditSummaryBar` `csAll` `btnModelSearch` `modelSearchOverlay` `modelSearchInput` `modelSearchList` `modelSearchFoot` | L9（上游 PR #68/#69）、L11（`modelSearchOverlay`） |
+| 主 tab 命名（本地新加，非缺失） | `mtabBtnAccounts` `mtabBtnUsage` `mtabBtnStats` `mtabStats` | L6.3 C 类第 5 条 |
+| 积分明细浮窗（形态改变） | `creditTip`（vanilla 是运行期 `createElement`，React 是常驻节点 + portal） | L6.2 第 4/5 条、R45 |
+| **本轮 v2.7.1** | `ucCache`（缓存利用率卡）、`chkLoopGuard`（思考链防癫开关） | R49–R51、AGENTS §10 L12 |
+
+⚠️ 这张表的**分组归属**是从 AGENTS §10 各轮的记录推出来的；id 集合本身是现查的，可信。
+下次融合若动了这些节点，改这张表 + 改 `TestDOMIdParity` 的白名单要一起做，别只改一侧。

@@ -87,7 +87,7 @@ Wild-Work 是 WorkBuddy（国内版+国际版）/TraeWork/Qoder 多渠道账号�
 | GUI 壳 | **无**（删除 wails） | WebView2 内存开销大 + Windows 绑定；托盘 + 浏览器足够 |
 | 托盘 | energye/systray v1.0.3（现有） | 已跨平台；菜单固定方案规避其不可删菜单项限制 |
 | 管理后端 | 现有 http.Server 扩展 /api/* | 单端口、复用鉴权中间件（cookie 会话守卫）、零新服务 |
-| Web UI | 纯静态 embed + fetch | 无 Node 构建链，单 exe 双击即用 |
+| Web UI | **Vite + React 编译，产物 `go:embed` 进单文件**（R5，2026-09-30 所有者签核推翻本行原先写的「纯静态、无前端编译链」） | 面板规模已超出无构建链能维护的范围；「单 exe 双击即用」这条没变——构建期需要 node，运行期不需要 |
 | 登录 | 复用 internal/login + login_trae | 纯 HTTP + 本地回调端口，跨平台 |
 | 平台能力 | internal/platform + build tag（windows/darwin/other） | 浏览器无痕/开机自启/消息框/日志/工作区，接口同名 |
 | 构建 | WSL 交叉编译 win；CI macos-latest 编 darwin | 见 R11 |
@@ -921,6 +921,10 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   双层 ID 正确、搜索面板同口径、防癫开关真写穿 `home/config.json`（`features.loop_guard=false`）并经
   `/api/state` 回读、区间记忆跨 reload 生效（`days=1` 实请求）且非法种子 `__probe__` 回退 7 不崩、
   桌宠节点（`pet`/`petEyeL`…）在场、控制台零报错。
+- **口径不对称的一处如实标注（本地比上游多写一层）**：「平均速度」列落在今日/7日/30日的用量表里，
+  数据却只来自 `stats` 引擎的**今日**快照（ledger 无速度字段，R43 已定「不为此去改另一侧」）。
+  上游 vanilla 的 tooltip 没提这件事，选 30 日时读者会当成整段均值。本地在表头 title 与单元格
+  title 里都写明「今日」，措辞改的是口径披露、不是数字来源，**不改上游语义**，下次融合可保留。
 - **顺手查出的一处上游文案自相矛盾**：上游 `index.html` 的 Cline 实测表提示写「上下文取实测通过值**向下**取档」，
   与其自己的 R46 裁定「按用户裁定**向上**取一档」（mimo 728K→报 1M、solar 400K→报 512K）相反。
   本地弹层按 R46 写，并注明实测值本身是 90s 响应头超时压制下的下界。

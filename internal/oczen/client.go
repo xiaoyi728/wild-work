@@ -18,6 +18,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -97,40 +98,46 @@ func StaticModels() []provider.ModelInfo { return staticFree() }
 // 请求构造
 // ---------------------------------------------------------------------------
 
-// canonicalSessionID 把任意会话种子映射成 OpenCode 官方格式
-// ses_<12位小写hex><14位Base62>。已是该格式则原样返回（保住 prompt cache 亲和）。
+// officialSessionPattern 官方形状：ses_ + 12 位小写 hex + 14 位 Base62。
 // 上游自 2026-09-16 起对非该形状的会话头一律回 403 FreeTierError。
+var officialSessionPattern = regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
+
+// gateTimePartPattern 官方 Identifier.descending() 的**位不变量**——2026-10-13 起
+// 免费档在形状之外新增的第二道检查。官方生成器为 `value = ~(ts_ms*0x1000 + counter)`
+// 取低 48 位；按位取反把低 12 位一起翻转，故低 12 位恒等于 0xFFF-counter。
+// 实测（同一时间戳、只改低 12 位）：counter 1..63 通过，counter=64 起 403。
+var gateTimePartPattern = regexp.MustCompile(`^[0-9a-f]{9}f[c-f][0-9a-f]$`)
+
+// canonicalSessionID 把任意会话种子重排成官方格式，并满足免费档的位不变量。
+//
+// 只有位不变量也满足时上游才认它是 OpenCode 客户端。旧实现把摘要前 6 字节直接当
+// 时间戳用——形状永远合法、低 12 位却近乎随机（命中窗口 1/4096），于是「测试全绿、
+// 形状全对、功能全无」：403 的响应体与「压根没发会话头」逐字相同，不报任何原因。
+// 真正官方形状的 id 原样保留（保住上游 prompt cache 亲和），其余一律重排。
 func canonicalSessionID(signal string) string {
-	// 官方形状：ses_ + 12 位小写 hex（时间戳）+ 14 位 Base62
-	if len(signal) == 4+12+14 && strings.HasPrefix(signal, "ses_") {
-		ok := true
-		for i := 4; i < 16; i++ {
-			c := signal[i]
-			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			for i := 16; i < len(signal); i++ {
-				if !isBase62(signal[i]) {
-					ok = false
-					break
-				}
-			}
-			if ok {
-				return signal
-			}
-		}
+	if officialSessionPattern.MatchString(signal) && gateTimePartPattern.MatchString(signal[4:16]) {
+		return signal
 	}
 	sum := sha256.Sum256([]byte("ses\x00" + signal))
-	timePart := hex.EncodeToString(sum[:6]) // 12 位小写 hex
+	timePart := descendingTimePart(sum[:6])
 	n := new(big.Int).SetBytes(sum[6:16])
 	return "ses_" + timePart + base62Fixed(n, 14)
 }
 
-func isBase62(c byte) bool {
-	return c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
+// descendingTimePart 把摘要字节重排成官方 create(descending=true) 的 48 位布局：
+// 高 36 位放摘要、低 12 位置 counter=1，整字取反 ⇒ 低 12 位恒为 0xFFE。
+//
+// 高 36 位可以用摘要而非真实时钟：实测上游**不校验**时间戳段是否合理
+// （`ses_fffffffffffe…`，即时间戳 0，照样 200），只校验低 12 位那个 counter 窗口。
+// 因此本函数保持纯函数 ⇒ 同一对话恒定同一 id，无需为「每毫秒一个真时钟」引入缓存。
+func descendingTimePart(hash []byte) string {
+	current := (uint64(hash[0])<<28 | uint64(hash[1])<<20 | uint64(hash[2])<<12 |
+		uint64(hash[3])<<4 | uint64(hash[4])>>4) << 12
+	inverted := ^(current | 1) & 0xFFFFFFFFFFFF
+	return hex.EncodeToString([]byte{
+		byte(inverted >> 40), byte(inverted >> 32), byte(inverted >> 24),
+		byte(inverted >> 16), byte(inverted >> 8), byte(inverted),
+	})
 }
 
 const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"

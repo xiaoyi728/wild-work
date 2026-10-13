@@ -30,6 +30,12 @@ docs/*
 !docs/三接口兼容改造备忘.md
 !docs/用量积分流水记账备忘.md
 !docs/前端React重构架构计划.md
+# 2026-10-13 追加：以下四份此前仅本地可见，但 AGENTS.md / 不变量 17 / R16 都在引用它们，
+# clone 下来是悬空链接；已逐文件扫过无真实凭据（JWT/token/内网 IP/账号 uid 均零命中）后反选入库。
+!docs/opencodezen渠道接入备忘.md
+!docs/upstream-reverse-engineering.md
+!docs/桌宠功能实施计划.md
+!docs/桌宠动画重构计划.md
 
 # 临时文件
 temp/

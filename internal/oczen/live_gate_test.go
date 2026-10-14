@@ -90,15 +90,15 @@ func TestLiveMintedSessionAccepted(t *testing.T) {
 // **仍在生效**——形状合法但低 12 位是随机摘要值时仍须 403。
 //
 // 这条要是变红（变成 200），说明上游把闸门撤了或改了判据，
-// 那么本包的 descendingTimePart / gateTimePartPattern 就需要重新判读，
+// 那么本包的 descendingTimePart / descendingTimePartPattern 就需要重新判读，
 // 而不是默认继续生效。
 func TestLiveGateStillRejectsRawHashSession(t *testing.T) {
 	// 旧实现的实际产物（sha256 直出时间戳段，低 12 位 1c5 —— 窗口外）
 	stale := "ses_3ae2ec8551c5AbCdEfGhIjKlMn"
-	if !officialSessionPattern.MatchString(stale) {
+	if !sessionShapePattern.MatchString(stale) {
 		t.Fatalf("对照组形状不合法，测不出闸门: %q", stale)
 	}
-	if gateTimePartPattern.MatchString(stale[4:16]) {
+	if descendingTimePartPattern.MatchString(stale[4:16]) {
 		t.Fatalf("对照组已落在接受窗口内，测不出闸门: %q", stale)
 	}
 	status, raw := liveChat(t, stale)

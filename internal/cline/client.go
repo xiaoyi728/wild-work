@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/backuplink"
 	"wild-work/internal/provider"
 )
 
@@ -25,8 +26,9 @@ type Client struct {
 	// Go 的 Client.Timeout 覆盖整个请求生命周期（含读 body），对 SSE 意味着
 	// 「长回答必被从中间掐断」。空闲兜底改由 IdleReader 承担。
 	StreamHTTP *http.Client
-	// IdleTimeout 流式空闲上限，0 = DefaultIdleTimeout；由 main 注入
-	// config.upstream.stream_idle_seconds。
+	// IdleTimeout 流式空闲上限，0 = DefaultIdleTimeout。
+	// ⚠️ 目前**没有配置项**：config.Upstream 只有 timeout_seconds，main 也不注入，
+	// 实际生效值恒为 DefaultIdleTimeout（旧注释承诺的 stream_idle_seconds 从未实现）。
 	IdleTimeout time.Duration
 	// Base 网关基址（默认 APIBase）；测试注入 httptest 假上游用，生产不设。
 	Base string
@@ -37,6 +39,9 @@ type Client struct {
 	knownIDs map[string]string
 	capMu    sync.RWMutex
 	capped   map[string]time.Time
+	// routes 是「地区限制→改走备用上游通道」的学习路由（实现在 backuplink.Routes，
+	// 与 oczen 共用同一份编排：见 internal/backuplink/route.go）。
+	routes backuplink.Routes
 }
 
 // New 构造客户端（非流式 120s 总超时；一问一答需要兜底，故保留 Timeout）。
@@ -123,6 +128,10 @@ func keyOf(a *auth.Auth) string {
 //
 // 状态码会经 effectiveStatus **还原被网关压平的内层码**（实测外层恒 500），
 // 让客户端与 handler 看到真正的 429/401/404；响应体保持原文（不变量 8 的偏离已在注释说明）。
+//
+// 地区限制自动改道（决议 R57）：直连命中 IsRegionBlocked ⇒ 同一次请求内经**备用上游通道**
+// 重放一次；未配置备用通道则原样透传失败。重试全部在本方法内完成，handler/账号惩罚/
+// 粘性路由对该机制无感（备用链路只是换出口 IP，不是换账号）。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []byte, error) {
 	m := modelOf(body)
 	if m == "" {
@@ -138,28 +147,73 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 
 	out := clampMaxTokens(body)
 	out = forceStream(out)
+	key := keyOf(a)
+
+	// 编排抽到 backuplink.Replay（R62）：渠道只提供「怎么发一发」与「什么算地区限制」，
+	// 其余语义（首因不被掩盖、备用拨不动则回落直连、学习路由随配置作废）全渠道共用一份，
+	// 避免 cline/oczen 各写一遍后改一处漏一处（R52 的教训）。
+	rp := &backuplink.Replay{
+		Kind:   "cline",
+		Model:  m,
+		Routes: &c.routes,
+		Attempt: func(useBackup bool) (*http.Response, error) {
+			return c.attempt(out, key, useBackup)
+		},
+		Blocked:   IsRegionBlocked,
+		Wrap:      func(resp *http.Response) io.ReadCloser { return c.openStream(resp) },
+		Finalize:  func(_ int, body string) { c.noteCap(m, body) },
+		Translate: effectiveStatus,
+	}
+	rc, status, raw, err := rp.Do()
+	if err != nil || rc != nil || status == http.StatusOK {
+		return rc, status, raw, err
+	}
+	return nil, status, raw, nil
+}
+
+// noteCap 命中共享出口上限文案时记模型级冷却（不罚账号）。
+func (c *Client) noteCap(m, body string) {
+	if IsCapBody(body) {
+		c.markCapped(m, capCooldown)
+		log.Printf("cline: 模型触上限 model=%s（不罚账号，已标记冷却）", m)
+	}
+}
+
+// attempt 发一发出站对话请求：useBackup 决定出口（直连 or 备用上游通道）。
+// 重放时重新构造请求（body 已在内存，无需 GetBody），两个出口共用同一构造器
+// ⇒ 头完全一致：X-CLIENT-TYPE 缺失会恒回 403，重放少了它会把「代理也没用」误判成代理故障。
+func (c *Client) attempt(out []byte, key string, useBackup bool) (*http.Response, error) {
+	cli := c.streamClient()
+	if useBackup {
+		bc := c.backupClient()
+		if bc == nil {
+			return nil, backuplink.ErrNoBackup
+		}
+		cli = bc
+	}
 	req, err := http.NewRequest(http.MethodPost, c.base()+EpChat, bytes.NewReader(out))
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	applyHeaders(req, keyOf(a))
-
-	resp, err := c.streamClient().Do(req)
-	if err != nil {
-		return nil, 0, nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		_ = resp.Body.Close()
-		if IsCapBody(string(raw)) {
-			c.markCapped(m, capCooldown)
-			log.Printf("cline: 模型触上限 uid=%s model=%s（不罚账号，已标记冷却）", uidOf(a), m)
-		}
-		return nil, effectiveStatus(resp.StatusCode, string(raw)), raw, nil
-	}
-	return provider.NewIdleReader(resp.Body, c.idleTimeout()), resp.StatusCode, nil, nil
+	applyHeaders(req, key)
+	return cli.Do(req)
 }
+
+// openStream 把 200 响应包成带空闲兜底的流（R35：不用 Client.Timeout，靠 IdleReader）。
+func (c *Client) openStream(resp *http.Response) io.ReadCloser {
+	return provider.NewIdleReader(resp.Body, c.idleTimeout())
+}
+
+// backupClient 返回绑定备用上游通道的 client（未配置返回 nil = 只能直连）。
+// base 取流式 client 的 Transport：只改出口，其余超时/协议参数与出厂一致。
+func (c *Client) backupClient() *http.Client {
+	tr, _ := c.streamClient().Transport.(*http.Transport)
+	return backuplink.Client(tr)
+}
+
+// regionLearned 报告该模型是否已学到「直连被地区拒、只能走备用」（测试与日志用）。
+func (c *Client) regionLearned(m string) bool { return c.routes.Learned(m) }
 
 // forceStream 强制上游 stream:true（不变量 1）。
 //

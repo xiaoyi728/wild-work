@@ -10,7 +10,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/backuplink"
 	"wild-work/internal/cline"
 	"wild-work/internal/config"
 	"wild-work/internal/ledger"
@@ -50,7 +50,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.7.1"
+const Version = "2.7.2"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -125,13 +125,13 @@ type App struct {
 	// 由 main.go 注入；nil 时仅写配置不热更（下次启动生效）。
 	compatSyncer func(defaultChannel string, maxTokensCap int, modelMap map[string]string)
 
-	// proxySyncer 面板保存 proxies 后重新套各渠道 HTTP client（热更新代理）。
-	// 由 main.go 注入；nil 时仅写配置不热更。
-	proxySyncer func(proxies map[string]string)
-
 	// oczenSyncer 面板保存 oczen key 后写入渠道 client（热更新凭证）。
 	// 由 main.go 注入；nil 时仅写配置不热更。
 	oczenSyncer func(key string)
+
+	// fbSyncer 面板保存模型降级链后推给 server.Handler（热更新降级路由）。
+	// 由 main.go 注入；nil 时仅写配置不热更。
+	fbSyncer func(rules []config.ModelFallbackRule)
 
 	refreshMu  sync.Mutex // 防并发刷新积分
 	refreshing bool
@@ -1896,8 +1896,56 @@ func (a *App) SetCompatSyncer(fn func(defaultChannel string, maxTokensCap int, m
 	a.compatSyncer = fn
 }
 
-// SetProxySyncer 注入代理热更新回调（由 main.go 注入：重新套各渠道 HTTP client）。
-func (a *App) SetProxySyncer(fn func(proxies map[string]string)) { a.proxySyncer = fn }
+// SetModelFallbackSyncer 注入模型降级链热更新回调（由 main.go 注入：推给 server.Handler）。
+func (a *App) SetModelFallbackSyncer(fn func(rules []config.ModelFallbackRule)) { a.fbSyncer = fn }
+
+// SetModelFallback 保存模型降级链（设置面板可视化编辑）。
+// 校验：From/To 均须 "channel/model" 全路径；From 全局唯一；每链 To 至少一项、
+// 不含 From 自身（不自环）；空规则列表 = 清空禁用。保存即热生效（fbSyncer）。
+func (a *App) SetModelFallback(rules []config.ModelFallbackRule) error {
+	seen := map[string]bool{}
+	for i := range rules {
+		r := &rules[i]
+		r.From = strings.TrimSpace(r.From)
+		if strings.Index(r.From, "/") <= 0 {
+			return fmt.Errorf("规则 %d 的主模型 %q 需为 channel/model 形式", i+1, r.From)
+		}
+		if seen[r.From] {
+			return fmt.Errorf("主模型 %q 重复（每个主模型只允许一条规则）", r.From)
+		}
+		seen[r.From] = true
+		tos := make([]string, 0, len(r.To))
+		for _, to := range r.To {
+			to = strings.TrimSpace(to)
+			if to == "" {
+				continue
+			}
+			if strings.Index(to, "/") <= 0 {
+				return fmt.Errorf("主模型 %q 的备胎 %q 需为 channel/model 形式", r.From, to)
+			}
+			if to == r.From {
+				return fmt.Errorf("主模型 %q 的备胎不能是它自己", r.From)
+			}
+			tos = append(tos, to)
+		}
+		if len(tos) == 0 {
+			return fmt.Errorf("主模型 %q 的降级链为空（至少填一个备胎模型）", r.From)
+		}
+		r.To = tos
+	}
+	a.mu.Lock()
+	a.cfg.ModelFallback = rules
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if a.fbSyncer != nil {
+		a.fbSyncer(rules)
+	}
+	log.Printf("模型降级链已更新（%d 条规则，保存即热生效）", len(rules))
+	return nil
+}
 
 // SetOczenSyncer 注入 oczen key 热更新回调（由 main.go 注入：写入渠道 client）。
 func (a *App) SetOczenSyncer(fn func(key string)) { a.oczenSyncer = fn }
@@ -1937,32 +1985,20 @@ func maskKey(key string) string {
 	return string(r[:5]) + "…" + string(r[len(r)-4:])
 }
 
-// SetProxies 保存单渠道上游代理配置（空串 = 直连）并热更新。
-// key 为渠道 kind，value 为 http(s)://host:port 或 socks5://host:port。
+// SetBackupProxy 保存全局**备用上游通道**（单一代理地址，空串 = 关闭）并即时生效。
 // 同时接收 oczenKey：设置 OpenCodeZen 自定义 API key（空 = 回匿名凭证）。
-func (a *App) SetProxies(proxies map[string]string, oczenKey string) error {
-	clean := make(map[string]string, len(proxies))
-	for k, v := range proxies {
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if k == "" {
-			return fmt.Errorf("渠道名不能为空")
-		}
-		if v == "" {
-			continue // 空串 = 删除该渠道代理（直连）
-		}
-		u, err := url.Parse(v)
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			return fmt.Errorf("渠道 %s 代理地址无效 %q（应为 http://host:port 或 socks5://host:port）", k, v)
-		}
-		switch u.Scheme {
-		case "http", "https", "socks5":
-			clean[k] = v
-		default:
-			return fmt.Errorf("渠道 %s 代理协议 %q 不支持（仅 http/https/socks5）", k, u.Scheme)
-		}
+//
+// 生效方式与旧的「每渠道代理」根本不同：此处**不重建任何渠道 Transport**，
+// 只换 backuplink 内部的快照指针（决议 R57）——备用通道不参与常规请求，
+// 渠道在命中地区拒绝时自己按需取用，因此没有「热更新接线表」可漏（旧实现
+// 启动表 13 个渠道、热更新表只 10 个，traecode 两个表都没进）。
+func (a *App) SetBackupProxy(raw, oczenKey string) error {
+	raw = strings.TrimSpace(raw)
+	if _, err := backuplink.Parse(raw); err != nil { // 空串合法（= 关闭）
+		return err
 	}
 	a.mu.Lock()
-	a.cfg.Proxies = clean
+	a.cfg.BackupProxy = raw
 	if oczenKey != "\u0000unset\u0000" { // 哨兵：请求未携带该字段时不改动现有 key
 		a.cfg.OczenAPIKey = strings.TrimSpace(oczenKey)
 	}
@@ -1971,21 +2007,16 @@ func (a *App) SetProxies(proxies map[string]string, oczenKey string) error {
 	if err != nil {
 		return err
 	}
-	if a.proxySyncer != nil {
-		a.proxySyncer(clean)
+	if err := backuplink.Set(raw); err != nil { // 已校验过，这里不应再失败
+		return err
 	}
 	if a.oczenSyncer != nil {
 		a.oczenSyncer(a.cfg.OczenAPIKey)
 	}
-	if len(clean) == 0 {
-		log.Printf("上游代理已清空（全部直连）")
+	if raw == "" {
+		log.Printf("备用上游通道已关闭（所有请求直连；上游回地区拒绝将原样透传）")
 	} else {
-		ks := make([]string, 0, len(clean))
-		for k := range clean {
-			ks = append(ks, k)
-		}
-		sort.Strings(ks)
-		log.Printf("上游代理已更新：%s", strings.Join(ks, ", "))
+		log.Printf("备用上游通道已配置：%s（仅渠道命中地区拒绝时自动取用，不影响常规请求）", raw)
 	}
 	return nil
 }
@@ -2099,14 +2130,22 @@ type State struct {
 		Channels       []string          `json:"channels"` // 可用渠道列表（供 UI 下拉）
 	} `json:"compat"`
 
-	// Proxies 单渠道上游代理（只读，保存走 POST /api/config/proxies）。
-	Proxies map[string]string `json:"proxies"`
+	// BackupProxy 全局备用上游通道（只读，保存走 POST /api/config/proxy）。
+	// 注意：它**不参与常规请求**，仅当渠道自行判定上游按地区拒绝时在同请求内重放一次（R57）。
+	BackupProxy string `json:"backup_proxy"`
+
+	// BackupProxyActive 备用通道是否已生效（与 BackupProxy 非空等价，分开回显
+	// 是为了让面板能区分「地址合法但进程内未生效」这种理论上不应存在的状态）。
+	BackupProxyActive bool `json:"backup_proxy_active"`
 
 	// OczenAPIKey OpenCodeZen 自定义 API key（只读脱敏回显：sk-xxx…尾4位；保存走同端点）。
 	OczenAPIKey string `json:"oczen_api_key"`
 
 	// LoopGuard 思考链死循环检测（发癫拦截）是否开启（只读，保存走 POST /api/config/loop_guard）。
 	LoopGuard bool `json:"loop_guard"`
+
+	// ModelFallback 模型降级链（保存走 POST /api/config/model_fallback）。
+	ModelFallback []config.ModelFallbackRule `json:"model_fallback"`
 }
 
 // GetState 返回面板初始数据。
@@ -2140,6 +2179,7 @@ func (a *App) GetState() State {
 		ExpiringDays:   int(a.cfg.ExpiringThresholdDur / (24 * time.Hour)),
 		LoopGuard:      a.cfg.Features.LoopGuard,
 	}
+	st.ModelFallback = a.cfg.ModelFallback
 	st.Compat.DefaultChannel = a.cfg.Compat.DefaultChannel
 	st.Compat.MaxTokensCap = a.cfg.Compat.MaxTokensCap
 	st.Compat.ModelMap = a.cfg.Compat.ModelMap
@@ -2150,10 +2190,8 @@ func (a *App) GetState() State {
 		st.Compat.Channels = append(st.Compat.Channels, k.String())
 	}
 	sort.Strings(st.Compat.Channels)
-	st.Proxies = map[string]string{}
-	for k, v := range a.cfg.Proxies {
-		st.Proxies[k] = v
-	}
+	st.BackupProxy = a.cfg.BackupProxy
+	st.BackupProxyActive = backuplink.Enabled()
 	// oczen key 脱敏回显：仅露首 5 + 尾 4（空则原样空串）
 	st.OczenAPIKey = maskKey(a.cfg.OczenAPIKey)
 	st.Accounts = a.accountViews()
@@ -2576,6 +2614,17 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
+	mux.HandleFunc("POST /api/config/model_fallback", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Rules []config.ModelFallbackRule `json:"rules"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetModelFallback(req.Rules); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
 	mux.HandleFunc("POST /api/config/compat", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			DefaultChannel string            `json:"default_channel"`
@@ -2589,17 +2638,17 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
-	mux.HandleFunc("POST /api/config/proxies", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/config/proxy", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Proxies     map[string]string `json:"proxies"`
-			OczenAPIKey *string           `json:"oczen_api_key"` // 指针：区分「未携带」与「显式清空」
+			Proxy       string  `json:"proxy"`         // 备用上游通道地址（空串 = 关闭）
+			OczenAPIKey *string `json:"oczen_api_key"` // 指针：区分「未携带」与「显式清空」
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		key := "\u0000unset\u0000"
 		if req.OczenAPIKey != nil {
 			key = *req.OczenAPIKey
 		}
-		if err := a.SetProxies(req.Proxies, key); err != nil {
+		if err := a.SetBackupProxy(req.Proxy, key); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -2754,6 +2803,11 @@ type feesChannel struct {
 // feesModelRow 一行模型：来自渠道 models 列表，尽可能配上费率。
 type feesModelRow struct {
 	Model string `json:"model"`
+	// ID 是客户端实际要填的完整模型 ID（与 /v1/models 的 id、provider.PublicModelID 同源）：
+	// 普通渠道为 `<渠道>/<模型>`，上游 ID 自带命名空间的渠道（cline 的 cline-free/*）
+	// 直接就是上游 ID（R59）。面板一律拿它做复制，不在前端再拼前缀（R52 的教训：
+	// 拼接规则散在多处必漏）。
+	ID string `json:"id"`
 	// Priced 表示上游费率接口对该模型返回了可用的倍率值。
 	// 注意：credits 字段缺失（如 CN 的 auto 调度器）也算未定价，
 	// 不能把「缺字段解析出的 0」当成免费。
@@ -2813,6 +2867,7 @@ func buildFeesChannels(modelsByKind map[provider.Kind][]provider.ModelInfo,
 		for _, mi := range infos {
 			row := feesModelRow{
 				Model:         mi.ID,
+				ID:            provider.PublicModelID(k, mi.ID),
 				ContextWindow: mi.ContextWindow,
 				MaxTokens:     mi.MaxTokens,
 				// 仅上游接口返回的上下文可信；硬编码估算值不展示数字。

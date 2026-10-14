@@ -5,28 +5,29 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
 	"wild-work/internal/provider"
 )
 
-// TestCanonicalSessionID 免费档对会话头的两道要求：形状 **+ 位不变量**。
-//
-// 只断言形状守不住这个门禁——2026-10-13 的故障形态正是「形状全对、功能全无」，
-// 而旧测试的三条断言（形状/稳定/透传）没有一条与门禁相关，故它永不可能变红。
-// 承重断言是低 12 位落在 counter 窗口内。
+// TestCanonicalSessionID 会话头须为官方形状+官方编码
+// ses_<12位小写hex><14位Base62>，时间戳段须是 Identifier.descending() 编码
+// （末三位 0xFFF-counter，实测只接受 counter 1–63）。
+// 形状/编码不对，或摘要段（旧实现）→ 确定性重编码；官方签发的 descending ID 原样保留。
 func TestCanonicalSessionID(t *testing.T) {
 	got := canonicalSessionID("hello conversation")
-	if !officialSessionPattern.MatchString(got) {
+	if len(got) != 4+12+14 || !strings.HasPrefix(got, "ses_") {
 		t.Fatalf("形状不符: %q (len=%d)", got, len(got))
 	}
-	if !gateTimePartPattern.MatchString(got[4:16]) {
-		t.Fatalf("低 12 位不在 counter 1..63 窗口内: %q", got)
+	for i := 4; i < 16; i++ {
+		if c := got[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			t.Fatalf("时间戳段非小写 hex: %q", got)
+		}
 	}
-	// 本函数复刻官方 create(descending=true) 且固定 counter=1 ⇒ 低 12 位恒为 ffe
-	if !strings.HasSuffix(got[4:16], "ffe") {
-		t.Fatalf("counter 非 1（低 12 位应为 ffe）: %q", got)
+	if !descendingTimePartPattern.MatchString(got[4:16]) {
+		t.Fatalf("生成的 session 时间戳段非 descending 编码: %q", got)
 	}
 	// 稳定性：同一会话种子必须映射到同一 session（prompt cache 亲和）
 	if again := canonicalSessionID("hello conversation"); again != got {
@@ -38,47 +39,52 @@ func TestCanonicalSessionID(t *testing.T) {
 	}
 }
 
-// TestCanonicalSessionIDPassesOnlyGenuineIDs 形状合法但位不合法的 id 必须重铸。
-// 旧实现只看形状就原样透传，等于把上游 403 直接带给客户端。
-func TestCanonicalSessionIDPassesOnlyGenuineIDs(t *testing.T) {
-	genuine := "ses_ecb104473ffeAbCdEfGhIjKlMn" // 实测 200 的真官方形态
-	if canonicalSessionID(genuine) != genuine {
-		t.Fatalf("真官方 session 未被保留: %q → %q", genuine, canonicalSessionID(genuine))
+// TestCanonicalSessionIDKeepsGenuineDescendingIDs 官方客户端签发的时间戳段
+// （末三位 0xFFF-counter）必须原样保留，保住 prompt cache 亲和。
+func TestCanonicalSessionIDKeepsGenuineDescendingIDs(t *testing.T) {
+	genuine := []string{
+		"ses_ecc5beb7cffe2U0aluUnb5nnpZ", // counter 1
+		"ses_ecc441adcffep73ndhq1lBqQim", // counter 2
+		"ses_f02a5a612ffepq6RK15QX04Se0", // counter 16
+		"ses_4892557ffffeDiICzp8gKhMR0u", // counter 48
+		"ses_ecc1f76c9fef3zWGdD1GSCEwPf",
+		"ses_ecc1f76c9fcf3zWGdD1GSCEwPf",
+		"ses_ecc1f76c9fce3zWGdD1GSCEwPf",
 	}
-	// 形状对、位不对 —— 旧实现就是被这条放过去的
-	foreign := "ses_0123456789abAbCdEfGhIjKlMn"
-	if out := canonicalSessionID(foreign); out == foreign {
-		t.Fatalf("形状对但位非法的 id 被原样透传（保证 403）: %q", out)
-	} else if !gateTimePartPattern.MatchString(out[4:16]) {
-		t.Fatalf("重铸结果仍不满足位不变量: %q", out)
-	}
-	// counter=64（实测 403 的窗口外）同样不得透传
-	band64 := "ses_ecb104473fbfAbCdEfGhIjKlMn"
-	if out := canonicalSessionID(band64); out == band64 {
-		t.Fatalf("counter=64 的 id 被原样透传: %q", out)
+	for _, id := range genuine {
+		if got := canonicalSessionID(id); got != id {
+			t.Fatalf("canonicalSessionID(%q) = %q, 应原样保留", id, got)
+		}
 	}
 }
 
-// TestSessionGatePatternDiscriminates 负向对照：位判据必须能分辨实测 200 与实测 403
-// 的会话值。期望值全部取实盘逐字测过的样本，不用同一套位运算反算（否则测试与实现
-// 同错就永远绿）。若判据退化成恒真/恒假，这条立刻变红。
-func TestSessionGatePatternDiscriminates(t *testing.T) {
-	cases := []struct {
-		name string
-		hex  string
-		ok   bool
-	}{
-		{"实测200_真实时钟counter1", "ecb104473ffe", true},
-		{"实测200_counter63窗口上界", "ecb104473fc0", true},
-		{"实测200_时间戳0", "fffffffffffe", true}, // 时间戳段不校验，只有 counter 窗口算数
-		{"实测403_counter64", "ecb1044473fbf", false},
-		{"实测403_旧sha256直出", "3ae2ec8551c5", false},
-		{"实测403_摘要低位随机", "d1bfaf4aff65", false},
+// TestCanonicalSessionIDReencodesForeignEncodings 外形对但编码外来（旧摘要段 /
+// 升序 ID）必须重编码成 descending 布局，否则上游 403 FreeTierError。
+func TestCanonicalSessionIDReencodesForeignEncodings(t *testing.T) {
+	foreign := []string{
+		"ses_133a414840012U0aluUnb5nnpZ", // 升序 ID（001 后缀）
+		"ses_ecc1f76c9f9b3zWGdD1GSCEwPf", // counter 100（9b1 后缀）
+		"ses_088a704c30424N5kWDK0snKFbd", // 旧摘要段布局
 	}
-	for _, c := range cases {
-		if got := gateTimePartPattern.MatchString(c.hex); got != c.ok {
-			t.Errorf("%s: 位判据=%v 期望=%v（%s）", c.name, got, c.ok, c.hex)
+	for _, id := range foreign {
+		got := canonicalSessionID(id)
+		if len(got) != 4+12+14 || !strings.HasPrefix(got, "ses_") {
+			t.Fatalf("canonicalSessionID(%q) = %q, 非规范外形", id, got)
 		}
+		if !descendingTimePartPattern.MatchString(got[4:16]) {
+			t.Fatalf("canonicalSessionID(%q) = %q, 时间戳段非 descending 编码", id, got)
+		}
+		if got == id {
+			t.Fatalf("canonicalSessionID(%q) 保留了外来编码", id)
+		}
+	}
+}
+
+// TestDescendingTimePartLayout 低 12 位恒为 0xFFE（counter 1 取反）。
+func TestDescendingTimePartLayout(t *testing.T) {
+	got := descendingTimePart([]byte{0, 0, 0, 0, 1, 0xFF})
+	if got[9:] != "ffe" {
+		t.Fatalf("descendingTimePart = %q, 末三位应为 ffe", got)
 	}
 }
 
@@ -344,5 +350,63 @@ func TestAnonymousAuthShape(t *testing.T) {
 	}
 	if a.NeedsRefresh(365 * 24 * 60 * 60 * 1e9) {
 		t.Fatal("虚拟账号不应需要刷新（ExpiresAt 必须为远期值）")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 本地分叉追加（见 AGENTS.md §10 L13）：位判据的**反同义反复**对照。
+// 上游那组用例断言的是「行为」（真 ID 保留 / 外来编码重铸），下面这条断言的是
+// 「判据本身能分辨实测样本」——两者缺一不可：2026-10-13 那次 403 的护身符正是
+// 一组只断言形状/稳定性、与门禁毫无关系的空断言，它永不可能变红。
+// ---------------------------------------------------------------------------
+
+// sessionShapePattern 官方外形 ses_<12位小写hex><14位Base62>。
+// 生产代码里形状检查是 canonicalSessionID 内的内联循环，这里只为断言复述一次。
+var sessionShapePattern = regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
+
+// TestCanonicalSessionIDPassesOnlyGenuineIDs 形状合法但位不合法的 id 必须重铸；
+// 只看形状就原样透传，等于把上游 403 直接带给客户端。
+func TestCanonicalSessionIDPassesOnlyGenuineIDs(t *testing.T) {
+	genuine := "ses_ecb104473ffeAbCdEfGhIjKlMn" // 实测 200 的真官方形态
+	if canonicalSessionID(genuine) != genuine {
+		t.Fatalf("真官方 session 未被保留: %q → %q", genuine, canonicalSessionID(genuine))
+	}
+	// 形状对、位不对 —— 旧实现就是被这条放过去的
+	foreign := "ses_0123456789abAbCdEfGhIjKlMn"
+	if out := canonicalSessionID(foreign); out == foreign {
+		t.Fatalf("形状对但位非法的 id 被原样透传（保证 403）: %q", out)
+	} else if !descendingTimePartPattern.MatchString(out[4:16]) {
+		t.Fatalf("重铸结果仍不满足位不变量: %q", out)
+	}
+	// counter=64（实测 403 的窗口外）同样不得透传
+	band64 := "ses_ecb104473fbfAbCdEfGhIjKlMn"
+	if out := canonicalSessionID(band64); out == band64 {
+		t.Fatalf("counter=64 的 id 被原样透传: %q", out)
+	}
+	if !sessionShapePattern.MatchString(canonicalSessionID("x")) {
+		t.Fatal("重铸结果外形不符")
+	}
+}
+
+// TestSessionGatePatternDiscriminates 负向对照：位判据必须能分辨实测 200 与实测 403
+// 的会话值。期望值全部取实盘逐字测过的样本，**不用同一套位运算反算**（否则测试与
+// 实现同错就永远绿）。若判据退化成恒真/恒假，这条立刻变红。
+func TestSessionGatePatternDiscriminates(t *testing.T) {
+	cases := []struct {
+		name string
+		hex  string
+		ok   bool
+	}{
+		{"实测200_真实时钟counter1", "ecb104473ffe", true},
+		{"实测200_counter63窗口上界", "ecb104473fc0", true},
+		{"实测200_时间戳0", "fffffffffffe", true}, // 时间戳段不校验，只有 counter 窗口算数
+		{"实测403_counter64", "ecb1044473fbf", false},
+		{"实测403_旧sha256直出", "3ae2ec8551c5", false},
+		{"实测403_摘要低位随机", "d1bfaf4aff65", false},
+	}
+	for _, c := range cases {
+		if got := descendingTimePartPattern.MatchString(c.hex); got != c.ok {
+			t.Errorf("%s: 位判据=%v 期望=%v（%s）", c.name, got, c.ok, c.hex)
+		}
 	}
 }

@@ -1,19 +1,16 @@
 // constants.go OpenCodeZen 匿名免费通道的常量与静态模型目录。
 //
-// 渠道特性（见 docs/opencodezen渠道接入备忘.md）：
+// 渠道特性（2026-09 实测，见 docs/opencodezen渠道接入备忘.md）：
 //   - 匿名凭证是字面量 "public"（Authorization: Bearer public），无需登录、无 token 轮换；
-//   - 上游免费档有四道校验，缺一即 403 FreeTierError（**响应体四者逐字相同，不看请求无从分辨**）：
-//     ① 会话头形状 ses_<12位小写hex><14位Base62>（2026-09-16 起）；
-//     ② 会话头位不变量：那 12 位 hex 的低 12 位须落在 0xFC0-0xFFF，即官方
-//     `~(ts_ms*0x1000+counter)` 布局里 counter∈1..63（2026-10-13 起，见 client.go
-//     descendingTimePart）。⚠️ 时间戳段本身**不校验**（时间戳 0 也 200）。
-//     ③ 请求体须为「智能体形态」：stream=true 且 tools 内同时含 bash 与 read 两个 function；
-//     ④ User-Agent 须是 opencode/<版本> 形态（实测换成 curl/8.5.0 即 403）。
-//     版本号本身不是检查项（1.18.31 / 1.19.0 / 2.0.x 同样通过）。
-//     注：x-opencode-client / x-opencode-project / x-session-affinity 等头按参考实现
-//     逐头删除实测**不在校验里**（本仓未逐一复验），仍齐套发送只为贴近真实客户端。
-//   - 请求数配额确实存在：2026-09 的「1900+ 次无 429」已被 2026-10-10 单日 64 次
-//     429（kind=soft_rate，可自行恢复）推翻；429 属背压，与上面的 403 是两回事。
+//   - 上游免费档有三道校验，缺一即 403 FreeTierError：
+//     ① 会话头不仅须匹配官方客户端外形 ses_<12位小写hex><14位Base62>，其 12 位
+//     hex 时间戳段还须是官方 Identifier.descending() 编码（~(unix_ms<<12|counter)
+//     取低 48 位，故末三位为 0xFFF-counter，实测只接受 counter 1–63）；
+//     摘要段/升序 ID 即便外形正确也被拒（2026-10-13 实盘）。
+//     ② 请求体须为「智能体形态」：stream=true 且 tools 内同时含 bash 与 read 两个 function；
+//     ③ 伪装头齐套（User-Agent / x-opencode-client / x-session-affinity / x-opencode-request / x-opencode-project）。
+//   - 匿名通道未观测到请求数配额（1900+ 次、峰值 230 req/min、64 并发均无 429），
+//     唯一约束是并发升高时的延迟背压（排队不拒绝）。
 package oczen
 
 import (

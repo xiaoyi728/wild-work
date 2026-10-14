@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/backuplink"
 	"wild-work/internal/idle"
 	"wild-work/internal/provider"
 	"wild-work/internal/upstream"
@@ -38,7 +39,10 @@ type Client struct {
 	// IdleTimeout 聊天 SSE 流中空闲超时（StreamHTTP 无总时长上限，靠本字段兜底
 	// 「上游中途卡死」）。<=0 表示禁用（测试用）。
 	IdleTimeout time.Duration
-	Base       string
+	Base        string
+
+	// routes 地区限制学习路由（与 cline 共用 backuplink.Routes / Replay 编排，R62）。
+	routes backuplink.Routes
 
 	// mu 保护 apikey 的并发读写（面板热更新与请求路径并发）。
 	mu sync.RWMutex
@@ -61,7 +65,7 @@ func New() *Client {
 	}
 	return &Client{HTTP: &http.Client{Timeout: requestTimeout, Transport: tr}, Base: DefaultBase,
 		StreamHTTP:  &http.Client{Transport: tr}, // 共用 Transport，不设 Timeout
-		IdleTimeout: idle.DefaultTimeout,          // 流中空闲监控兜底（见 internal/idle）
+		IdleTimeout: idle.DefaultTimeout,         // 流中空闲监控兜底（见 internal/idle）
 	}
 }
 
@@ -98,25 +102,42 @@ func StaticModels() []provider.ModelInfo { return staticFree() }
 // 请求构造
 // ---------------------------------------------------------------------------
 
-// officialSessionPattern 官方形状：ses_ + 12 位小写 hex + 14 位 Base62。
-// 上游自 2026-09-16 起对非该形状的会话头一律回 403 FreeTierError。
-var officialSessionPattern = regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
+// 时间戳段不是任意 12 位 hex：免费档会按官方客户端 Identifier.descending()
+// 的编码解析它——~(unix_ms<<12|counter) 取低 48 位，故小写 hex 段的末三位是
+// 0xFFF-counter。实盘探测（2026-10-13）：免费档接受 counter 1–63（末三位
+// 0xFC0–0xFFF），超出即判为非 OpenCode 客户端 → 403 FreeTierError，即便 ses_
+// 外形正确；摘要段（旧实现）同属该拒收窗口。故仅当时间戳段落在该编码窗口内
+// 才原样保留，否则确定性重编码——同时保住「同一会话稳定映射到同一 session」
+// 的 prompt cache 亲和。
+var descendingTimePartPattern = regexp.MustCompile(`^[0-9a-f]{9}f[c-f][0-9a-f]$`)
 
-// gateTimePartPattern 官方 Identifier.descending() 的**位不变量**——2026-10-13 起
-// 免费档在形状之外新增的第二道检查。官方生成器为 `value = ~(ts_ms*0x1000 + counter)`
-// 取低 48 位；按位取反把低 12 位一起翻转，故低 12 位恒等于 0xFFF-counter。
-// 实测（同一时间戳、只改低 12 位）：counter 1..63 通过，counter=64 起 403。
-var gateTimePartPattern = regexp.MustCompile(`^[0-9a-f]{9}f[c-f][0-9a-f]$`)
-
-// canonicalSessionID 把任意会话种子重排成官方格式，并满足免费档的位不变量。
-//
-// 只有位不变量也满足时上游才认它是 OpenCode 客户端。旧实现把摘要前 6 字节直接当
-// 时间戳用——形状永远合法、低 12 位却近乎随机（命中窗口 1/4096），于是「测试全绿、
-// 形状全对、功能全无」：403 的响应体与「压根没发会话头」逐字相同，不报任何原因。
-// 真正官方形状的 id 原样保留（保住上游 prompt cache 亲和），其余一律重排。
+// canonicalSessionID 把任意会话种子映射成 OpenCode 官方格式
+// ses_<12位小写hex><14位Base62>。已是官方客户端签发的 descending 编码则原样
+// 返回（保住 prompt cache 亲和）；其余（含旧实现的摘要段与升序 ID）重编码成
+// 该精确布局。上游自 2026-09-16 起对非该形状/编码的会话头一律回 403 FreeTierError。
 func canonicalSessionID(signal string) string {
-	if officialSessionPattern.MatchString(signal) && gateTimePartPattern.MatchString(signal[4:16]) {
-		return signal
+	// 官方形状：ses_ + 12 位小写 hex（时间戳）+ 14 位 Base62
+	if len(signal) == 4+12+14 && strings.HasPrefix(signal, "ses_") {
+		ok := true
+		for i := 4; i < 16; i++ {
+			c := signal[i]
+			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			for i := 16; i < len(signal); i++ {
+				if !isBase62(signal[i]) {
+					ok = false
+					break
+				}
+			}
+		}
+		if ok && descendingTimePartPattern.MatchString(signal[4:16]) {
+			return signal
+		}
+		// 形状对但编码外来（旧摘要段 / 升序 ID）：落到下面确定性重编码。
 	}
 	sum := sha256.Sum256([]byte("ses\x00" + signal))
 	timePart := descendingTimePart(sum[:6])
@@ -124,20 +145,22 @@ func canonicalSessionID(signal string) string {
 	return "ses_" + timePart + base62Fixed(n, 14)
 }
 
-// descendingTimePart 把摘要字节重排成官方 create(descending=true) 的 48 位布局：
-// 高 36 位放摘要、低 12 位置 counter=1，整字取反 ⇒ 低 12 位恒为 0xFFE。
-//
-// 高 36 位可以用摘要而非真实时钟：实测上游**不校验**时间戳段是否合理
-// （`ses_fffffffffffe…`，即时间戳 0，照样 200），只校验低 12 位那个 counter 窗口。
-// 因此本函数保持纯函数 ⇒ 同一对话恒定同一 id，无需为「每毫秒一个真时钟」引入缓存。
+// descendingTimePart 把哈希前 6 字节渲染成官方客户端 Identifier.descending()
+// 的布局：36 位时间戳移位进 48 位字的高位，OR 上 counter=1，再按位取反，
+// 故末三位恒为 ffe。
 func descendingTimePart(hash []byte) string {
 	current := (uint64(hash[0])<<28 | uint64(hash[1])<<20 | uint64(hash[2])<<12 |
 		uint64(hash[3])<<4 | uint64(hash[4])>>4) << 12
-	inverted := ^(current | 1) & 0xFFFFFFFFFFFF
+	current |= 1
+	inverted := ^current & 0xFFFFFFFFFFFF
 	return hex.EncodeToString([]byte{
 		byte(inverted >> 40), byte(inverted >> 32), byte(inverted >> 24),
 		byte(inverted >> 16), byte(inverted >> 8), byte(inverted),
 	})
+}
+
+func isBase62(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
 }
 
 const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -269,6 +292,9 @@ func (c *Client) headered(req *http.Request, session string) {
 // ---------------------------------------------------------------------------
 
 // ChatStream 改写客户端请求体后转发到 Zen。上游恒为流式，非流式客户端由 Aggregate 收敛。
+//
+// 地区限制自动改道（R62）：直连命中 RegionError 时，在同一次请求内经**备用上游通道**重放一次；
+// 未配置则原样透传。编排与 cline 共用 backuplink.Replay（判据/首因保留/学习路由只有一份实现）。
 func (c *Client) ChatStream(_ *auth.Auth, body []byte) (io.ReadCloser, int, []byte, error) {
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
@@ -285,29 +311,82 @@ func (c *Client) ChatStream(_ *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("oczen: marshal body: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, c.base()+"/chat/completions", bytes.NewReader(out))
-	if err != nil {
-		return nil, 0, nil, err
+	model, _ := obj["model"].(string)
+
+	// 每次 attempt 重新构造请求（体已在内存，重放无需 GetBody）。
+	// cancel 所有权随**本次响应**走：在本函数内包好 idle.Monitor（空闲兜底 + 关闭时取消），
+	// 非 200/传输错误路径就地 cancel。如此不依赖「最后一次 attempt 恰好就是成功那次」这一
+	// 隐式顺序（编排可能连发 1~3 次：直连→备用→回落直连），也避免 ErrNoBackup 等
+	// 提前返回路径漏调 cancel 而泄漏 context。
+	attempt := func(useBackup bool) (*http.Response, error) {
+		req, err := http.NewRequest(http.MethodPost, c.base()+"/chat/completions", bytes.NewReader(out))
+		if err != nil {
+			return nil, err
+		}
+		c.headered(req, session)
+		req, cancel := idle.WithCancel(req)
+		hc := c.HTTP
+		if c.StreamHTTP != nil {
+			hc = c.StreamHTTP
+		}
+		if useBackup {
+			tr, _ := hc.Transport.(*http.Transport)
+			bc := backuplink.Client(tr)
+			if bc == nil {
+				cancel()
+				return nil, backuplink.ErrNoBackup
+			}
+			hc = bc
+		}
+		resp, err := hc.Do(req)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			cancel() // 失败分支在本函数内收尾；200 的取消权随 resp 交给下面的 Monitor
+			return resp, err
+		}
+		resp.Body = idle.Monitor(resp.Body, c.IdleTimeout, cancel) // 流空闲兜底 + 取消权转移
+		return resp, nil
 	}
-	c.headered(req, session)
-	req, cancel := idle.WithCancel(req)
-	hc := c.HTTP
-	if c.StreamHTTP != nil {
-		hc = c.StreamHTTP
+
+	rp := &backuplink.Replay{
+		Kind:    "oczen",
+		Model:   model,
+		Routes:  &c.routes,
+		Attempt: attempt,
+		Blocked: IsRegionBlocked,
+		// 不需要 Wrap：200 的 body 已在 attempt 内包好 idle.Monitor（取消权随响应走）。
+		// 旧实现用 1MB 读错误体（上游错误详情偶尔较长），保持原值以免削弱「原文透传」。
+		MaxErrBody: 1 << 20,
 	}
-	resp, err := hc.Do(req)
-	if err != nil {
-		cancel()
-		return nil, 0, nil, err
+	return rp.Do()
+}
+
+// regionBlockedMarkers 是「换出口 IP 有可能救回来」的地区拒绝文案（触发备用通道重放）。
+//
+// 实测形态：上游以 403 + `{"error":{"type":"RegionError",...}}` 拒绝地域受限的免费模型
+// （如 muse-spark-*-contributor-free）。判据**宁窄勿宽**：命中会多发一发经代理的重放请求，
+// 误判的代价是把流量发到第三方出口，故只认明确的地区/国家语义文案。
+var regionBlockedMarkers = []string{
+	"regionerror", // 实测的 error.type 字面量
+	"not available in your region",
+	"not available in your country",
+	"region-restricted",
+	"geo-block",
+	"geoblock",
+}
+
+// IsRegionBlocked 报告响应是否属于「地域限制」（可尝试经备用通道重试）。
+// 状态码限 403/451：其余状态一律不认（保守，避免把限流/风控误发到第三方出口）。
+func IsRegionBlocked(status int, body string) bool {
+	if status != http.StatusForbidden && status != http.StatusUnavailableForLegalReasons {
+		return false
 	}
-	if resp.StatusCode >= 400 {
-		cancel()
-		defer resp.Body.Close()
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, resp.StatusCode, raw, nil
+	low := strings.ToLower(body)
+	for _, m := range regionBlockedMarkers {
+		if strings.Contains(low, m) {
+			return true
+		}
 	}
-	// 成功分支：cancel 所有权交给 idle.Monitor（其 Close 会 cancel；静默超时也会 cancel）。
-	return idle.Monitor(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
+	return false
 }
 
 // TestKey 用 big-pickle 模型发一次最小对话验证凭证可用性。
@@ -428,6 +507,10 @@ func (c *Client) DailyCheckin(_ *auth.Auth) error {
 //     原文透传、不计错不冷却 —— 这些是请求形态/地域限制，换账号无从规避；
 //     尤其不得归 ErrSessionDead：那会 pool.Disable 永久禁用，而匿名账号不可重登；
 //   - 5xx → ErrServer（server.Runtime 已置 NoCooldownOnServerError，同样不罚账号）。
+//
+// 注：RegionError 现在**多半到不了这里**——ChatStream 会在渠道内部先经备用上游通道
+// 重放一次（R62），成功则客户端拿到 200。只有「未配备用通道 / 备用也受限 / 备用拨不动」
+// 才会把 403 原文交给 handler，此时本条归 ErrPassthrough 的语义仍然正确（不罚账号）。
 func (c *Client) Classify(status int, body string) provider.ErrKind {
 	switch {
 	case status == http.StatusTooManyRequests:

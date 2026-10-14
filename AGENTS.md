@@ -79,6 +79,17 @@ Wild-Work 是 WorkBuddy（国内版+国际版）/TraeWork/Qoder 多渠道账号�
 | R50 | **思考链死循环（发癫）检测：流式逐帧判据 + 中断 SSE + 不罚账号**（2026-10-13，随 v2.7.1 采纳） | 新模块 `internal/loopguard`（算法移植自 dsh-attention-health 的 `lib/guard.js`，只取死循环检测）：四条判据（同行连续重复≥8 且行长≥12 / 60 行窗口内同短行≥30 / 40 行滑窗唯一率≤0.25 / 行内周期 p∈[2,40] 重复≥16 且累计≥160 字）+ 防误杀护栏（周期单元须含字母或汉字、十六进制字节周期豁免、代码围栏内豁免）。接线 `internal/upstream/sse.go` streamCore（九渠道）+ traework `solosse.go` + qoder 系四路 `streamAsOpenAI` + raccoon/loomy；**glm 跳过**。**命中**：发一帧 `code=upstream_reasoning_loop` 的 OpenAI 规范 error、**不补 `[DONE]`**、返回 `*loopguard.Error`。**不罚账号**：该类型**刻意不实现** `provider.StreamErrorClassifier`——死循环是模型/请求级问题，换号必然复现，冷却只会把后续请求挡成 `503 no_healthy_account`（R16/R38 同族）。**零误伤**：只在 `reasoning_content` 非空时喂入。开关 `config.features.loop_guard`（默认 true）+ `POST /api/config/loop_guard` 热切换（atomic 全局，无需重启）+ env `WILDWORK_LOOP_GUARD=0`。⚠️ **上游未做实盘触发验证**（死循环难以稳定复现），阈值待社区反馈校准 |
 | R51 | **OpenRouter 系思考字段归一化到 `reasoning_content` 单字段下发**（2026-10-13，PR #100，随 v2.7.1 采纳） | Cline 免费池（Cline→OpenRouter→Meta）的思考增量字段是 `delta.reasoning` / `delta.reasoning_details`，**不是**本仓历史唯一形态 `delta.reasoning_content` ⇒ 思考文本被**静默丢弃**（客户端看不到思考、`usage.reasoning_tokens` 却非零），且 loopguard 在该渠道**永远喂不进**——同一根因的两面。新增 `upstream.reasoningDeltaOf`（优先级 `reasoning_content` > `reasoning` > `reasoning_details[type=reasoning.summary]`；三者同帧并存时逐字相同故取首个，`reasoning.encrypted` 是回放密文、无可读文本不取），流式逐帧 `normalizeFrame` 与非流式 `Aggregate`/`mergeMessageFields` 两路同改；`loopguard.ReasoningDeltaOf` 同步三字段。方向选「归一化**到** `reasoning_content`」而非透出 `reasoning`：九渠道白名单、loopguard、gateway Anthropic 转换共同认定它是唯一字段 |
 | R52 | **「完整模型 ID」补渠道前缀的判据是「是否已以该渠道前缀开头」，不是「ID 含 `/`」**（2026-10-13，PR #102 + 补漏，随 v2.7.1 采纳） | **这条命中的正是本地 §10 L11 缺陷②**：本地 `Fees.jsx:modelIds()` 先修掉了「含斜杠即视为已带前缀」的错判据（那会复制出 `cline-free/grok-4`，而 `runtimeForModel` 按**第一个** `/` 拆渠道 ⇒ `provider "cline-free" is not configured`）。上游的契约更完整一层：**已以 `ch/` 开头的名字必须原样保留**，否则重复拼接成 `workbuddy/workbuddy/*`。本地 `modelIds()` 已按此补 `startsWith` 护栏，费率表与模型查找两处同源（`collectAllModels` 也走它）。回归 `webui/tools/render-check.mjs` 场景 6 的双向用例 |
+| R53b | **OpenCodeZen 免费档会话头须是官方 `Identifier.descending()` 编码，非仅 `ses_` 外形**（2026-10-14，用户报 `403 FreeTierError`，上游官方 PR #69/#70） | **现象**：oczen 全部对话恒 403「OpenCode's free tier can only be used from within OpenCode」。**根因**：免费档不仅校验会话外形 `ses_<12位小写hex><14位Base62>`，还把 12 位 hex 时间戳段**解码**成官方客户端 `Identifier.descending()` 的值——`~(unix_ms<<12|counter)` 取低 48 位，故末三位是 `0xFFF-counter`；实测只接受 **counter 1–63**（末三位 `0xFC0–0xFFF`），超出即判非官方客户端 403。旧实现的时间戳段是 `sha256` 摘要前 6 字节（随机 hex），落进被拒窗口 ⇒ 恒 403。**修法**（移植上游 #70 终态，非 #69 的钟表铸造版）：`canonicalSessionID` 保留真正 descending 编码的官方 ID，其余（摘要段 / 升序 ID）确定性重编码——哈希前 6 字节按 `descendingTimePart` 渲染成 36 位时间戳移位进 48 位字高位、OR counter=1、按位取反（末三位恒 `ffe`，counter 落在允许窗口）。判定用 `descendingTimePartPattern = ^[0-9a-f]{9}f[c-f][0-9a-f]$`（覆盖 counter 1–63）。确定性 ⇒ 同一会话仍稳定映射同一 session（prompt cache / key 亲和不破）。**接线点唯一**：`internal/oczen/client.go` `canonicalSessionID`（ChatStream / TestKey / FetchModels 三处共用）。**合并期实测复核（2026-10-14，本仓）**：直连上游逐值对照——`ses_ecc5beb7cffe…`（counter=1）200、`ses_4892557ffffe…`（counter=48）200、`ses_ecc1f76c9f9b…`（counter=100）403、两个旧摘要段形态均 403 ⇒ 上表判据与修复均成立，非推断。回归：`TestCanonicalSessionIDKeepsGenuineDescendingIDs`（官方编码原样保留）/ `TestCanonicalSessionIDReencodesForeignEncodings`（摘要段+升序 ID 重编码且不保留原值）/ `TestDescendingTimePartLayout`（末三位 `ffe`）+ 实盘 `internal/oczen/live_test.go`（`-tags live` + `OCZEN_LIVE=1`，已实跑通过） |
+| R53 | **usage 缓存计量只归一化「形状」不得改语义；取数逻辑收敛为唯一真源**（2026-10-13，issue #104） | **背景**：trae 系（traework/traecode）上游下发的是 **Anthropic 命名**的缓存字段（`cache_read_input_tokens` / `cache_creation_input_tokens`），而内层原样透传 ⇒ 下游按 OpenAI 规范解析（DSH 实测读法 `prompt_tokens_details?.cached_tokens ?? prompt_cache_hit_tokens ?? 0`）两条都命中不了 ⇒ **命中率恒 0%、prompt 全按未缓存计价**（以其价表 input 0.165 vs cacheRead 0.0033 计，费用高估约 50 倍）。**注意 issue 的定位不准**：它指向 `internal/upstream/sse.go`，但 trae 系根本不走那里（走 `internal/traework/solosse.go`），照抄会修不到。**决策一：归一化方向是「内层补齐 OpenAI 形状」，不是「让下游兼容 Anthropic」**——后者要改所有客户端，且与 OpenAI SDK / AI SDK / DSH 的实际读法相悖。新增 `provider.NormalizeUsageShape`（优先级 `prompt_cache_hit_tokens` > 顶层 `cached_tokens` > `cache_read_input_tokens`；**只在目标子字段缺失时写入**、**原始字段一律保留**、**认「字段存在」而非「值 > 0」**——0 是有效值）。接线：traework 流式在 **token_usage 捕获点**归一化（覆盖 onUsage 回调 / 返回值 / 不含 done 的异常收尾三条路径）+ 非流式 Aggregate 出口。**决策二：缓存取数收敛为唯一真源 `provider.ExtractUsageCache`**——此前面板 `server.cacheUsageOf`、`/v1/responses`、`/v1/messages` **各写一套优先级且已开始漂移**（两个转换器先读顶层裸 `cached_tokens`，而它在 workbuddy 系实测恒 0 是噪声，会把真值掩盖；且用 `> 0` 判定会把「明确未命中」丢成「未提供」，违反不变量 24）。收敛后三处必然同源。**决策三：`/v1/messages` 的 `input_tokens` 必须扣减缓存**——Anthropic 的 `input_tokens` 是「未命中且未写入」的那部分，客户端自行相加还原总输入；而内层 `prompt_tokens` **已是总输入**（命中是其子集）。**不下发 cache 字段**（费用高估）与**下发了却不减**（客户端求和近两倍）都是错的，故 `input_tokens = prompt_tokens − cached − write`，三段相加恒等于原 `prompt_tokens`（钳 0 防坏数据）。回归：`internal/provider/usage_test.go`（含 trae 真帧 / 显式 0 / 幂等 / 坏数据）、`internal/traework/usage_cache_shape_test.go`（双出口）、`internal/gateway/usage_cache_test.go`（responses：噪声字段优先级 + 显式 0）、`internal/gateway/anthropic_usage_test.go`（messages：三段守恒 + 非负 + 流式），四文件回退到修复前**新测试全部失败**（已反向验证） |
+| R54 | **模型降级链只在「模型全冷」触发：不粘滞自动切回，降级必须可感知**（2026-10-14，PR #106 + 收尾） | **需求**：主模型被时段性平台频控全池冷却（6004/14003）时 fail-fast 503 打断 agent 任务；用户可预配有序备胎链（`config.model_fallback[]`，`{from,to[]}` 全局唯一、不自环、`channel/model` 全路径，面板可视化编辑 + `POST /api/config/model_fallback` 热生效）。**触发判据**：`runtimeCapacity` 一次 `Pool.List()` 同时得 hasHealthy 与 modelAvail（口径同 no_healthy_account「模型全冷」分支），仅 hasHealthy && !modelAvail 才查链；未配置规则时零探测（「正常路由零开销」承诺）。**不粘滞**：每请求按原模型重判，解冻自动切回（与 R29 分层：粘性是账号级、降级是模型级且用户显式配置）。**感知通道双保险**：① 响应头 `X-Model-Fallback: 请求模型 -> 备胎`（内层 WriteHeader 前设置；**兼容层必须在 `callChat` 统一转写**——/v1/responses、/v1/messages 响应体由网关重建且 model 回填请求名，不转写 = 对 Codex/Claude Code 静默换模型，PR 原版漏了这层）；② chat 面响应体 `model` 字段写备胎全路径（agent 读 chunk.model 即可感知）。**恢复探针只认 primaryAvail**：「未降级」≠「已恢复」——原模型仍全冷但备胎也没容量、或整渠道无健康账号时不得关事件（PR 原版 else 分支无条件调 NoteFallbackRecovery ⇒ 面板先显示恢复再重开一条、持续时长失真，已修）。**记账口径**：token 流水仍按客户端请求名（面向「这一发花多少」），实际执行模型走日志行 + 面板「降级记录」区块（内存环形 200 条、重启清零）。**已知限制**：无规则时不做容量探测 ⇒ 删规则后残留进行中事件不自动关（环形淘汰）；To 不做模型存在性校验（错名吃上游权威错误或本地 400）；备胎配额/余额不预判（容量仅看冷却态）。回归：`model_fallback_test.go`（触发/链序/热更新/切回/跨渠道隔离 + 恢复不谎报）、`stats/fallbacks_test.go`、`gateway/fallback_relay_test.go`（四端点转写 + 无降级不造头）、`scripts/ui-static-check.mjs` 面板接线 9 条 |
+| R55 | **traework/traecode 模型元数据取上游下发；展示用字段必须容错承接，不得拖垮整张目录**（2026-10-14，PR #108 + 收尾） | **背景**：`poolEntry` 只解析 config_name + display_name ⇒ 两渠道 118 个模型全无 context_length/max_output_tokens、图片能力恒 false（客户端误判不能发图、或因上下文未知过度压缩）。**上游证据**（实测 `get_detail_param` HTTP 200/1.35MB/71 条）：`context_window_tokens.{dev,max}`、`display_config.multimodal`、`model_detail_list[].max_tokens`。**折算口径**（对齐不编造原则）：ctx 取 max 档、缺省回 dev、双缺省不填；max_tokens 为 0 不填；`ContextFromAPI` 仅在解析到容量时置 true；multimodal 直取上游布尔。**关键教训——爆炸半径**：强类型结构会因上游形状突变（对象→标量）让整批 unmarshal 失败 ⇒ `fetchModelsForPool` 报错 ⇒ 本渠道池整体拉不到；而这两个字段只是展示用增量信息，故用 `json.RawMessage` 承接、解析失败只丢该字段（同 qodercn.parseContextConfig 既有手法，不变量 5 同族哲学）。回归：`modelmeta_test.go`（容量折算四形态 + 三种形状突变，去掉 RawMessage 即失败）。`display_config.model_capability`（reasoning_model/chat_model）已解析未消费，仅记录上游形态 |
+| R56 | **tool schema `$ref` 全量内联消毒：moonshot 系对任何保留的 `$ref` 都不认账**（2026-10-14，PR #109 + 收尾） | **背景**：Kimi/Moonshot 系（trae solo 后端）对 `tools.function.parameters` 含 `$ref` 即按「moonshot flavored json schema」展开校验，不收敛整体 400 `code=4027 detected infinite recursion`；官方客户端不发 `$ref`，代理客户端（经 MCP 接入）会发。**两版演进**：v1 只打断成环、保留非环 `$ref` —— 生产实测被否（3 个 `ref_before=1` 的 tool 放行后仍 4027）；v2 全量内联：所有本地 `$ref` 就地替换为目标消毒副本，展开链成环处（含 `#`）截断为空 schema（JSON Schema 语义 = 接受任意值），非本地/不可达/超预算（4096）同样截断，结果零残留；语义损失仅限递归分支处。**要点**：不按模型名门控（客户端可用不含 kimi 的自定义别名）；支持 parameters 预序列化字符串形态（原样透传会绕过消毒）；时序在 `normalizeTools` 字符串化之前；`$ref` 兄弟键按 draft-07 丢弃。**零改动原则（收尾补上）**：无 `$ref` 的请求一个字节不动——回写 Marshal 结果会重排键序、改写数字字面量（1e9→1e+09）污染上游 prompt 缓存前缀，string 形态旧版还按工具数刷日志（agent 一发 20 工具 = 20 行 app.log）；同样口径下空串 parameters 不记「str-unparsed」。**PrepareBody 改写数由三变四**（不变量 1）。回归：`schemacycle_test.go`（自引用/互递归/菱形/根引用/非本地/预算/字符串形态/端到端 14 用例）+ `TestBreakToolSchemaCycles_LeavesRefFreeParamsUntouched`（无 `$ref` 逐字节不动）；生产实测同形态请求消毒后 0 次 4027 |
+| R57 | **代理配置改为「全局备用上游通道」：默认不参与任何请求，仅渠道按需取用（当前 cline 与 oczen）**（2026-10-14，用户裁定） | **动机**（旧「每渠道代理」的三处实证缺陷）：① 面板 12 行输入，而热更新接线表只覆盖 9 行（`monkeycode/raccoon/loomy` 改代理不生效、需重启），`trCodeUp`（TraeCode 自己的 client 实例）**两张表都没进** ⇒ 该渠道代理从未生效（R34 同族静默失效）；② `SetTransportProxy` 每次保存都**新建 Transport**，杀光 idle 连接且要手工继承 `ResponseHeaderTimeout`（oczen 120s 的特例注释就是这个补丁）；③ 对用户是 12 个概念，实际只需要一个。 **新语义**：`config.backup_proxy` 单一地址（http/https/socks5）= **备份链路**，由 `internal/backuplink` 原子持有；**不影响本工具的任何请求**，仅由渠道自行判定后按需取用（`backuplink.Client(base)` 克隆渠道自己的 Transport、只改出口 ⇒ 除 IP 外与该渠道出厂行为同构，不引入新超时/协议差异）。当前唯一取用方 cline：`ChatStream` 直连命中 `IsRegionBlocked`（403/451 + 保守文案表 `regionRetryMarkers`，比 `regionBlockedMarkers` 严——判据宽了会把非地区错误也发到第三方出口）⇒ **同一次请求内**用备用链路重放同一 body。 **三条硬约束**：① 未配置 / 重放拨不动 / 重放仍被地区拒 ⇒ **透传直连那份**原始 status+body（R37：不得用第二次尝试的错误掩盖首因；代理故障只进日志）；重放拿到**不同的**上游答复则以它为准；② 重放只换出口 IP、**不是换账号** ⇒ handler 挑号/惩罚/粘性路由/R29 轮换语义零改动，地区限制继续不罚号（R46 的 `ErrPassthrough` 不变）；③ 命中一次后 6h 内该模型**直接走备用**（免每发先白撞一发 403：既省 0.3~2s，也避免在上游留重复失败特征），`backuplink.Generation()` 一变即作废；备用链路自身不可用（拨不动、或上游改到只对备用出口挂地区限制）⇒ 立即作废学习结果并**本轮回落直连**（代理故障不得把本来可用的模型钉死，也不能等 TTL 到期）；反过来主链路（直连）拨不动仍按传输层错误冒泡，交给 handler 计错/换号。 **oczen 不接**：其上游对抗策略已变更、渠道当前不可用，`RegionError` 继续按 R16/不变量 22 原文透传；待恢复后自行取用 backuplink（本包零接线，无需改 main）。 **清理**：删 `config.proxies`、`applyProxies`/`applyProxyToKind`/`SetTransportProxy`/`proxySyncer`、`POST /api/config/proxies`、面板 12 行输入。旧 `proxies` 段在 `normalize` 一次性迁移进 `backup_proxy`（优先 cline 的值，其余渠道地址**丢弃**并在日志点名：除 cline 外的渠道不再支持代理）；旧值不合法则不迁移只记日志（不把启动拉死）。新端点 `POST /api/config/proxy`（同时承载 oczen key），`/api/state` 回 `backup_proxy`/`backup_proxy_active`。 **已知限制（如实披露）**：登录编排（`login_*/NewClient`）、CDP、面板内凭证测试仍不吃备用通道（保持「只服务上游通信」的边界）；若某渠道连登录都被地区拒，本设计无法解决。 **回归**：`internal/backuplink/backuplink_test.go`（判据唯一来源/未配置零影响/generation 递增/按 base 复用连接池）、`internal/cline/backup_proxy_test.go`（假上游 + 假转发代理 8 例，去掉重试分支即失败）、`cmd/wild-work/transport_test.go`（凡进 runtimes 的渠道必须进 wrapDumps 表，并禁止再出现按渠道套代理的接线）、`internal/config/backup_proxy_test.go`、`internal/app/backup_proxy_test.go` |
+| R58 | **流被截断必须自证原因：空闲看门狗掐的 ≠ 上游断的；`stream_idle_seconds` 配置项从未存在，注释是空头支票**（2026-10-14，现场 QoderCOM 截断排查） | **现场**：`Qwen3.8-Flash (QoderCOM)` 输出一部分后客户端报 `Error: upstream stream truncated`。**根因一（诊断缺口）**：qoder/qodercn/qodercom/qwenwork 四个 `streamAsOpenAI` 把 `parseNestedSSE` 出参 `truncated` 当成唯一信息，收尾分支写**固定串** `"upstream stream truncated"` 且 `return errors.New("upstream stream truncated")` —— **原始 err 被彻底丢弃**，而该 `truncated` 同时覆盖「传输层读错误」「EOF 停在半帧」两种来源，于是三种完全不同的故障在日志与客户端**完全同形**：① 空闲看门狗主动掐的（`internal/idle` 连续无字节 300s，疑似上游排队/卡死）；② 上游主动断连（connection reset / unexpected EOF）；③ 读到半个帧就 EOF。与 `internal/upstream/sse.go:718` 保留 `err.Error()` 的做法不一致（R36 家族）。**根因二（判据不可达）**：`internal/idle` 看门狗唯一的动作是 `cancel()` 请求 context，在途 `Read` 返回的是 **`context canceled`**（httptest 真实链路实测，非推断），而 `provider.IsIdleTimeout` 只认 `errors.Is(err, ErrIdleTimeout)`（那个变量只有 `IdleReader` 家族会返回）⇒ **看门狗掐断在语义上根本认不出来**，即便保留了 err 也只是印一句 `context canceled`，反而更容易被误读成「客户端断开」。**修法**：① `provider.IsIdleTimeout` 扩展识别 idle 看门狗族（`context.Canceled` / `context.DeadlineExceeded` / `net.ErrClosed`），并在注释里写明「认不出则两种故障同形」；② 新增 `provider.TruncationCause/TruncationError/TruncationCode/TruncationFrame/WriteTruncationFrame` 一族：错误文本保留原因、空闲超时**统一归一成 `upstream stream idle timeout` 措辞**（不直写 `context canceled`，否则日志检索漏一半）、出口帧 `code` 分流为 `upstream_timeout` / `upstream_truncated`、帧体走 `json.Marshal` 而非字符串拼接（原因文本含引号/反斜杠时会造出坏 JSON 帧）；③ 四个渠道的截断分支改调该族，与 `internal/upstream/sse.go` 口径对齐。**⚠️ 刻意不动 qwenwork 的两处差异**：它的截断处理与 qoder 三兄弟**是两套独立实现**（`qwReadErr`/`qwCut` 测试夹具与 qoder 不同，行号 333 vs 279），故四处分别改而非抽公共包——本仓渠道包历来不共享 SSE 实现（R36 同款处置）。**根因三（空头支票注释）**：cline/loomy/raccoon/monkeycode 的 `Client.IdleTimeout` 与 `DefaultIdleTimeout` 注释都写着「由 main 注入 `config.upstream.stream_idle_seconds`」，但 `config.Upstream` **只有 `timeout_seconds` 一个字段**、`main.go` **零处赋值** ⇒ 阈值恒为硬编码（idle 包 300s / 四渠道 90s）。按用户裁定**清理注释而非补配置项**（不新增用户概念）：改成如实写明「目前没有配置项，恒取默认值」。**日志补强（同一现场的可观测性）**：`stream relay end` 原先只打 `err`，现补 `model` / `elapsed=%.1fs` / `ttfb=%dms` —— 只有这两个数字能把原因分开：**耗时 ≈ 空闲阈值且 TTFB 远小于它 ⇒ 看门狗掐的；耗时远小于阈值 ⇒ 上游自己断的**。**已知限制（如实披露）**：`elapsed` 含上游首字节等待时间，若「排队」发生在响应头之前（qoder 三渠道 Transport **未设** `ResponseHeaderTimeout`，该阶段实际无上限）则耗时会被首字节等待抬高，判据需结合 TTFB 一起看；空闲阈值仍不可配（要改需改常量或补配置项）。**回归**：`internal/provider/truncation_test.go`（看门狗族识别 + 四种原因的文本/错误码/`errors.Is` 穿透 + 恶意原因文本仍产出合法 JSON + 帧不含 `[DONE]`）、`internal/qoder/idle_truncation_test.go` 及 qodercn/qodercom/qwenwork 三份同源副本（**走真实 httptest + `idle.Monitor` 链路**，而非假 reader——只有真实链路能证明「看门狗 cancel → 在途 Read 返回 `context canceled` → `IsIdleTimeout` 认出 → `code=upstream_timeout`」这条链成立；假 reader 直接返回 `provider.ErrIdleTimeout` 会绕开最关键的一环）+ 对照用例「上游主动断连必须落 `upstream_truncated`」。**已双向验证**：临时把 `IsIdleTimeout` 的扩展判定改回 `return false`，四渠道用例与 provider 用例全部失败（错误文本退化成 `context canceled`、出口帧 code 变 `upstream_truncated`）。 |
+| R59 | **Cline 渠道对外模型 ID 直通上游命名空间：`cline-free/*`（不再拼 `cline/`），旧双层写法保留路由兼容**（2026-10-14，用户裁定） | **背景**：Cline 上游免费池的模型 ID 自带命名空间（`recommended-models` 的 `free[]` 原样透传，见 R46），而 R52 的「kind 永远是第一个路径段」把对外 ID 变成了 `cline/cline-free/*` 双层路径。用户裁定：**本渠道特殊处理，模型 ID 直接透传上游前缀**（面板点击复制的就是客户端要填的串），避免双层路径这种反直觉形态。**契约（唯一判据在 `provider`）**：`provider.PublicModelID(kind, upstreamID)` = 上游 ID 自带已声明命名空间时原样返回，否则拼 `<kind>/`；`provider.SplitModelID(model)` 反向解析为 (渠道, 上游模型名)，接受两种写法：`cline-free/x` → (cline, **整串**) 与 `cline/cline-free/x` → (cline, 去一层后的 `cline-free/x`)。**兼容**：旧写法不失效——老配置的 `model_map`、降级链规则、老客户端都是那种写法，路由/网关/降级链匹配全部经同一解析器。**接线（6 处必须同源，R52 就是漏了一处）**：① `server.buildModelEntry`（`/v1/models`）；② `server.runtimeForModel`（同时它是**降级链** `pickModelFallback` 的解析器）；③ `gateway.Router.Resolve`（三接口兼容层的前缀校验 + `default_channel` 兜底拼接改用 `provider.ModelIDPrefix`，否则裸名会被拼成 `cline/<x>`）；④ `app.buildFeesChannels` 新增 `id` 字段（客户端要填的完整 ID），面板两处复制改为**直接用 `m.id`**、不再在前端拼前缀；⑤ `stats.channelOfModel`（否则 `cline-free/*` 不进平台表——顺带修了一个既有 bug：`channelKind` 白名单漏 `cline`，cline 的 token 一直不进平台行）；⑥ handler 的统计/流水归行改用 `provider.CanonicalModelID`（新旧写法必须落同一行，否则同一模型在用量榜裂成两行）。**回归**：`internal/provider/modelid_test.go`（两个方向的解析 + 归一 + 前缀）、`internal/server/model_id_contract_test.go`（`/v1/models` 只广告上游 ID；两种写法端到端都能 200 且**发给上游的 model 是 `cline-free/*`**）、`internal/gateway/gateway_test.go:TestModelResolutionClineNamespace`（命名空间放行 + default 前缀）、`internal/stats/usage_test.go`（两种写法都归到 cline）、`scripts/ui-static-check.mjs`（两处复制断言 `cline-free/*`） |
+| R60 | **「单号渠道 402」的处置是模型级冷却，不是账号级、也不是纯透传**（2026-10-14，PR #113 + #114 合并期裁定） | **背景**：402（权益不足/欠费）此前不在任何冷却/降级触发条件内，存在两个缺口。**缺口一（流内嵌错误无法分类）**：qwenwork 等渠道的 402 以 HTTP 200 + 流内 envelope 形式返回，`parseNestedSSE` 剥壳后以裸 `fmt.Errorf("upstream %d: %s")` 返回 ⇒ handler 三条错误路径的 `errors.As` 全部错过。**修法**：改抛 `*sseError` 并实现 `provider.StreamErrorClassifier`（`Kind()` 返回 `Classify(status, msg)`），错误文案保持 `upstream <status>: <msg>` 不变（客户端可见文本零变化）。**缺口二（单号渠道 402 只透传、不冷却）**：原策略「单账号不罚账号、原文透传」对 402 不适用——账号本身健康，死的只是「账号×该模型」组合，不冷却则每次请求继续撞 402、降级链永不触发。**修法**：三处接入 `CooldownModel(uid, model, HardCooldown)`——① 预流式 `SingleAccount` 分支（`kind == ErrHardCredit` 时冷却该模型、本次仍原文透传）；② 流内 `len(Pool.List()) <= 1` 分支（**去掉 `&& !rt.SingleAccount` 限定**，冷却后透传）；③ `Aggregate`（非流式）出口用 `errors.As` 取分类后同样冷却。**关键边界（必须与不变量 22 合读）**：冷却的是**模型级**条目，账号本身照旧不罚 ⇒ 同号其他模型照常可用，不变量 22 的「不得施加任何账号级惩罚」未被违反；仅当短时间内第二个模型也撞墙时由 `CooldownModel` 既有逻辑升级整号（那才是账号级）。**适用范围比字面更宽**：`SingleAccount` 渠道与「池内只有一个账号」的普通渠道（qwenwork 单号）同受益。回归：`internal/qwenwork/stream_truncation_test.go` 分类断言、`internal/server` 相关用例 |
+| R61 | **模型降级链必须在启动时载入，不得只靠面板保存的热更新通道**（2026-10-14，PR #112） | **缺口**：`server.Config.ModelFallbacks` 字段注释声明为「降级链初始值」，但 `cmd/wild-work/main.go` 构造 `server.Config` 时**从未赋值**；降级链唯一生效通道是 `appInst.SetModelFallbackSyncer`（面板保存触发）。⇒ **进程重启后 handler 内降级规则为空，已配置的降级链静默失效**，直到用户在设置面板重新保存一次才恢复（R34/R41 同族的「声明了却没接线」）。**修法**：装配处补 `ModelFallbacks: cfg.ModelFallback`，与热更新通道并存（后续保存仍走 syncer 覆盖）。**通用教训**：凡「配置项 → 内存态」的注入，**启动路径与热更新路径必须各有一条**，只实现后者等于把功能做成「保存过才生效」。 |
+| R62 | **OpenCodeZen 同接「备用上游通道」：免费档地域受限模型同请求内自动换出口重放；编排抽到 `backuplink.Replay` 与 cline 共用**（2026-10-14，用户裁定） | **背景**：2.7.2 修复 oczen 免费档后，该渠道的部分免费模型（`muse-spark-*-contributor-free` 实测）直连仍回 403 `{"type":"error","error":{"type":"RegionError"…}}`；用户要求 oczen 也走备用通道（未配全局代理时本次验证用 `http://127.0.0.1:10809`）。**为什么抽公共编排而不是复制一份**：这套规则的语义很细（① 未配/拨不动/备用同样受限 ⇒ 交出**直连那份**原文，首因不被第二次尝试掩盖；② 备用自身不可用 ⇒ 作废学习结果并**本轮**回落直连；③ 只有备用确实给出可用答复才记学习结果；④ 学习结果随 `backuplink.Generation()` 作废），分散两份必然改一处漏一处（R52 的教训）。故新增 `internal/backuplink/route.go`：`Replay`（编排）+ `Routes`（学习路由，6h TTL、按 generation 作废），渠道只提供 `Attempt`（用给定出口发一发）与 `Blocked`（什么算地区限制）两件渠道相关内容。cline 改为调用它（行为不变，原有 8 例回归全绿），oczen 新接入。**oczen 侧判据**（宁窄勿宽：命中会多发一发经第三方出口的请求）：仅 403/451 + 文案含 `regionerror`/`not available in your region|country`/`geo-block` 才算——`FreeTierError`（会话形态）与 429 一律不重放。**与单账号豁免的关系**：备用通道只换出口 IP、**不涉及账号**，故 `SingleAccount` 语义不变；改道发生在渠道内部（`ChatStream`），成功时 handler 完全看不到 403，失败时仍按 R16/不变量 22 原文透传（`Classify` 的 `ErrPassthrough` 注释已同步说明）。**实现细节**：oczen 的 `attempt` 把 `idle.WithCancel` 的 cancel **随本次响应走**（在 attempt 内包 `idle.Monitor`，非 200/失败路径就地 cancel），不依赖「最后一次 attempt 恰是成功那次」的隐式顺序，也避免 `ErrNoBackup` 提前返回路径漏调 cancel 泄漏 context。**实盘验证（独立实例 + 真实上游 + 10809）**：未配代理时 mimo 200 / muse 403 原文透传（日志「未配置备用上游代理，原样透传」）；配代理后 mimo 仍直连 200（不误伤），muse 日志变为「经备用通道拿到上游答复 status=400」（= 流量确已换出口、拿到上游**新**答复）；关代理后回到 403 透传。**已知限制（如实披露）**：`muse-spark-*-contributor-free` 经该出口被上游判 400 `ModelProtocolUnsupported`（同一出口下 mimo/big-pickle/nemotron 均 200）⇒ 本工具的职责边界是「换了出口、把上游权威答复原样交出」，模型在某个出口下能否用由上游决定，本工具不承诺。**回归**：`internal/oczen/backup_proxy_test.go`（7 例：无代理透传 / 配代理改道成功 / 学习路由免白撞 / 双链路受限保留首因且不学习 / 非地域 403 绝不重放 / 备用拨不动保留首因 / 判据单测）、`internal/cline/backup_proxy_test.go`（重构后仍全绿）、`internal/backuplink/route.go` 由两渠道共同覆盖。 |
 
 ## 2. 架构选型（依据）
 
@@ -149,7 +160,8 @@ POST /api/config/autostart         # {on:bool}
 POST /api/config/compat            # 模型路由（默认渠道 / 封顶 tokens / 映射表）
 POST /api/config/expiring_days     # {days} 临期阈值
 POST /api/config/loop_guard        # {on:bool} 思考链防癫热切换（R50，atomic 全局、无需重启；GET /api/state 回读 loop_guard）
-POST /api/config/proxies           # {proxies:{channel:url}} 单渠道上游代理
+POST /api/config/proxy             # {proxy,oczen_api_key?} 全局备用上游通道（R57；空串 = 关闭）
+POST /api/config/model_fallback    # {rules:[{from,to[]}]} 模型降级链（R54，保存即热生效）
 POST /api/config/oczen_test        # {api_key} OpenCodeZen 凭证连通性测试
 GET  /api/fees                     # 渠道费率（本地缓存 + 按需刷新）
 POST /api/fees/refresh             # 异步刷新费率
@@ -250,7 +262,7 @@ POST /api/quit                     # 退出程序
    `dist/` 在 `.gitignore` 中，CI 只产出带平台后缀的 `wild-work-<os>-<arch>`，
    **不会**生成 `dist/wild-work.exe`——该文件只能手动构建。
    不重建会导致：本地运行的二进制与源码不一致（例如改了版本号但仍显示旧版本）。
-1. `PrepareBody` 三改写勿动：强制 `stream=true`、`tool_choice` 归一化、`developer→system`
+1. `PrepareBody` 四改写勿动：强制 `stream=true`、`tool_choice` 归一化、`developer→system`、tool schema `$ref` 消毒（R56，无 `$ref` 时零改动）
 2. 日志/面板/消息框**零 token**：不得输出 access/refresh token（调试用假 token）
 3. auth 文件嵌套格式 `{auth:{...},account:{...}}`，`internal/auth.Parse` 与 login.SaveAuth 必须一致
 4. `config.listen` 兼容新对象格式 + 旧字符串格式 `":7863"`
@@ -300,6 +312,7 @@ POST /api/quit                     # 退出程序
     - 启动时 `Pool.ClearPenalty(uid)` 自愈旧版遗留冷却（`SetDisabled` 只清禁用，不清冷却）。
     - **严禁**把 401/403 归为 `ErrSessionDead`（会 `pool.Disable` 永久禁用且无法人工恢复）。
     - `oczen.Classify` 仍做语义分类（供日志），但**不再用于决定惩罚**（惩罚判定前已短路）。
+    - **2026-10-14 澄清（PR #113）**：“不施加账号级惩罚”不等于“什么都不冷却”——`ErrHardCredit`（402 权益不足）的处置是**模型级**冷却（`CooldownModel`，账号×该模型），账号本身仍不动。适用面比字面更宽：`SingleAccount` 渠道与「池内只有一个账号」的普通渠道（如 qwenwork 单号）都在其列。这是对 R16「4xx 一律 `ErrPassthrough`」的局部例外，理由见 R60。
 23. **Qoder 双区签到只能走 campaigns，且状态必须结构化上报**：
     - **绝不调用 legacy `daily-check-in/claim`**：该端点已全局 DISABLED，却对未领取日恒返回 409，
       会被误判成「今日已领取」而跳过真实领取 → 假成功、零积分（上游 `99ab022` 同款结论，2026-09-21 抓包实测）。
@@ -314,6 +327,24 @@ POST /api/quit                     # 退出程序
       直到全部账号达 `claimed`/`already` 才算当日完成（上游 `ae3d42f` 修的就是漏领一天）。
       完成标记按「日期+时段」而非仅日期——本工具支持一天多时段（09:00/21:00），
       只按日期标记会让早间成功吞掉晚间时段。
+24. **缓存字段是「可选上报」，不得把「不提供」显示成『0%』**：上游 usage 里是否回缓存命中字段
+    因渠道而异（实测：WorkBuddy 系 `prompt_cache_hit_tokens`、Trae 系 `cache_read_input_tokens`、
+    其余 `prompt_tokens_details.cached_tokens`；小浣熊回**空对象**、清言/Loomy 整条流无 usage）。
+    判定集中在 `internal/server/cacheusage.go`，必须区分两种情形：
+    - 「字段存在但为 0」（如 `prompt_cache_hit_tokens:0`）= 上游明确的「本轮未命中」⇒ 显示 0%；
+    - 「字段不存在 / details 为空对象」= 上游不提供该维度 ⇒ 显示「—」，**绝不得显示 0%**。
+    落地细则：`UsageEntry.CRC` / `ModelStat.CRCov` / `TokenStats.CRCov` 为零即代表「无样本」；
+    利用率 = `CR ÷ CRCov` 的**加总口径**（未上报的请求整条不进分母，不稀释命中率）；
+    三个字段一律 `omitempty`，保证旧流水读出来就是「未上报」（不变量 5 的向后兼容落地）。
+    **分母不得做 `PT + cacheRead`**：实测 workbuddy 系 `hit+miss==prompt_tokens`、
+    trae 系 `total==prompt+completion` ⇒ 命中数是 prompt_tokens 的**子集**（与 Anthropic
+    官方口径相反）。副产品：利用率恒 ∈ [0,1]。回归测试 `internal/server/cacheusage_test.go`、
+    `internal/ledger/cache_test.go`、`internal/stats/cache_test.go`、`scripts/ui-static-check.mjs`。
+    **唯一会重建 usage 的渠道是 monkeycode**（只拼 pt/ct/total）⇒ 搬字段必须显式加，
+    否则上游给的缓存数据在网关内部就被丢掉（本项就是它被发现的原因）。
+    > 本仓**不采纳** `scripts/ui-static-check.mjs` 的上游更新（L11/L12 的孤儿脚本，驱动的是冻结
+    > vanilla），面板侧的同款三态判据在 `webui/src/components/CacheCell.jsx` + render-check 场景 7；
+    > `internal/server/cacheusage_test.go` 等 Go 侧用例照常采纳。
 
 ## 7. 平台能力差异表（internal/platform）
 
@@ -377,7 +408,7 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项（R1–R52）、架构选型、不变量
+- [AGENTS.md](AGENTS.md) — 本文件：决议项（R1–R62）、架构选型、不变量
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 - [docs/前端React重构架构计划.md](docs/前端React重构架构计划.md) — React 重构的选型签核（R5 被推翻的那次）、逐阶段 DoD 判定、
@@ -416,7 +447,7 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 ## 10. 本地分叉（相对上游 rockswang/wild-work）
 
-> 本节只描述**本地独有**的约定与偏离；上游决议 R1–R43 一律照上游采纳，不在此重复。
+> 本节只描述**本地独有**的约定与偏离；上游决议 R1–R62 一律照上游采纳，不在此重复。
 
 ### L1 前端：功能层 / 视觉层分离
 > ⚠️ **2026-09-30 起，本节的 `web/` 指 `cmd/wild-work/web/`，它已不参与 embed**，只作为上游 vanilla 的 diff 基准存在（见 L6）。真正在跑的前端是 `webui/` → `web-app/`。
@@ -967,12 +998,16 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   判据本身用实测 200/403 的字面样本做表驱动（不用同一套位运算反算，否则测试与实现同错就永远绿）。
   另加 `internal/oczen/live_gate_test.go`（`-tags live`，默认不跑）：一条证我们的 id 真被上游接受且真的出流，
   一条**活体对照**证旧形态仍被拒 403——后者若哪天变成 200，说明上游撤了闸门，本文与备忘 §3 需重新判读。
-- **上游状态**：`rockswang/wild-work` 的 oczen 最后一次改动是 2026-10-07，**至今未修**；
+- **上游状态**：`rockswang/wild-work` 的 oczen 最后一次改动当时是 2026-10-07，**当时未修**；
   拉上游 master 原样跑同样 403。⇒ 本仓此次是**领先上游的本地偏离**，下次融合时 `internal/oczen/client.go`
   与 `client_test.go` 会进冲突面，**判据以本地为准**（同 `ledger.go` 的处理，见 L8 取舍判据）。
   参考实现 `jasonxu114514/opencode2api`（本仓 `constants.go` 里 `AnonymousKey` 的出处符号
   `anonymousZenKey` 仅此仓库存在）**同日推了同款修复但把测试删了**（#70 加 +69 行，两分钟后整文件删除），
   全仓已无该逻辑的用例 ⇒ 算法采信它，测试用我们自己的。
+  > ✅ **2026-10-14 已收敛**：上游 v2.7.2 以 **R53b**（`470717a`，issue #111 / PR #69+#70）补上了**同一个算法**
+  > （`descendingTimePart`、counter 1–63、判据正则 `^[0-9a-f]{9}f[c-f][0-9a-f]$`）。本次融合按「按上游走」采纳
+  > 上游 `client.go`（额外含 R62 地域改道），本地只保留上面那两条承重测试（表驱动实测样本 + 活体对照），
+  > 故「本仓领先」状态**已结束**，见 L14。上一段保留为历史记录。
 - **口径订正**：`constants.go` 原记「三道闸门」订正为**四道**（新增位不变量），
   且原「1900+ 次无 429」已被 10-10 的 64 次 429 推翻——429 是配额背压、403 是闸门身份，两回事。
   另实测：`User-Agent` 里的版本号不是检查项，`x-opencode-client`/`x-opencode-project` 等头
@@ -989,3 +1024,63 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   备份目录 `/home/incam/Software/_pre-restart-20261013-1929`（当天 17:38 那次已有目录，未覆盖）。
 - ⚠️ **`dist/wild-work.exe`（Windows）与 `dist/wild-work-linux` 现在是同一份修复后的源码**，
   但 exe 只验过体积与内嵌字节（新正则 `f[c-f][0-9a-f]` 命中 1 次），**从未在 Windows 上执行过**（本机是 Linux，见 L6.3 第 7 条）。
+
+### L14 2026-10-14 融合：上游 v2.7.1 → v2.7.2（`478d271`），Cline 对外 ID 反转与闸门作用域收窄
+
+- **形态**：沿用 L8/L11/L12（本地与上游**无共同祖先**，不能 `git merge`）=「`git checkout upstream/master -- <路径>` 整树采纳无冲突文件」
+  +「`git merge-file` 三方」。上游变更面 **36 提交 / 78 文件 / +6526 −594**（29 新增、1 删除、48 修改）；
+  **真冲突面 13 个文件，其中 Go 只有 4 个**（`main.go`、`app.go`、`handler.go`、`session_test.go`），
+  三方合并**只剩 2 处冲突块**且都是「各写各的、双方内容都要留」（main.go 一条本地注释引用了已删的 `applyProxies`，
+  按上游丢弃；handler.go 本地 `traffic/lastReq/Traffic()` 与上游 `fbMu/fallbacks/SetModelFallbacks` 并存）。
+  其余 65 个文件本地一字节未动 ⇒ 整树采纳（含上游新的 `internal/backuplink`、`internal/provider/usage.go`、
+  `internal/stats/fallbacks.go`、`internal/traework/schemacycle.go` 与 30 个新测试）。
+- **本轮采纳**：R53b/R53（oczen 位编码 + usage 缓存形状归一化）、R54 模型降级链（+R61 启动装配）、
+  R55/R56 traework 模型元数据与 `$ref` 消毒、R57 代理收敛为「全局备用上游通道」（删 `config.proxies`/`applyProxies`/
+  `SetTransportProxy`/`POST /api/config/proxies`）、R58 流截断自证原因（`upstream_timeout` vs `upstream_truncated`）、
+  R59 Cline 对外 ID 直通 `cline-free/*`、R60 单号渠道 402 走模型级冷却、R62 oczen 地域改道。
+  不变量 1 由「三改写」变「四改写」（`$ref` 消毒）；新增不变量 24（缓存「不提供」不得画成 0%）；
+  不变量 22 补 402 模型级冷却的澄清。
+- **本轮新增的本地偏离（一处，经所有者裁定）**：**契约闸门不再扫 `cmd/wild-work/web/`**。
+  冻结的 vanilla 基准仍引用上游已删的 `/api/config/proxies`，`TestPanelAPIRouteContract` 与
+  `TestStateFieldContract` 因此各红一条——对一份**既不 embed 也不被服务**的死代码报红。
+  故 `uiSourceDirs` 只留 `web-app/`（活体产物），注释写明缘由。`TestDOMIdParity` 仍以 vanilla 为「功能核对单」
+  （它证明的是「没掉功能」，不是「端点还在」），但新增 `domIdIntentionallyRemoved` 豁免表（`echartsCdn` 从硬编码
+  改成表项 + 新增 `proxyList`，随 R57 功能下线），并加**反向自证**：豁免条目必须真在 vanilla 里存在。
+- **R59 反转了本地上轮的判据（须记住）**：L11 缺陷②/L12 把「复制给客户端的完整 ID」定为 **`cline/cline-free/*` 双层路径**；
+  上游 R59 改为**直通上游命名空间 `cline-free/*`**，旧双层保留路由兼容。本地 `Fees.jsx:modelIds(ch, raw, id)`
+  改成**优先用费率行的 `id`**（Go 侧 `provider.PublicModelID` 的唯一真源），缺 `id` 才回落到 R52 的补前缀 + `startsWith` 护栏；
+  `render-check` 场景 5/7 的断言按 R59 双向改写（id 在场 → `cline-free/grok-4`；缺 id → `cline/cline-free/grok-4`）。
+- **oczen 同源取舍的结论**（L13 的收尾）：本仓 `e7786a6` 与上游 R53b 是**同一个算法**，本仓不再领先；
+  按「按上游走」采纳上游 `client.go`（多含 R62 改道），本地只保留 L13 那两条承重测试——
+  `TestSessionGatePatternDiscriminates`（实测 200/403 字面样本的表驱动，防「判据与实现同错」）与
+  `live_gate_test.go`（活体对照：旧形态仍被拒 403，若哪天变 200 说明上游撤了闸门）。
+  两侧**重名的 `TestCanonicalSessionID` 已消重**（保留上游版），本地测试里的 `officialSessionPattern`/`gateTimePartPattern`
+  两个已消失的符号改用上游的 `descendingTimePartPattern` + 测试内 `sessionShapePattern`。
+- **闸门变更与负向验证（四条，均已实测变红）**：① 装回「`modelIds` 忽略 `id`」→ `render-check` 点名 `cline/cline-free/grok-4`；
+  ② 给 React 产物塞一条 `/api/definitely_not_here_zzz` → 路由闸门点名该端点；③ 豁免表塞不存在的 id → 反向自证红；
+  ④ 摘掉 `proxyList` 豁免 → 点名 `[proxyList]` 缺失。另**顺带实证**了产物过期闸门是活的：
+  `cp` 还原把 `Fees.jsx` 的 mtime 更新后，`TestEmbeddedWebAppIsARealPanel` 立刻报「webui 源码比 web-app 产物新」。
+  `uiWantsState` 的字段级负向验证本轮**天然发生**：`proxies` 被上游删掉后该闸门先报了「面板依赖的字段缺失」，
+  改成 `backup_proxy`/`backup_proxy_active`/`model_fallback` 才转绿。
+- **沙箱实测（`/tmp/ww-sbx` + `127.0.0.1:28763`，生产 daemon 858590 全程未动）**：`version` 回 `2.7.2`、
+  `/api/state` 有 `backup_proxy`/`backup_proxy_active`/`model_fallback` 且**无 `proxies`**、
+  `POST /api/config/proxy` 与 `model_fallback` 均 200、旧 `POST /api/config/proxies` 404；
+  真浏览器里走完整 UI 链路——设置弹层只有**一个**代理输入（`input.proxy-input` 计数 1）且 `proxyList` 已消失、
+  降级链编辑器可加规则（两个备胎 chip）并经「保存降级链」**写穿** `/tmp/ww-sbx/home/config.json`、
+  非法代理（`ftp://`）被就地拦下且弹层不关、合法 `socks5://` 保存后 `backup_proxy_active=true` 且重开弹层显示「已生效」、
+  重开弹层降级链 chip 仍在、运行统计 tab 的「降级记录」区块**常显**（占位行在场）、桌宠节点 6 个仍在场、控制台零报错。
+  ⚠️ **本次无法做几何/截图判据**：in-app 浏览器无可见表面（`innerWidth/innerHeight = 0`、`take_screenshot` 报
+  `NATIVE_BROWSER_VIEWPORT_UNAVAILABLE`），故「不漂移/不重叠」这类**视觉几何**本轮**未验证**（结构性判据与功能链路均已实测）；
+  这与 L6.2 第 4/5 条的教训方向一致——「渲染出来了」不等于「看得见」，别把结构判据当成几何判据。
+- **口径更新（现查现写）**：面板 `/api/*` 路由 **38 → 39**（−`config/proxies`、+`config/proxy`、+`config/model_fallback`）、
+  `_test.go` **119 → 142**、`go test ./...` 实测通过的包 **32 → 33**（新增 `internal/backuplink`；`go list` 42 个含无测试包）、
+  render-check 场景仍 **7**、渠道仍 **13**、版本常量 **2.7.1 → 2.7.2**（同 L11/L12 先例由 `git merge-file` 带成上游值；
+  本仓**未打 tag、未写 release note、未发布**，`RELEASES.md` 里的 v2.7.2 段落是上游写的，本轮 append 采纳）。
+- **验收**：`go build ./... && go vet ./... && go test ./...` 全绿（33 包 0 FAIL）；`npm run build` + `npm run check` 全绿；
+  `dist/wild-work.exe` 已重建（15,275,520 B；内嵌 `backup_proxy`×10 / `model_fallback`×5 / `X-Model-Fallback`×2 /
+  `upstream_truncated`×3 / `backuplink`×77，版本串 `2.7.2`×1 且 `2.7.1`×0）。
+  桌宠与视觉层零改动（`git status` 对 `pet.js`/`pet.css`/`public/pet`/`anim.css`/`tokens.css`/`style.css` 既有规则为**空**）。
+- ⚠️ **待办**：`dist/wild-work-linux` **未重建**——它正被生产 daemon 858590 执行（直接编译会 ETXTBSY），
+  且本轮也**未重启生产**（L7 流程需所有者点头，监听局域网地址会瞬断其他设备的客户端）。
+  即：**生产仍在跑 v2.7.1 的二进制**，本轮全部改动只在源码、沙箱与 `dist/wild-work.exe` 中生效。
+- 本轮计划文件：`docs/上游v2.7.2融合计划.md`（本地工作稿，未入库；**结论以本节为准**）。

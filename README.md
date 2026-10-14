@@ -4,7 +4,7 @@
 
 ## 本仓库说明
 
-本仓库是 [rockswang/wild-work](https://github.com/rockswang/wild-work) 的增强分支，代码基线已同步至**上游 v2.7.1**（`5bca0a7c`，2026-10-13），在此之上保留并扩展了本地能力：
+本仓库是 [rockswang/wild-work](https://github.com/rockswang/wild-work) 的增强分支，代码基线已同步至**上游 v2.7.2**（`478d271`，2026-10-14），在此之上保留并扩展了本地能力：
 
 | 本地能力 | 说明 |
 |---------|------|
@@ -20,8 +20,8 @@
 ## 功能
 
 - **多协议兼容**：`/v1/chat/completions`（OpenAI Chat）、`/v1/models`、`/v1/responses`（OpenAI Responses）、`/v1/messages` 与 `/v1/messages/count_tokens`（Anthropic Messages）、`/v1/systemone`（Jev 结构化决策），可直接接入 `codex` CLI、`claude` CLI 与需要语义决策的自动化流程
-- **模型前缀路由**：模型 ID 带 `<渠道>/` 前缀，粘性路由优先复用账号以提升会话缓存利用率，临期积分优先消耗
-- **十三渠道聚合**：WorkBuddyCN + WorkBuddyAI + TraeWork + TraeCode + QoderCN + QoderCOM + 千问办公 + 智谱清言（`glm/*`）+ Cline（`cline/*`，官方 `sk_` API Key 免费池）+ MonkeyCode（`monkeycode/*`）+ 小浣熊（`raccoon/*`）+ Loomy（`loomy/*`）+ OpenCodeZen（`oczen/*`，匿名免费、无需账号）；旧 Qoder（`qoder/*`）路由保留但已从界面下线
+- **模型前缀路由**：模型 ID 带 `<渠道>/` 前缀（唯一例外是 Cline 免费池：对外直接用上游命名空间 `cline-free/*`，旧写法 `cline/cline-free/*` 仍兼容），粘性路由优先复用账号以提升会话缓存利用率，临期积分优先消耗
+- **十三渠道聚合**：WorkBuddyCN + WorkBuddyAI + TraeWork + TraeCode + QoderCN + QoderCOM + 千问办公 + 智谱清言（`glm/*`）+ Cline（`cline-free/*`，官方 `sk_` API Key 免费池；面板复制出的就是客户端要填的 ID）+ MonkeyCode（`monkeycode/*`）+ 小浣熊（`raccoon/*`）+ Loomy（`loomy/*`）+ OpenCodeZen（`oczen/*`，匿名免费、无需账号）；旧 Qoder（`qoder/*`）路由保留但已从界面下线
 - **三种添加形态**：浏览器授权登录 / **网页版自动登录**（小浣熊：拉起独立 profile 的 Edge/Chrome，登录后经 CDP 捕获凭据，Win/mac/Linux 通用，不再依赖注册表或本机客户端）/ **导入本机客户端凭据**（MonkeyCode / 小浣熊 / Loomy，Windows 与 macOS 路径均已探测）；Cline 走第四种——粘贴官方 API Key（只调 `/api-keys` 验证，零 token 消耗）
 - **账号池调度**：请求级重试 + 粘性路由、账号级错误**在同一请求内换号**（不再一错即禁整号）、**模型级冷却**（429 只冷却命中的模型而非整个账号）、分级冷却状态机（软限流 / 风控 / 账号故障分别处理）
 - **流空闲监控**：连续 300 秒读不到任何字节即判定上游卡死并断流，避免请求无限挂起
@@ -49,7 +49,7 @@ cmd/wild-work/          main.go：装配渠道客户端、账号池、系统托�
   web-app/              前端构建产物，//go:embed 的目标（不入库，由 npm run build 生成）
   web/                  上一代 vanilla 面板 + 本地视觉层与桌宠（不 embed，仅供对照）
 internal/
-  app/                  管理端点与面板 API（38 个 /api/* 路由）、面板鉴权、跨源防护
+  app/                  管理端点与面板 API（39 个 /api/* 路由）、面板鉴权、跨源防护
   server/               OpenAI Chat 端点、账号池调度、粘性路由、错误分类与冷却
   gateway/              Responses / Anthropic Messages / systemone 端点
   provider/             渠道 Kind 枚举、公共接口与流式解析
@@ -65,7 +65,7 @@ internal/
 
 - **运行时**：Go 1.25，仅两个直接依赖（`github.com/energye/systray`、`golang.org/x/sys`）。
 - **状态落盘**：`data/state-<渠道>.json`（账号状态）、`data/ledger/`（双流水）、`data/stats.json`（运行统计）、`data/app.log`（运行日志）、`auths/`（账号凭据明文 JSON）。
-- **测试**：118 个 `_test.go`（`go test ./...` 全绿，32 个包）；面板侧有路由/字段契约测试（Go 扫 `web-app` 产物）、渠道主题色与渠道接线契约测试，前端侧有 props 检查与渲染层闸门。运行 `go test ./...` 与 `npm --prefix cmd/wild-work/webui run check`。
+- **测试**：142 个 `_test.go`（`go test ./...` 全绿，33 个测试包）；面板侧有路由/字段契约测试（Go 扫 `web-app` 产物）、渠道主题色与渠道接线契约测试，前端侧有 props 检查与渲染层闸门。运行 `go test ./...` 与 `npm --prefix cmd/wild-work/webui run check`。
 
 ## 项目渊源
 
@@ -284,7 +284,7 @@ curl http://127.0.0.1:7863/v1/chat/completions \
   -d '{"model":"oczen/mimo-v2.6-flash-free","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-- 部分免费模型有**地域限制**（如 `muse-spark-*-contributor-free` 在国内直连返回 403 RegionError），列表仍会列出，自备代理即可使用
+- 部分免费模型有**地域限制**（如 `muse-spark-*-contributor-free` 在国内直连返回 403 RegionError），列表仍会列出；在设置里启用**备用上游通道**后会自动改道重发一次
 - 免费额度/限流由上游 OpenCode Zen 控制，本工具不做额外限制
 
 ## 面板操作指南
@@ -306,7 +306,8 @@ curl http://127.0.0.1:7863/v1/chat/completions \
   - *接口与鉴权*：API 监听地址（`127.0.0.1` / `0.0.0.0` / 自定义 + 端口）、API-Key（给 AI 客户端）、**管理密码**（给面板登录；与 API-Key 是两套凭据）
   - *自动签到与开机自启*：签到时间多组增删、开机自启开关
   - *模型路由*：默认渠道、封顶 tokens、CC/Codex 客户端模型名映射表（支持通配）
-  - *渠道上游代理*：给单个渠道的上游请求单独配置代理（`http://` / `https://` / `socks5://`），留空直连；典型用途是绕过 OpenCodeZen 的区域限制。还可为 OpenCodeZen 填入自定义 API key（`sk-…`，留空用匿名凭证 `public`；自定义 key 有独立配额不受匿名限流影响，且可调用付费模型——需账户余额）
+  - *备用上游通道*：全局只配**一个**备用代理（`http://` / `https://` / `socks5://`），留空 = 关闭。它**不影响任何常规请求**（所有渠道一律直连）；仅当上游返回「地区限制」时，本工具在同一次请求内自动改走该通道重发一次（目前取用方：Cline 与 OpenCodeZen）。同一处还可为 OpenCodeZen 填入自定义 API key（`sk-…`，留空用匿名凭证 `public`）
+  - *模型降级链*：主模型在其渠道全部账号上限流冷却时，按您配置的有序备胎链自动顶上（备胎可跨渠道），响应头 `X-Model-Fallback` 标注实际备胎；原模型解冻后自动切回，不粘滞
 
 > 顶栏的 API 地址 / API-Key 文本框点击复制；所有配置修改统一走 ⚙ 设置弹层。
 

@@ -67,13 +67,8 @@ export const NO_CHECKIN_LOGIN_HINT = {
   glm: '（登录后请按下方指引复制 refresh_token 粘贴回来）',
 };
 
-// 渠道上游代理列表（顺序与面板渠道序一致；旧 qoder 已下线不提供代理配置）。
-export const PROXY_CHANNELS = ['oczen', 'workbuddy', 'workbuddyai', 'qodercn', 'qodercom', 'traework', 'qwenwork', 'glm', 'cline', 'monkeycode', 'raccoon', 'loomy'];
-export const PROXY_HINT = {
-  workbuddy: 'WorkBuddyCN', workbuddyai: 'WorkBuddyAI', traework: 'TraeWork',
-  qodercn: 'QoderCN', qodercom: 'QoderCOM', qwenwork: '千问办公', glm: '智谱清言',
-  cline: 'Cline', monkeycode: 'MonkeyCode', raccoon: '小浣熊', loomy: 'Loomy', oczen: 'OpenCodeZen',
-};
+// 注：渠道级上游代理（PROXY_CHANNELS / PROXY_HINT）已于 R57 删除——
+// 配置面收敛为**全局单一备用上游通道**，仅渠道命中地区拒绝时按需取用。
 
 // 用量面板的渠道显示名（与 CH_LABEL 略有出入：不含 traecode，保持与现状一致）。
 export const CH_NAMES = {

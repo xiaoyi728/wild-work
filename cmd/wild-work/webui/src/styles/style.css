@@ -801,3 +801,16 @@ html[data-theme="paper"] .shiny {
 .cline-caps th, .cline-caps td { padding: 5px 8px; }
 .cline-caps code { font-size: 11.5px; }
 .cline-caps td.dim { color: var(--muted); font-size: 11.5px; }
+
+/* ---------- 模型降级链（设置弹层）：规则行 + 备胎 chip（R54） ---------- */
+.mono-inline { font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; }
+.fb-rule { align-items: flex-start; }
+.fb-from { width: auto; max-width: 260px; overflow-wrap: anywhere;
+           font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; flex-shrink: 0; }
+.fb-arrow { color: var(--muted); margin: 0 4px; }
+.fb-tos { flex: 1; overflow-wrap: anywhere; }
+.fb-to { display: inline-flex; align-items: center; gap: 3px; margin: 0 4px 3px 0;
+         padding: 1px 7px; border: 1px solid var(--hairline); border-radius: 10px;
+         background: var(--card-bg); font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; }
+.fb-to .fb-x { cursor: pointer; color: var(--danger); margin-left: 3px; }
+.fb-to-add { font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; }

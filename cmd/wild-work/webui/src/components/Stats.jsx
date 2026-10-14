@@ -35,6 +35,15 @@ function creditCell(g, n) {
   return <>{isTraeChannel(g) ? '≈' : ''}{fmtCreditS(n)}</>;
 }
 
+// 降级持续时长的口径与上游 fmtFbDur 同源（秒 → 秒/分秒/时·分）。
+function fmtFbDur(sec) {
+  const s0 = Math.max(0, Math.floor(Number(sec) || 0));
+  if (s0 < 60) return s0 + ' 秒';
+  const m = Math.floor(s0 / 60), s = s0 % 60;
+  if (m < 60) return m + ' 分 ' + s + ' 秒';
+  return Math.floor(m / 60) + ' 时 ' + String(m % 60).padStart(2, '0') + ' 分';
+}
+
 // 平台表排序：沿用渠道序，未登记渠道按字母序垫后。
 function orderGroups(list) {
   const keys = list.map((r) => r.group);
@@ -101,6 +110,7 @@ export default function Stats({ active, onToast }) {
   const [snap, setSnap] = useState(null);
   const [rows, setRows] = useState([]);
   const [logLines, setLogLines] = useState([]);
+  const [now, setNow] = useState(() => Date.now()); // 进行中降级的「持续」每秒重算
   const seenRef = useRef(null); // 已弹过的里程碑 toast id（跨刷新持久化）
 
   useEffect(() => {
@@ -110,6 +120,14 @@ export default function Stats({ active, onToast }) {
       } catch (e) { seenRef.current = new Set(); }
     }
   }, []);
+
+  // 进行中降级事件的「持续」每秒重算（只在确有进行中事件时开定时器，其余时候不空转）。
+  const hasActiveFb = !!(snap && (snap.fallbacks || []).some((e) => e.active));
+  useEffect(() => {
+    if (!active || !hasActiveFb) return undefined;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [active, hasActiveFb]);
 
   useEffect(() => {
     if (!active) return undefined;
@@ -336,6 +354,45 @@ export default function Stats({ active, onToast }) {
         </table>
         {rows.length ? <div className="muted" style={{ marginTop: '6px' }}>共 {rows.length} 条（上限 15）</div> : null}
         {!rows.length ? <div className="empty">暂无请求记录</div> : null}
+      </div>
+
+      {/* 降级记录（R54）：主模型全冷切备胎的事件流。常显 —— 无事件时给占位行，
+          否则用户根本不知道有这块面板。进行中事件高亮 + 每秒重算持续时长。 */}
+      <div className="ucard st-card" id="stFbBlock">
+        <div className="ucard-label">降级记录</div>
+        <div className="muted" style={{ marginBottom: 6 }}>
+          主模型全冷切备胎的事件 · 进程内记录（重启清零）· 30s 刷新
+        </div>
+        <table className="table st-fbs" id="stFbs">
+          <thead><tr>
+            <th className="num">#</th><th>降级时间</th><th>原模型</th><th />
+            <th>备胎</th><th>恢复</th><th className="num">持续</th>
+          </tr></thead>
+          <tbody>
+            {(snap.fallbacks || []).length ? (snap.fallbacks || []).map((e, i) => (
+              <tr key={`${e.from}-${e.at_unix}-${i}`} className={e.active ? 'fb-active' : ''}>
+                <td className="num">{i + 1}</td>
+                <td>{e.at}</td>
+                <td title={e.from}>{e.from}</td>
+                <td className="fb-arrow">→</td>
+                <td title={e.to}>{e.to}</td>
+                {e.active ? (
+                  <>
+                    <td><span className="fb-live">● 降级中</span></td>
+                    <td className="num"><span className="fb-live">{`已 ${fmtFbDur((now - (e.at_unix || 0) * 1000) / 1000)}`}</span></td>
+                  </>
+                ) : (
+                  <>
+                    <td>{e.recovered || '—'}</td>
+                    <td className="num">{fmtFbDur(e.dur_sec)}</td>
+                  </>
+                )}
+              </tr>
+            )) : (
+              <tr><td className="empty" colSpan={7}>暂无降级记录——主模型全冷切备胎时这里会出现事件（降级/恢复时刻与持续时长）</td></tr>
+            )}
+          </tbody>
+        </table>
       </div>
 
       {/* 运行日志：只做排版，级别配色在 style.css */}

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
-import { PROXY_CHANNELS, PROXY_HINT, CHANNEL_PRESETS, MASK_SENTINEL } from '../constants.js';
+import { CHANNEL_PRESETS, MASK_SENTINEL } from '../constants.js';
 import { isLoopbackHost, isWildcardHost } from '../format.js';
 
 // 现状：监听下拉只有三个语义位。空/`::` 等通配写法按「全部网卡」看待，
@@ -11,21 +11,31 @@ function hostToSelect(listenHost) {
   return '__custom__';
 }
 
-// validateProxies 收集代理输入并做本地形态校验，返回 {proxies, err}。
-function validateProxies(inputs) {
-  const proxies = {};
-  for (const [ch, raw] of Object.entries(inputs)) {
-    const v = (raw || '').trim();
-    if (!v) continue;
-    let u;
-    try { u = new URL(v); } catch { return [null, `渠道 ${ch} 代理地址无效：${v}`]; }
-    if (!['http:', 'https:', 'socks5:'].includes(u.protocol)) {
-      return [null, `渠道 ${ch} 代理协议不支持（仅 http/https/socks5）：${v}`];
-    }
-    if (!u.hostname) return [null, `渠道 ${ch} 代理缺少主机名：${v}`];
-    proxies[ch] = v;
+// validateBackupProxy 校验备用上游通道地址，返回 [url, err]（空串合法 = 关闭）。
+// 判据与后端 backuplink.Set 同源：仅 http/https/socks5，且必须有主机名（R57）。
+function validateBackupProxy(raw) {
+  const v = (raw || '').trim();
+  if (!v) return ['', ''];
+  let u;
+  try { u = new URL(v); } catch { return [null, `备用代理地址无效：${v}`]; }
+  if (!['http:', 'https:', 'socks5:'].includes(u.protocol)) {
+    return [null, `备用代理协议不支持（仅 http/https/socks5）：${v}`];
   }
-  return [proxies, ''];
+  if (!u.hostname) return [null, `备用代理缺少主机名：${v}`];
+  return [v, ''];
+}
+
+// parseModelList 解析降级链的备胎输入：逗号/空格分隔多个 channel/model，本地形态校验。
+// 与后端 SetModelFallback 的判据同源（全路径 + 不自环），错误就地提示、阻断保存。
+function parseModelList(raw) {
+  const out = [];
+  for (const p of String(raw || '').split(/[,，\s]+/)) {
+    const t = p.trim();
+    if (!t) continue;
+    if (!/^[^/]+\/.+/.test(t)) return [null, `备胎模型 ${t} 需为 channel/model 形式（如 workbuddyai/glm-5.2）`];
+    out.push(t);
+  }
+  return [out, ''];
 }
 
 // parseMapText 校验编辑器内容，返回 [modelMap, 错误信息]。
@@ -67,11 +77,13 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
   const [mapText, setMapText] = useState(initEntries.map(([k, v]) => `${k} = ${v}`).join('\n'));
   const [mapOpen, setMapOpen] = useState(false); // 随对话框打开而重置为当前值、收起
   const [mapErr, setMapErr] = useState('');
-  const [proxies, setProxies] = useState(() => {
-    const p = state.proxies || {};
-    return Object.fromEntries(PROXY_CHANNELS.map((ch) => [ch, p[ch] || '']));
-  });
+  const [backupProxy, setBackupProxy] = useState(state.backup_proxy || '');
   const [proxyErr, setProxyErr] = useState('');
+  // 模型降级链编辑副本（打开弹层时深拷贝；「保存降级链」是独立按钮，保存即热生效）
+  const [fbRules, setFbRules] = useState(() => JSON.parse(JSON.stringify(state.model_fallback || [])));
+  const [fbFrom, setFbFrom] = useState('');
+  const [fbTo, setFbTo] = useState('');
+  const [fbErr, setFbErr] = useState('');
   const [oczenKey, setOczenKey] = useState(state.oczen_api_key || ''); // 回显脱敏值
   const oczenTouched = useRef(false);
   const [autostart, setAutostart] = useState(!!state.autostart);
@@ -141,6 +153,39 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
     }
   }
 
+  // 「添加规则」：主模型须为 channel/model 全路径且全局唯一（与后端 SetModelFallback 同源校验）。
+  function addFbRule() {
+    const from = fbFrom.trim();
+    if (!/^[^/]+\/.+/.test(from)) { setFbErr(`主模型 ${from || '（空）'} 需为 channel/model 形式`); return; }
+    if (fbRules.some((r) => r.from === from)) { setFbErr(`主模型 ${from} 已有规则（每个主模型只允许一条）`); return; }
+    const [tos, err] = parseModelList(fbTo);
+    if (err) { setFbErr(err); return; }
+    if (!tos.length) { setFbErr('至少填一个备胎模型'); return; }
+    setFbRules((rs) => rs.concat([{ from, to: tos.filter((t) => t !== from) }]));
+    setFbFrom(''); setFbTo(''); setFbErr('');
+  }
+
+  // 行内追加备胎：同一 API 同时服务「＋」按钮与输入框回车两条路径。
+  function appendFbTo(i, raw) {
+    const [tos, err] = parseModelList(raw);
+    if (err) { setFbErr(err); return; }
+    if (!tos.length) { setFbErr('先在输入框填备胎 ID 再点 ＋'); return; }
+    setFbRules((rs) => rs.map((r, idx) => (idx === i
+      ? { ...r, to: r.to.concat(tos.filter((t) => t !== r.from && !r.to.includes(t))) }
+      : r)));
+    setFbErr('');
+  }
+
+  // 「保存降级链」：独立端点，保存即热生效（无需重启），与设置弹层的其它项互不牵连。
+  async function saveModelFallback() {
+    try {
+      await api('/api/config/model_fallback', { rules: fbRules });
+      setFbErr('');
+      onToast('降级链已保存（热生效）');
+      onSaved();
+    } catch (e) { setFbErr(e.message); }
+  }
+
   async function saveSettings() {
     setBusy(true);
     try {
@@ -165,11 +210,11 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
         }
       }
 
-      // 2) 代理（先本地校验，失败阻断保存）+ oczen key（仅在用户改动过时提交，
+      // 2) 备用上游通道（先本地校验，失败阻断保存）+ oczen key（仅在用户改动过时提交，
       //    避免把脱敏回显值误存回）
-      const [px, perr] = validateProxies(proxies);
+      const [proxy, perr] = validateBackupProxy(backupProxy);
       if (perr) { setProxyErr(perr); onToast(perr); return; }
-      const body = { proxies: px };
+      const body = { proxy };
       if (oczenTouched.current) {
         let k = oczenKey.trim();
         // 值仍是脱敏形态（含 …）则视为未修改，保持服务端现值
@@ -177,7 +222,7 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
         if (k !== undefined) body.oczen_api_key = k; // 不携带字段 = 不改动；空串 = 清除回匿名
       }
       try {
-        await api('/api/config/proxies', body);
+        await api('/api/config/proxy', body);
       } catch (e) { onToast(e.message); return; }
 
       // 3) 模型映射：优先读编辑器；编辑器从未展开过则用原值
@@ -391,19 +436,26 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
           </div>
 
           <div className="cfg-section">
-            <div className="cfg-heading">渠道上游代理</div>
-            <div className="hint" style={{ margin: '0 0 8px' }}>给指定渠道的上游请求单独配置代理（http/https/socks5），留空 = 直连。典型用途：OpenCodeZen 的区域限制模型需要经代理访问。</div>
+            <div className="cfg-heading">备用上游通道</div>
+            <div className="hint" style={{ margin: '0 0 8px' }}>
+              全局只配<b>一个</b>备用代理（http/https/socks5），留空 = 无备用通道。
+              它<b>不影响本工具的任何常规请求</b>：所有渠道一律直连；只有上游回「地区限制」时，
+              才在同一次请求内自动改走该通道重发一次（重发也失败则透传原始错误）。
+              目前取用方：<b>Cline</b> 与 <b>OpenCodeZen</b>。
+            </div>
             <div className="hint" style={{ margin: '0 0 8px' }}>OC Zen Key 留空 = 匿名凭证；填入 sk-… 自定义 key 可解锁独立配额与付费模型。</div>
-            <div id="proxyList" className="proxy-list">
-              {PROXY_CHANNELS.map((ch) => (
-                <div key={ch} className="row proxy-row">
-                  <label className="lbl wide" title={PROXY_HINT[ch] || ch}>{PROXY_HINT[ch] || ch}</label>
-                  <input className="input grow proxy-input" data-ch={ch}
-                         spellCheck="false" placeholder="如 socks5://127.0.0.1:1080（留空直连）"
-                         value={proxies[ch] || ''}
-                         onChange={(e) => setProxies((p) => ({ ...p, [ch]: e.target.value }))} />
-                </div>
-              ))}
+            <div className="row proxy-row">
+              <label className="lbl wide" title="备用上游代理地址（仅命中地区限制时自动取用）">备用代理</label>
+              <input id="backupProxyInput" className="input grow proxy-input" spellCheck="false"
+                     placeholder="如 socks5://127.0.0.1:1080 或 http://127.0.0.1:7890（留空 = 关闭）"
+                     value={backupProxy}
+                     onChange={(e) => { setBackupProxy(e.target.value); setProxyErr(''); }} />
+              {/* 生效位：后端同时回 backup_proxy（配置）与 backup_proxy_active（进程内已装载）。
+                  两者不等 = 配置写了但未生效（地址不合法/装载失败），必须让用户看见。 */}
+              <span id="backupProxyState" className="hint"
+                    style={{ color: state.backup_proxy && !state.backup_proxy_active ? 'var(--danger)' : undefined }}>
+                {!state.backup_proxy ? '' : (state.backup_proxy_active ? '已生效' : '未生效（地址无效或装载失败）')}
+              </span>
             </div>
             <div className="row" style={{ marginTop: 8 }}>
               <label className="lbl wide" title="OpenCodeZen 自定义 API key">OC Zen Key</label>
@@ -416,6 +468,49 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
               </button>
             </div>
             <div className="hint" id="proxyErr" style={{ color: 'var(--danger)' }}>{proxyErr}</div>
+          </div>
+
+          {/* 模型降级链：主模型在其渠道全池模型级冷却时按链顶备胎，不粘滞自动切回（R54） */}
+          <div className="cfg-section">
+            <div className="cfg-heading">模型降级链</div>
+            <div className="hint" style={{ margin: '0 0 8px' }}>
+              主模型在渠道全部账号上限流冷却（503 提示解冻时间）时，按顺序找第一个可用的备胎模型顶上，
+              响应头 <span className="mono-inline">X-Model-Fallback</span> 标注实际备胎；原模型解冻后自动切回，不粘滞。
+              模型 ID 用 <span className="mono-inline">channel/model</span> 全路径（如 workbuddyai/deepseek-v4.1-flash），备胎可跨渠道。
+            </div>
+            <div id="fbList" className="proxy-list">
+              {fbRules.length ? fbRules.map((r, i) => (
+                <div key={r.from} className="row proxy-row fb-rule">
+                  <span className="lbl fb-from" title={r.from}>{r.from}</span>
+                  <span className="fb-arrow">→</span>
+                  <span className="fb-tos">
+                    {r.to.map((t, j) => (
+                      <span key={t} className="fb-to" title={t}>{t}
+                        <a className="fb-x" title="移除该备胎"
+                           onClick={() => setFbRules((rs) => rs.map((x, idx) => (idx === i ? { ...x, to: x.to.filter((_, k) => k !== j) } : x)))}>×</a>
+                      </span>
+                    ))}
+                  </span>
+                  <input className="input fb-to-add" style={{ width: 170 }} spellCheck="false"
+                         placeholder="＋备胎 ID（回车添加）"
+                         onKeyDown={(e) => { if (e.key === 'Enter') { appendFbTo(i, e.target.value); e.target.value = ''; } }} />
+                  <button className="icon-btn" title="删除整条规则"
+                          onClick={() => setFbRules((rs) => rs.filter((_, idx) => idx !== i))}>🗑</button>
+                </div>
+              )) : <div className="hint">（暂无规则——主模型全冷时将直接返回 503 提示）</div>}
+            </div>
+            <div className="row" style={{ marginTop: 8 }}>
+              <input id="fbFromInput" className="input" style={{ width: 230 }} spellCheck="false"
+                     placeholder="主模型 ID（channel/model）"
+                     value={fbFrom} onChange={(e) => { setFbFrom(e.target.value); setFbErr(''); }} />
+              <input id="fbToInput" className="input grow" spellCheck="false"
+                     placeholder="备胎模型 ID，可填多个用逗号分隔（按顺序尝试，可跨渠道）"
+                     value={fbTo} onChange={(e) => { setFbTo(e.target.value); setFbErr(''); }}
+                     onKeyDown={(e) => { if (e.key === 'Enter') addFbRule(); }} />
+              <button className="btn small" id="btnFbAdd" title="添加一条降级规则" onClick={addFbRule}>添加规则</button>
+              <button className="btn small primary" id="btnFbSave" onClick={saveModelFallback}>保存降级链</button>
+            </div>
+            <div className="hint" id="fbErr" style={{ color: 'var(--danger)' }}>{fbErr}</div>
           </div>
 
           {/* 桌宠：纯观感层，开关只记在本浏览器（localStorage），不写 config.json、不影响 daemon */}

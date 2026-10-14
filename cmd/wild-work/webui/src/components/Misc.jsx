@@ -107,9 +107,9 @@ export function Help({ open, onClose }) {
             Anthropic 客户端用 <code>x-api-key</code> 或 <code>Authorization: Bearer</code> 均可。</p>
           <p>4. 模型 ID 建议带渠道前缀：<code>workbuddy/&lt;model&gt;</code>、<code>workbuddyai/&lt;model&gt;</code>、<code>traework/&lt;model&gt;</code>、<code>qoder/&lt;model&gt;</code>；
             也支持裸名（走「设置 → 模型路由」的 <code>默认渠道</code> / <code>映射表</code> 配置）。</p>
-          <p>5. 账号显示名可点击卡片上的名字直接修改；顶栏齿轮进入统一设置（监听 / API-Key / 模型路由 / 渠道上游代理）。</p>
-          <p>6. 渠道上游代理：给单个渠道的上游请求配置独立代理（http/https/socks5），留空即直连；
-            OpenCodeZen 的区域限制模型需经代理访问时可在此配置。</p>
+          <p>5. 账号显示名可点击卡片上的名字直接修改；顶栏齿轮进入统一设置（监听 / API-Key / 模型路由 / 备用上游通道）。</p>
+          <p>6. 备用上游通道：全局只配一个代理地址（http/https/socks5），<b>不影响任何常规请求</b>（所有渠道一律直连）；
+            仅当上游回「地区限制」时，本工具会在同一次请求内自动改走该通道重发一次。目前取用方：Cline 与 OpenCodeZen。</p>
           <p>7. 积分会随聊天消耗实时变化，"全部刷新积分"可即时获取最新余额。</p>
           <p>8. 日志文件位于 exe 目录下 <code>data/app.log</code>，可从托盘菜单"查看日志"打开。</p>
           <p>9. 退出程序：右键托盘图标选择"退出"。</p>

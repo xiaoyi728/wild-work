@@ -199,7 +199,7 @@ function ClineModal({ cline }) {
                 <tr><td><code>mimo-v2.6-flash</code></td><td>1M</td><td>✅</td><td>✅</td><td></td></tr>
                 <tr><td><code>step-5-preview</code></td><td>1M</td><td>✅</td><td>✅</td><td></td></tr>
                 <tr><td><code>muse-spark-1.3-contributor</code></td><td>1M</td><td>✅</td><td>✅</td>
-                    <td className="dim">地区限制，国内需配 <b>渠道上游代理</b> 才可用</td></tr>
+                    <td className="dim">地区限制：启用设置里的<b>备用上游通道</b>后自动改道</td></tr>
                 <tr><td><code>solar-mini4</code></td><td>512K</td><td>—</td><td>✅</td>
                     <td className="dim">上游明确不接受图像输入</td></tr>
               </tbody>

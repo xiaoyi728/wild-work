@@ -86,16 +86,19 @@ function RateCell({ m }) {
 }
 
 // 费率行 / 查找行的「短名 + 完整 ID」拆分。
-// ⚠️ 不能用「模型名里含 / 就当作已带渠道前缀」这个判据（上游 330ee79 的写法）：
-// internal/server/handler.go:runtimeForModel 用 SplitN(model, "/", 2) 切**第一个**斜杠，
-// 所以 Cline 的 `cline-free/grok-4` 必须写成 `cline/cline-free/grok-4` 才路由得到；
-// 按上游那判据复制出来的是 `cline-free/grok-4` ⇒ 渠道被解析成 "cline-free"，
-// 直接 `provider "cline-free" is not configured`，正是本页注释警告的那个坑。
-// 而 m.model 来自 /api/fees，本就是「该渠道内的模型名」，渠道由 ch.channel 给出，
-// 故前缀一律补上、短名一律不剥。
-// 唯一的例外是「裸名自己就以渠道前缀开头」——上游 R52 定的契约，防重复拼接
-// （否则已带双层路径的名字会被拼成 `cline/cline/cline-free/*`）。
-export function modelIds(ch, raw) {
+// 完整 ID 的**唯一真源是 /api/fees 行的 `id`**（Go 侧 provider.PublicModelID 的产物）：
+// 普通渠道是 `<渠道>/<模型>`，而上游 ID 自带命名空间的渠道（Cline 免费池的 `cline-free/*`）
+// 就是上游原名（R59）—— 服务端与 /v1/models、runtimeForModel、降级链解析器同源，
+// 前端不再自己拼前缀。拼接规则散在多处必漏，这是 R52 那条教训的收敛。
+//
+// 仅在响应缺 `id`（旧产物/异常）时回落到本地拼接，并保留 R52 的 startsWith 护栏：
+// 「裸名自己就以渠道前缀开头」时原样保留，防重复拼接（否则会拼出 `cline/cline-free/*` 之外
+// 更糟的 `cline/cline/cline-free/*`）。⚠️ 仍不得用「名里含 / 就当作已带前缀」那个判据
+// （上游 330ee79 的写法）：runtimeForModel 用 SplitN(model, "/", 2) 切**第一个**斜杠，
+// 按那个判据会把 `cline-free/grok-4` 误当完整 ID，路由时渠道被解析成 "cline-free" ⇒
+// `provider "cline-free" is not configured`。
+export function modelIds(ch, raw, id) {
+  if (id) return { short: raw, full: id };
   return { short: raw, full: ch && !raw.startsWith(`${ch}/`) ? `${ch}/${raw}` : raw };
 }
 
@@ -103,7 +106,7 @@ function ModelId({ m, ch, onCopy }) {
   if (!m) return null;
   // 点击复制的是「渠道/模型」完整标识（路由前缀 + 模型名），而不是裸模型名 ——
   // 光复制模型名粘到客户端里是调不通的，这是本页最容易踩的坑。
-  const { short, full } = modelIds(ch, m.model);
+  const { short, full } = modelIds(ch, m.model, m.id);
   const copyTip = `点击复制：${full}`;
   return (
     <div className="mcell">
@@ -145,7 +148,7 @@ export function collectAllModels(fees) {
   const out = [];
   for (const ch of (fees && fees.channels) || []) {
     for (const m of ch.models || []) {
-      const { short, full } = modelIds(ch.channel, m.model);
+      const { short, full } = modelIds(ch.channel, m.model, m.id);
       out.push({ ch: ch.channel, m, short, full });
     }
   }

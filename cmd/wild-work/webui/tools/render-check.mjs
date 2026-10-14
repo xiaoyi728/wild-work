@@ -93,14 +93,15 @@ const STATE = {
   compat: { default_channel: 'workbuddy', max_tokens_cap: 32000, model_map: {} },
   fees: {
     updated_at: '', channels: [
-      // 两条都要：一条常规裸名，一条模型名本身含斜杠（Cline 的 cline-free/*）。
-      // 后者专治「含斜杠就当作已带渠道前缀」这个判据 —— 见 Fees.jsx 的 modelIds 注释。
-      { channel: 'qodercn', models: [{ model: 'qwen3.8-flash', priced: true, rate: 0.3, free: false, has_context: true, context_window: 180000 }] },
-      { channel: 'cline', models: [{ model: 'cline-free/grok-4', priced: false, rate: 0, free: true, has_context: false }] },
+      // 每条都带 `id`（= Go 侧 provider.PublicModelID 的产物，完整 ID 的唯一真源）。
+      // Cline 那条专治两种错： ①「名里含 / 即视为已带前缀」（会把 cline-free/x 当成完整 ID）；
+      // ② 旧的双层约定（R59 起对外直通上游命名空间，不再拼 cline/）。
+      { channel: 'qodercn', models: [{ model: 'qwen3.8-flash', id: 'qodercn/qwen3.8-flash', priced: true, rate: 0.3, free: false, has_context: true, context_window: 180000 }] },
+      { channel: 'cline', models: [{ model: 'cline-free/grok-4', id: 'cline-free/grok-4', priced: false, rate: 0, free: true, has_context: false }] },
       // 上游目录声明了思考档位 + 上下文来自本工具实测：两条各治一个「冒充」——
       // 档位不得给未声明的渠道编出来，实测值不得画成上游官方声明（R46/issue #40、R49）。
-      { channel: 'workbuddy', models: [{ model: 'deepseek-v4', priced: true, rate: 0.2, free: false, has_context: true, context_window: 1000000, reasoning_efforts: ['low', 'high', 'max'], default_reasoning_effort: 'high' }] },
-      { channel: 'raccoon', models: [{ model: 'sn-sensenova-6-8-flash', priced: false, rate: 0, free: true, has_context: true, context_window: 524288, hand_measured: true }] },
+      { channel: 'workbuddy', models: [{ model: 'deepseek-v4', id: 'workbuddy/deepseek-v4', priced: true, rate: 0.2, free: false, has_context: true, context_window: 1000000, reasoning_efforts: ['low', 'high', 'max'], default_reasoning_effort: 'high' }] },
+      { channel: 'raccoon', models: [{ model: 'sn-sensenova-6-8-flash', id: 'raccoon/sn-sensenova-6-8-flash', priced: false, rate: 0, free: true, has_context: true, context_window: 524288, hand_measured: true }] },
     ],
   },
 };
@@ -156,22 +157,22 @@ try {
     React.createElement(Fees, { fees: STATE.fees, refreshBusy: false, onRefresh: noop, onClose: noop }));
   check('Fees 弹层', feesHtml, ['btnRefreshFees', 'btnFeesClose', 'btnModelSearch']);
 
-  // 5) 复制给客户端的「完整模型 ID」必须始终带渠道前缀。
-  //    internal/server/handler.go:runtimeForModel 用 SplitN(model,"/",2) 只切**第一个**斜杠，
-  //    于是 Cline 的 cline-free/grok-4 必须写成 cline/cline-free/grok-4 才路由得到。
-  //    上游 330ee79 用「模型名含 / 即视为已带前缀」的判据，对这一族会复制出
-  //    provider "cline-free" is not configured —— 不报错，只是粘过去调不通。
+  // 5) 复制给客户端的「完整模型 ID」的唯一真源是费率行的 `id`（Go 侧 provider.PublicModelID）。
+  //    R59 起 Cline 直通上游命名空间：对外就是 cline-free/grok-4，不再拼成 cline/cline-free/...；
+  //    runtimeForModel 用 SplitN(model,"/",2) 切第一个斜杠，故普通渠道仍是 <渠道>/<模型>。
+  //    两个方向都要测：用 id（新契约）与缺 id 的回落（旧产物必须仍能得到可路由的写法）。
   const { collectAllModels } = await load('/src/components/Fees.jsx');
   const flat = collectAllModels(STATE.fees);
   const idProblems = [];
-  // 不变量：完整 ID 恒为「渠道/模型」，与模型名里有没有斜杠无关。
   for (const x of flat) {
-    if (x.full !== `${x.ch}/${x.m.model}`) idProblems.push(`${x.ch}/${x.m.model} → 复制目标算成了 ${x.full}`);
+    const want = x.m.id || `${x.ch}/${x.m.model}`;
+    if (x.full !== want) idProblems.push(`${x.ch}/${x.m.model} → 复制目标算成了 ${x.full}（应 ${want}）`);
   }
-  if (/data-mid="cline-free\/grok-4"/.test(feesHtml)) idProblems.push('费率单元格 data-mid 缺渠道前缀');
+  if (!/data-mid="cline-free\/grok-4"/.test(feesHtml)) idProblems.push('Cline 的复制目标应为上游命名空间 cline-free/grok-4（R59）');
+  if (/data-mid="cline\/cline-free\/grok-4"/.test(feesHtml)) idProblems.push('Cline 不应再复制出双层路径 cline/cline-free/...（R59 起直通上游命名空间）');
   results.push({ name: '完整模型 ID 前缀', visible: visibleControls(feesHtml).length, missing: idProblems });
   if (idProblems.length) console.error(`✗ 完整模型 ID 前缀：${idProblems.join('；')}`);
-  else console.log(`✓ 完整模型 ID 前缀：${flat.length} 条全部形如「渠道/模型」（含斜杠名亦不例外）`);
+  else console.log(`✓ 完整模型 ID：${flat.length} 条全部等于费率行 id（Cline 直通 cline-free/*，R59；缺 id 才回落补前缀）`);
 
   // 6) 缓存利用率三态（上游 v2.7.0 的缓存列）。判据做在纯函数 cacheRate 上而不是端到端：
   //    Usage/Stats 两张表都是取数驱动的分支，SSR 不跑 useEffect，渲不出行来。
@@ -190,11 +191,13 @@ try {
   const cHit = cacheRate({ cr_cov: 1283, cr: 1218, cr_reqs: 9 });
   say(cHit && cHit.shown === '94.9%', `1218/1283 应显示 94.9%，实际 ${cHit && cHit.shown}`);
 
-  // 7) 思考档位与实测来源（R49 / R46）：声明了才渲染，未声明的一律不出现。
+  // 7) 思考档位与实测来源（R49 / R46）+ 完整 ID 三路径（R59/R52）。
+  say(modelIds('cline', 'cline-free/grok-4', 'cline-free/grok-4').full === 'cline-free/grok-4',
+    `id 在场时须直通（R59：上游命名空间不再套 cline/），实际 ${modelIds('cline', 'cline-free/grok-4', 'cline-free/grok-4').full}`);
   say(modelIds('cline', 'cline-free/grok-4').full === 'cline/cline-free/grok-4',
-    `自带命名空间的上游 ID 必须补成双层路径，实际 ${modelIds('cline', 'cline-free/grok-4').full}`);
-  say(modelIds('workbuddy', 'workbuddy/deepseek-v4').full === 'workbuddy/deepseek-v4',
-    `已带渠道前缀的名字不得重复拼接，实际 ${modelIds('workbuddy', 'workbuddy/deepseek-v4').full}`);
+    `缺 id 的回落路径仍须补前缀（否则 runtimeForModel 会把渠道解析成 cline-free），实际 ${modelIds('cline', 'cline-free/grok-4').full}`);
+  say(modelIds('workbuddy', 'workbuddy/deepseek-v4', 'workbuddy/deepseek-v4').full === 'workbuddy/deepseek-v4',
+    `已带渠道前缀的名字不得重复拼接，实际 ${modelIds('workbuddy', 'workbuddy/deepseek-v4', 'workbuddy/deepseek-v4').full}`);
   say(/\[low·high·max\]/.test(feesHtml), '上游声明的档位没渲染出 [low·high·max]');
   say(count(/class="effort-tag"/) === 1, `effort-tag 应只在「上游声明了档位」的那一行出现，实际 ${count(/class="effort-tag"/)} 次`);
   say(count(/class="ctx-tag hand"/) === 1, `hand_measured 的上下文应带 hand 类，实际 ${count(/class="ctx-tag hand"/)} 次`);

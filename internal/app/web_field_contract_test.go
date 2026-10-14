@@ -83,7 +83,8 @@ var uiWantsState = []string{
 	"version", "running", "listen_host", "listen_port", "lan_ip", "api_key",
 	"accounts", "checkin_times", "next_checkin", "login_busy",
 	"admin_pass_set", "auth_enabled", "auth_session", "auth_required",
-	"autostart", "expiring_days", "proxies", "oczen_api_key",
+	"autostart", "expiring_days", "backup_proxy", "backup_proxy_active",
+	"model_fallback", "oczen_api_key",
 	// loop_guard 自 R50 起被 Settings.jsx 的「思考链防癫」开关读取。它必须进这张表：
 	// 面板用的是 `state.loop_guard !== false`，Go 侧哪天漏发这个字段，读出来是 undefined，
 	// 判据照样成立 ⇒ 开关恒显示「开」而实际配置可能是关 —— 静默的错，正是本闸门要拦的形态。
@@ -103,6 +104,8 @@ var uiWantsState = []string{
 //   CheckinResult.uid / has_remain · feesModelRow.supports_tools
 //   Stats.token.pt|ct|by_day.total · CreditStats.expire · RecentCredit.name
 // 上面这份清单是 2026-09-30 对 web/app.js + web/pet.js 全文取数点穷举的结果，
+// 2026-10-14 起改以 cmd/wild-work/webui/src（React 源码，活体面板）为准——
+// 同一轮里 `proxies` 换成 `backup_proxy`/`model_fallback`（R57/R54）。
 // 移植时按它砍类型定义；若某天面板开始消费其中一项，把它加进对应的 uiWants* 即可。
 
 func TestStateFieldContract(t *testing.T) {

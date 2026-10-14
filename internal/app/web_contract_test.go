@@ -40,16 +40,20 @@ var goOnlyPanelRoutes = map[string]bool{
 	"POST /api/quit": true,
 }
 
-// uiSourceDirs 待扫描的前端来源。
-//   - web/     上游 vanilla 代码，重构期间原样保留，同时是「掉功能」的对照基准。
-//   - web-app/ Vite 构建产物（React 化之后才存在；不存在则跳过）。
-//     只要 embed 切到 web-app/，桌宠与面板的产物都在同一目录，
-//     所以整目录扫描即可覆盖 pet 单独入口的情况。
+// uiSourceDirs 待扫描的前端来源 —— **只含真正在跑的 React 产物**。
+//
+// ⚠️ 2026-10-14 起不再扫 cmd/wild-work/web/（上游 vanilla 基准）。它是冻结在
+// v2.5.4 的对照快照，既不 embed 也不被服务（L6 收尾后 React 已接管 /），
+// 其端点引用只是历史事实：上游本轮删掉 /api/config/proxies 后，本闸门立刻对
+// 一份死代码报了两条红。继续扫等于让「上游改了它对外的 API」变成每轮融合的
+// 固定噪声，且噪声的严重性看起来和真缺陷一样。
+// 活体契约由 web-app/（构建产物）承担 —— 它才是 exe 里真正服务的东西。
+// vanilla 的快照价值仍由 TestDOMIdParity（id 集合差）与
+// TestEmbeddedWebAppIsARealPanel（产物是不是真面板）承担，未受影响。
 var uiSourceDirs = []struct {
 	rel      string
 	required bool
 }{
-	{filepath.Join("..", "..", "cmd", "wild-work", "web"), true},
 	{filepath.Join("..", "..", "cmd", "wild-work", "web-app"), false},
 }
 
@@ -263,14 +267,25 @@ func TestEmbeddedWebAppHasNoNodeModules(t *testing.T) {
 //
 // 集合语义刻意宽松一侧：vanilla 有而 React 无 ⇒ 报错（功能掉了）；
 // React 有而 vanilla 无 ⇒ 仅提示（新增节点，需确认不是重名）。
+// domIdIntentionallyRemoved 有意移除的 vanilla DOM id —— 属「功能按决议下线」，
+// 不是移植漏项。每个条目都要写清是哪条决议、以及替代物是什么。
+var domIdIntentionallyRemoved = map[string]string{
+	// D3 签核：echarts 改 npm 按需引入，CDN <script> 必须消失（无 SRI 隐患随之消除）。
+	"echartsCdn": "echarts 改 npm 按需引入",
+	// R57：渠道级上游代理（每渠道一行输入）整块下线，收敛为**全局单一备用上游通道**
+	// （`backupProxyInput` + `backupProxyState`）。代理列表本身已不存在，故本 id 无对应物——
+	// 注意冻结的 vanilla 基准仍留着旧 DOM（它按 L11/L12 不再与上游同步）。
+	"proxyList": "渠道上游代理按 R57 下线，改单一备用上游通道",
+}
+
 func TestDOMIdParity(t *testing.T) {
 	vanilla := readRepoFile(t, filepath.Join("cmd", "wild-work", "web", "index.html"))
 	reactSrc := readReactSources(t)
 
 	lost := []string{}
 	for _, id := range htmlIDs(vanilla) {
-		if id == "echartsCdn" {
-			continue // D3 签核：echarts 改 npm 按需引入，CDN <script> 必须消失（非丢失）
+		if _, ok := domIdIntentionallyRemoved[id]; ok {
+			continue
 		}
 		if !strings.Contains(reactSrc, `id="`+id+`"`) {
 			lost = append(lost, id)
@@ -296,8 +311,26 @@ func TestDOMIdParity(t *testing.T) {
 		sort.Strings(extra)
 		t.Logf("注：React 侧新增 vanilla 没有的 id %v（creditTip 属正常：vanilla 是运行期 createElement）", extra)
 	}
-	t.Logf("DOM id 对账通过：vanilla %d 个 id 全部落地（echartsCdn 按 D3 有意移除）",
-		len(htmlIDs(vanilla))-1)
+	// 豁免表反向自证：条目必须真在 vanilla 里存在，否则它是一条遮盖别的东西的死白名单
+	// （与 goOnlyPanelRoutes 的反向检查同款纪律）。
+	for id := range domIdIntentionallyRemoved {
+		if !known[id] {
+			t.Errorf("DOM id 豁免条目 %q 在 vanilla 里并不存在，应从 domIdIntentionallyRemoved 删除", id)
+		}
+	}
+	t.Logf("DOM id 对账通过：vanilla %d 个 id 中 %d 个有意移除（见 domIdIntentionallyRemoved），其余全部落地",
+		len(htmlIDs(vanilla)), countIntentionallyRemoved(htmlIDs(vanilla)))
+}
+
+// countIntentionallyRemoved 数出 vanilla 里落在豁免表中的 id 个数（供日志口径，勿写死 −1）。
+func countIntentionallyRemoved(ids []string) int {
+	n := 0
+	for _, id := range ids {
+		if _, ok := domIdIntentionallyRemoved[id]; ok {
+			n++
+		}
+	}
+	return n
 }
 
 // readRepoFile 读仓库根下的文件（路径相对仓库根，不是相对包目录）。

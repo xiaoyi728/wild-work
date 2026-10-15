@@ -144,18 +144,27 @@ CN 凭据在国际端点 401（双向隔离），两渠道凭据文件前缀 `qo
 
 | 用途 | 端点 | 鉴权 |
 |------|------|------|
-| 聊天 | `POST https://opencode.ai/zen/v1/chat/completions` | `Bearer public`（字面量，匿名） |
-| 模型列表 | `GET https://opencode.ai/zen/v1/models` | 同上 |
+| 聊天 | `POST https://opencode.ai/inference/v1/chat/completions` | `Bearer public`（字面量，匿名） |
+| 模型列表 | `GET https://opencode.ai/inference/v1/models` | 同上 |
+
+> 2026-10-15 起对话必须在 `/inference/v1` 前缀下：`/zen/v1/chat/completions` 即使请求与
+> 官方客户端逐字相同也回 403 `FreeTierError`。模型目录两个前缀都仍 200（故面板「看着是好的」），
+> 本工具统一走 `/inference/v1`。
 
 **无刷新/无余额/无签到**：匿名凭证是常量，`RefreshToken` 为空实现，`UserResource*` 恒 0，
 `DailyCheckin` 返回「无签到活动」（调度器配置为 `CheckinMinutes/KeepaliveHours` 均 nil，不会调用）。
 
-三道闸门（缺一即 403 FreeTierError，详见渠道备忘）：
-1. `x-opencode-session` 必须是 `ses_<12位小写hex><14位Base62>`（由对话首轮哈希稳定派生）；
-2. 请求体必须 `stream:true` 且 `tools` 内同含 `bash`/`read` function（缺则注入桩工具；
-   客户端无工具时同时置 `tool_choice:"none"`，有工具时保留其 `tool_choice`）；
-3. 伪装头齐套：`User-Agent: opencode/1.18.x`、`x-opencode-client: cli`、
-   `x-session-affinity`/`X-Session-Id`（同会话值）、`x-opencode-request`、`x-opencode-project`。
+五道闸门（缺一即 403 FreeTierError，详见渠道备忘与 `internal/oczen/gate_test.go`）：
+1. 对话端点须是 `/inference/v1`（见上）；
+2. `x-opencode-session` 必须是 `ses_<12位小写hex><14位Base62>`，且 hex 段是官方
+   `Identifier.descending()` 铸造编码（由对话首轮哈希确定性重编码）；
+3. 请求体必须 `stream:true` 且 `tools` 内同含 `bash`/`read` function，各自 `parameters`
+   至少声明一个 property（缺则注入桩工具；客户端无工具时同时置 `tool_choice:"none"`）；
+4. 伪装头：`User-Agent: opencode/1.18.x`（须含 `opencode/<version>` 记号）、`x-opencode-client: cli`、
+   `x-opencode-session-id`（同会话值）、`x-opencode-request`（铸造 `msg_<12hex><14Base62>`）、
+   `x-opencode-project: global`；
+5. **不得**携带 `x-session-affinity`/`X-Session-Id`——2026-09 时「缺它们降低被识别概率」，
+   2026-10-15 反转成「带了即 403」。
 
 模型暴露：只保留 ID 含 `free` 或恰为 `big-pickle` 的模型（地域受限的也保留）；
 上游不可达时回静态清单（`internal/oczen/free.go`）。定价恒为 `Rate=0, Explicit=true`。

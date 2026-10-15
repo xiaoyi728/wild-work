@@ -13,14 +13,18 @@
 面板固定一项「[OpenCodeZen] 匿名」，积分位显示「不适用」。
 装配见 `cmd/wild-work/main.go`（`ocUp`/`ocPool` + `SingleAccount: true`），实现见 `internal/oczen/`。
 
-上游基址 `https://opencode.ai/zen/v1`（OpenAI 兼容面）。
+上游基址 `https://opencode.ai/inference/v1`（OpenAI 兼容面）。
+
+> 2026-10-15 前是 `https://opencode.ai/zen/v1`；那天起**对话必须在 `/inference/v1` 前缀下**，
+> `/zen/v1/chat/completions` 即便请求与官方客户端逐字相同也回 403 `FreeTierError`（见 §2.1）。
+> **模型目录两个前缀都仍 200**（`/zen/v1/models` 与 `/inference/v1/models` 各 86 条），本仓统一走后者。
 
 ## 2. 免费档闸门（2026-10-13 实测现状）
 
 上游 **2026-10-11** 的 `anomalyco/opencode` commit `83f2b6f67a`
 （`refactor(console): make Zen routes a thin inference proxy (#54563)`，48 文件）
 把 `/zen/*` 改成指向新 inference 服务的薄代理，免费档校验随之从「查会话头**形状**」升级为
-「查形状 **+ 查位不变量**」。四道检查与实测状态：
+「查形状 **+ 查位不变量**」。四道检查与实测状态（另加 2026-10-15 的第五道，见 §2.1）：
 
 | # | 检查项 | 起始时间 | 实测证据 |
 |---|---|---|---|
@@ -34,15 +38,41 @@
 - **UA 里的版本号**：`1.18.31` / `1.19.0` / `1.20.1` / `2.0.0` / `2.0.14` / `2.0.28` 结果完全相同。
   「OpenCode 升级到 v2 导致渠道失效」这个假设已被此路实测否掉。
 - **时间戳段本身**：见 §3 第 ③④ 行，时间戳 0 照样 200。
-- `x-opencode-client` / `x-opencode-project` / `x-session-affinity` 等头：
-  参考实现逐头删除实测**不在校验里**（⚠️ 本仓未逐一复验，仅采信其结论；
-  我们仍齐套发送只为贴近真实客户端）。
+- `x-opencode-client` / `x-opencode-project` 等头：
+  参考实现逐头删除实测**不在校验里**（本仓未逐一复验，仅采信其结论）。
+  ⚠️ **`x-session-affinity` / `X-Session-Id` 原属这一类，2026-10-15 起反转成「带了即 403」**（见 §2.1）——
+  这个字段是本文最容易过期的一条，改动前先跑 `internal/oczen/gate_test.go`。
+- `x-opencode-request` / `x-opencode-session-id`：**曾以为可省，2026-10-15 实测 request 必须铸造形状**（见 §2.1）。
 
 ⚠️ **四种失败返回的响应体逐字相同**，都是
 `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode. …"}}`。
 ⇒ 拿到 403 时**无法从响应分辨是哪道闸门没过**；判据只能是逐闸门单变量对照。
 这条直接导致了 §6 那次「五组对照全部同一句 message，我误判为闸门不再看形态」的错误结论
 （真相是五组全部先撞在②上，③④被完全遮蔽，那组观察**分辨率为零**）。
+
+## 2.1 2026-10-15 的第五道闸门：端点前缀 + 禁亲和头 + 铸造回合 id（本仓当测）
+
+> 三周内的**第三次**闸门变更（10-11 薄代理化 → 10-13 位不变量 → **10-15 本轮**）。
+> 本节的表是 2026-10-15 直连 `opencode.ai` 的单变量实测，每项重复 3–8 次、结果稳定不抖。
+
+| # | 检查项 | 起始时间 | 旧 wire（本仓 10-15 前 / 上游 master 至今） | 现状要求 |
+|---|---|---|---|---|
+| ⑤a | 对话端点前缀 | 2026-10-15 | `/zen/v1/chat/completions` | **`/inference/v1/chat/completions`**（/zen 即便其余全对也 403） |
+| ⑤b | `x-session-affinity` / `X-Session-Id` | 2026-10-15 | 两个都发 | **必须不发**（带了即 403；与 2026-09 的结论**相反**） |
+| ⑤c | `x-opencode-request` | 2026-10-15 | `req_` + 32 位 hex | **铸造 `msg_<12位小写hex><14位Base62>`**（`msg_`+20 随机 或 `req_`+hex 均 403） |
+| ⑤d | `x-opencode-session-id` | 2026-10-15 | 未发 | 与 `x-opencode-session` 同值（**实测可省**，但真实客户端会发，故照发） |
+
+**未变（同日复核，结论与 §2/§3 一致）**：会话段仍是 descending 铸造（随机 hex → 403；counter 1–40 实测均接受）；
+tools 仍必须 `bash` + `read` 且各带 ≥1 property（空 `properties` 与「只声明 bash」→ 403）；
+UA 仍须含 `opencode/<version>` 记号（`dsh/1.0` → 403，`opencode/1.18.31` → 200）。
+
+**端到端对照（本次修法的判据）**：按旧 wire 逐字重建 → 403 ×4；按新 wire → 200 ×4 且真出流含 `[DONE]`。
+
+**参考实现的进度**：`yetone/magpie`、`Ebony-Vinyl/dsh-our-free-model` 都记了 `/inference/v1` + 工具指纹
+（10-13/14 那一版），但**都还没记 10-15 的 ⑤b/⑤c/⑤d** ⇒ 照抄它们仍会 403。
+
+⚠️ **上游 master（`5b63d503`）至今未修**（`internal/oczen/` 与本仓修复前逐字同构），
+故本仓是**领先上游**的本地偏离，同 §6 那次（L13）。下次融合时 `client.go`/`constants.go` 进冲突面，**判据以本仓为准**。
 
 ## 3. 会话 id 的位不变量（本渠道最容易踩的坑）
 
@@ -89,10 +119,10 @@ const time  = 取 value 低 48 位 → 12 位小写十六进制
 
 | 上游端点 | 匿名 + 合法会话头 | 说明 |
 |---|---|---|
-| `GET /zen/v1/models` | **200** | 目录不受闸门影响 ⇒ **面板看着永远正常**（见 §6 的危害形态） |
-| `POST /zen/v1/chat/completions` | **200** | 唯一可用的推理入口 |
-| `POST /zen/v1/responses` | **403** | 原生 Responses 面**不认**匿名免费档，即使会话头合法 |
-| `POST /zen/v1/messages` | **403** | 原生 Anthropic 面同上 |
+| `GET /zen/v1/models` 与 `GET /inference/v1/models` | **200 / 200**（各 86 条） | 目录不受闸门影响 ⇒ **面板看着永远正常**（见 §6 的危害形态） |
+| `POST /inference/v1/chat/completions` | **200** | 唯一可用的推理入口（2026-10-15 起；`/zen/v1` 同名路径恒 403，见 §2.1） |
+| `POST /zen/v1/responses`（及 `/inference/v1/responses`） | **403** | 原生 Responses 面**不认**匿名免费档，即使会话头合法 |
+| `POST /zen/v1/messages`（及 `/inference/v1/messages`） | **403** | 原生 Anthropic 面同上 |
 | `POST /zen/v1/systemone` | **451** `Endpoint is unavailable` | 与会话头合法性无关（旧坏会话头同样 451）⇒ 该端点自身不可用 |
 
 ⚠️ 后两行不影响本仓：`/v1/responses` 与 `/v1/messages` 由 `internal/gateway` 翻译成**内层
@@ -131,6 +161,23 @@ const time  = 取 value 低 48 位 → 12 位小写十六进制
 **那个测试本身就是这个 bug 的护身符**（永不可能变红）。命中窗口概率仅 1/4096，
 所以偶尔还有会话能通，看起来更像「上游在抽风」而非「我们的 id 值不对」。
 
+## 6.1 2026-10-15 事故：免费档第三次闸门变更（本仓先修）
+
+- **现象**：`oczen/*` 对话恒 `403 FreeTierError`（生产日志末次成功 10-14 17:02，10-15 10:09 起全挂），
+  而 **`/zen/v1/models` 全程 200 / 86 条** ⇒ 面板 badge、模型清单、费率刷新一路正常，**只有真发消息才挂**（§6 同款危害形态）。
+- **归因**：§2.1 的 ⑤a–⑤d 四项。旧 wire（本仓 10-15 前与上游 master 至今）四项全中。
+  ⚠️ 定位过程里踩到一条**观测陷阱**：单账号分支的日志写死「不罚账号」且**不带上游原文**，
+  于是日志里看到的只有「403 + 一句与账号无关的断言」，看不出是哪道闸门；只能靠直接 curl 上游读 body。
+  （该缺口已由 R64 补 `body=` 修掉，本仓同类问题的下次现场至少能自证原因。）
+- **修法**：`DefaultBase` → `/inference/v1`；`headered()` 删亲和头、补 `x-opencode-session-id`、
+  回合 id 改 `mintRequestID()`、`x-opencode-project` 改常量 `global`。判据见 §8 与 `internal/oczen/gate_test.go`。
+- **为什么旧测试没拦住**：既有 `TestChatStreamRequestShape` 断言的恰是**旧 wire**（要求亲和头在场、要求 `req_` 前缀）
+  ⇒ **它是旧实现的护身符，闸门一变只会让它更绿**（与 §6 那次「旧测试只断言与门禁无关的东西」同病）。
+- **未影响的部分**：`/v1/responses` 与 `/v1/messages` 仍由 `internal/gateway` 译成内层 `/chat/completions` 出站（§4），
+  故兼容面随主链路一起恢复，无需单独改。
+- **顺带**：`x-session-affinity` 从本文「不是检查项」清单**移出**并标注反转——
+  那一节最容易被当成「可以省的头」照抄。
+
 ## 7. 参考实现对照
 
 - **`jasonxu114514/opencode2api`（Go，548 star）**：`constants.go` 里 `AnonymousKey` 的出处
@@ -154,6 +201,11 @@ const time  = 取 value 低 48 位 → 12 位小写十六进制
 | 判据本身能分辨 200/403 样本 | 同上 `TestSessionGatePatternDiscriminates` | 期望值全部写实测字面值，不用同一套位运算反算 ✅ |
 | 实盘：我们的 id 真被上游接受且真的出流 | `internal/oczen/live_gate_test.go`（`-tags live`，默认不跑） | 实测 200 + 658 B SSE ✅ |
 | 实盘对照：旧形态会话头**仍**被拒 | 同上 `TestLiveGateStillRejectsRawHashSession` | 实测 403 FreeTierError ✅；**若它变 200 ⇒ 上游撤了闸门，本文 §3 需重新判读** |
+| 对话端点必须在 `/inference/v1` | `internal/oczen/gate_test.go` `TestDefaultBaseIsInferencePath` | 装回 `DefaultBase=/zen/v1` → 红 ✅ |
+| 亲和头必须**不发** | 同上 `TestHeaderedDropsAffinityHeaders` + `TestChatStreamSendsGateCleanWire` | 装回两个头 → 两条都红并逐条点名 ✅ |
+| 回合 id 必须铸造 `msg_<12hex><14Base62>` | 同上 `TestMintRequestIDShape` / `TestRequestIDPatternMirror` | 字面量样本表（含实测被拒的 `req_`+32hex、`msg_`+20、含非 hex 段）✅ |
+| tools 指纹：bash+read 各带 ≥1 property | 同上 `TestToolFingerprintRequiresNonEmptySchema` | 空 tools / 只带 bash / 只带 read 三种入参下出站体都必须齐备 ✅ |
+| 实盘对照：**旧 wire 仍被拒** | `live_gate_test.go` `TestLiveGateStillRejectsLegacyWire` | 实测 403 FreeTierError ✅；**若它变 200 ⇒ 上游撤了 §2.1 的收紧，需重判** |
 
 端到端（沙箱 `127.0.0.1:28763`，生产未动）：`/v1/chat/completions` 流式 20 帧 + `[DONE]` + 0 error 帧；
 非流式走 `Aggregate` 出 `NONSTREAM-OK`；`/v1/messages` 出 `ANTHROPIC-OK`；`/v1/responses` 出 `RESPONSES-OK`；

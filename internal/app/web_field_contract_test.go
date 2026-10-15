@@ -89,6 +89,10 @@ var uiWantsState = []string{
 	// 面板用的是 `state.loop_guard !== false`，Go 侧哪天漏发这个字段，读出来是 undefined，
 	// 判据照样成立 ⇒ 开关恒显示「开」而实际配置可能是关 —— 静默的错，正是本闸门要拦的形态。
 	"loop_guard",
+	// reasoning_efforts / custom_channels 自 v2.7.3（R63/R66）起被 Settings.jsx 读取
+	// （思考强度编辑区与自定义渠道编辑区）。同理必须进表：Go 侧漏发时面板读出空对象，
+	// 编辑区画成「未配置」而实际配置是别的 —— 静默的错。
+	"reasoning_efforts", "custom_channels",
 	"compat", "compat.default_channel", "compat.max_tokens_cap",
 	"compat.model_map", "compat.channels",
 	"accounts.uid", "accounts.group", "accounts.nickname", "accounts.disabled",

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"wild-work/internal/backuplink"
+	"wild-work/internal/custom"
 )
 
 // Listen 监听地址：Host 为空表示全部接口。
@@ -170,12 +171,22 @@ type Config struct {
 	// From/To 均为 "channel/model" 全路径；面板可视化编辑，保存走 POST /api/config/model_fallback。
 	ModelFallback []ModelFallbackRule `json:"model_fallback,omitempty"`
 
+	// ReasoningEfforts 思考强度注入映射：客户端请求体**未带** reasoning_effort 键时，
+	// 按请求模型 ID（"channel/model" 全路径）注入配置档位；`*` 为全局默认（精确未命中时回退）。
+	// 键已存在（任意值含 null，客户端显式意图）一律不碰；未配置（空 map）= 零开销直通。
+	// 哑管道：不校验档位取值合法性，上游吃什么档位由渠道模型自己说了算。
+	// 面板可视化编辑，保存走 POST /api/config/reasoning_efforts。
+	ReasoningEfforts map[string]string `json:"reasoning_efforts,omitempty"`
+
 	// Features 功能开关（面板「设置」可切换，默认全部开启）。
 	Features struct {
 		// LoopGuard 思考链死循环检测（发癫拦截）：流式生成中检测推理复读/空转，
 		// 命中即中断 SSE 并返回错误，由下游 agent 自行重试。默认 true。
 		LoopGuard bool `json:"loop_guard"`
 	} `json:"features"`
+
+	// CustomChannels 自定义第三方 OpenAI 兼容渠道列表（R66）。
+	CustomChannels []custom.ChannelConfig `json:"custom_channels,omitempty"`
 
 	// 解析后
 	HardCreditDur  time.Duration `json:"-"`
@@ -483,6 +494,17 @@ func (c *Config) normalize() error {
 				c.Schedule.CheckinHours = append(c.Schedule.CheckinHours, m/60)
 			}
 		}
+	}
+	seenCustom := map[string]bool{}
+	for i := range c.CustomChannels {
+		ch := &c.CustomChannels[i]
+		if err := ch.Validate(); err != nil {
+			return fmt.Errorf("custom_channels[%d]: %w", i, err)
+		}
+		if seenCustom[ch.Name] {
+			return fmt.Errorf("custom_channels[%d]: duplicate channel name %q", i, ch.Name)
+		}
+		seenCustom[ch.Name] = true
 	}
 	return nil
 }

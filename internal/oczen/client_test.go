@@ -205,16 +205,20 @@ func TestChatStreamRequestShape(t *testing.T) {
 	if got := gotH.Get("x-opencode-client"); got != "cli" {
 		t.Errorf("x-opencode-client 错误: %q", got)
 	}
-	for _, k := range []string{"x-opencode-session", "x-session-affinity", "X-Session-Id"} {
-		if got := gotH.Get(k); !strings.HasPrefix(got, "ses_") || len(got) != 30 {
-			t.Errorf("%s 非规范会话形状: %q", k, got)
-		}
+	session := gotH.Get("x-opencode-session")
+	if !strings.HasPrefix(session, "ses_") || len(session) != 30 {
+		t.Errorf("x-opencode-session 非规范会话形状: %q", session)
 	}
-	if !strings.HasPrefix(gotH.Get("x-opencode-request"), "req_") {
-		t.Errorf("x-opencode-request 缺失: %q", gotH.Get("x-opencode-request"))
+	// 2026-10-15 反转：亲和头族（x-session-affinity / X-Session-Id）带了就 403，
+	// 真实客户端发的是 x-opencode-session-id（与会话同值）。详见 gate_test.go。
+	if got := gotH.Get("x-opencode-session-id"); got != session {
+		t.Errorf("x-opencode-session-id 须与会话同值: %q vs %q", got, session)
 	}
-	if !strings.HasPrefix(gotH.Get("x-opencode-project"), "prj_") {
-		t.Errorf("x-opencode-project 缺失: %q", gotH.Get("x-opencode-project"))
+	if !requestIDPattern.MatchString(gotH.Get("x-opencode-request")) {
+		t.Errorf("x-opencode-request 非铸造形状: %q", gotH.Get("x-opencode-request"))
+	}
+	if got := gotH.Get("x-opencode-project"); got != "global" {
+		t.Errorf("x-opencode-project 应为 global: %q", got)
 	}
 	if gotBody["stream"] != true {
 		t.Errorf("请求体未强制 stream=true: %v", gotBody["stream"])

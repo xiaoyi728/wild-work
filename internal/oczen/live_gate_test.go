@@ -111,3 +111,52 @@ func TestLiveGateStillRejectsRawHashSession(t *testing.T) {
 	}
 	t.Logf("闸门仍在：旧形态会话头被拒 403 FreeTierError")
 }
+
+// TestLiveGateStillRejectsLegacyWire 活体对照（2026-10-15 新增）：2026-10-14 之前
+// 那套 wire（/zen/v1 路径 + x-session-affinity 亲和头 + `req_` 形态回合 id）
+// **仍须被拒**。这正是本包在 10-15 之前发出的形态，也是上游 master 至今仍在发的形态。
+//
+// 它要是变绿（200），说明上游把 10-15 的收紧撤了、或又换了判据，
+// 那么 constants.go 的 DefaultBase / headered 需要重新判读，而不是默认继续生效。
+func TestLiveGateStillRejectsLegacyWire(t *testing.T) {
+	c := New()
+	obj := map[string]any{
+		"model":      "big-pickle",
+		"max_tokens": 16,
+		"messages":   []map[string]any{{"role": "user", "content": "reply with one word: ok"}},
+	}
+	ensureAgentShape(obj)
+	out, _ := json.Marshal(obj)
+	// 故意走旧基址（/zen/v1），且只发旧头族。
+	req, err := http.NewRequest(http.MethodPost,
+		"https://opencode.ai/zen/v1/chat/completions", bytes.NewReader(out))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	session := canonicalSessionID("live-legacy-control")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Authorization", "Bearer "+AnonymousKey)
+	req.Header.Set("x-opencode-client", "cli")
+	req.Header.Set("x-opencode-session", session)
+	req.Header.Set("x-session-affinity", session) // 旧头族（10-15 起带了即 403）
+	req.Header.Set("X-Session-Id", session)
+	req.Header.Set("x-opencode-request", randomID("req", 16)) // 旧形态（req_+32hex）
+	req.Header.Set("x-opencode-project", randomID("prj", 12))
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		t.Fatalf("传输层失败（先确认网络/代理可达 opencode.ai）: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("旧 wire 期望 403，实得 %d: %s —— 上游已撤/改了 10-15 的收紧，需重新判读 DefaultBase 与 headered",
+			resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	if !strings.Contains(string(raw), "FreeTierError") {
+		t.Fatalf("403 但不是 FreeTierError（可能是另一类故障）: %s", strings.TrimSpace(string(raw)))
+	}
+	t.Logf("闸门仍在：旧 wire（/zen/v1 + 亲和头 + req_ 回合 id）被拒 403 FreeTierError")
+}

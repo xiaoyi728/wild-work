@@ -2,7 +2,7 @@
 //
 // 与其它渠道最大的不同：本渠道「无账号」。匿名凭证是常量 "public"，
 // 面板里只有一个虚拟账号（AnonymousUID），不可增删停用、无签到、无积分。
-// 所有请求都按 OpenCode 官方 CLI 的形态构造（见 constants.go 的三道校验）。
+// 所有请求都按 OpenCode 官方 CLI 的形态构造（见 constants.go 的五道校验）。
 package oczen
 
 import (
@@ -272,7 +272,36 @@ func (c *Client) SetAPIKey(key string) {
 	c.apiKey = strings.TrimSpace(key)
 }
 
+// mintRequestID 铸造官方 ClientIdentifier 形状的回合 id：
+// msg_<12位小写hex><14位Base62>。
+//
+// 免费档会校验它（2026-10-15 单变量实测）：`msg_`+随机 Base62 或 `req_`+hex
+// 一律 403 FreeTierError。与 session 的差别是**不取反**——官方只有 session 用
+// descending（新的排前），回合 id 是升序 ts_ms<<12|counter。
+func mintRequestID() string {
+	current := (uint64(time.Now().UnixMilli()) << 12 & 0xFFFFFFFFFFFF) | 1
+	var raw [14]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		copy(raw[:], []byte(time.Now().String())) // 退化路径仍产出合法形状
+	}
+	out := make([]byte, 0, 4+12+14)
+	out = append(out, "msg_"...)
+	out = append(out, fmt.Sprintf("%012x", current)...)
+	for _, c := range raw {
+		out = append(out, base62Alphabet[int(c)%len(base62Alphabet)])
+	}
+	return string(out)
+}
+
+// requestIDPattern 官方回合 id 外形：msg_ + 12 位小写 hex + 14 位 Base62。
+var requestIDPattern = regexp.MustCompile(`^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
+
 // headered 为上游请求注入 OpenCode CLI 伪装头（含规范会话头）。
+//
+// 2026-10-15 复核的两处反转（同 constants.go 的 ②③④）：**不得**再发
+// x-session-affinity / X-Session-Id（带了即 403），x-opencode-session-id 补上
+// （与 x-opencode-session 同值，真实客户端会发），x-opencode-request 必须铸造。
+// x-opencode-project 取真实客户端在非 git 仓库下的常量 "global"。
 func (c *Client) headered(req *http.Request, session string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
@@ -280,11 +309,9 @@ func (c *Client) headered(req *http.Request, session string) {
 	req.Header.Set("Authorization", "Bearer "+c.authKey())
 	req.Header.Set("x-opencode-client", "cli")
 	req.Header.Set("x-opencode-session", session)
-	// OpenCode 1.18.x 的亲和头族，缺一会降低被识别为官方客户端的概率
-	req.Header.Set("x-session-affinity", session)
-	req.Header.Set("X-Session-Id", session)
-	req.Header.Set("x-opencode-request", randomID("req", 16))
-	req.Header.Set("x-opencode-project", randomID("prj", 12))
+	req.Header.Set("x-opencode-session-id", session)
+	req.Header.Set("x-opencode-request", mintRequestID())
+	req.Header.Set("x-opencode-project", "global")
 }
 
 // ---------------------------------------------------------------------------
@@ -390,12 +417,17 @@ func IsRegionBlocked(status int, body string) bool {
 }
 
 // TestKey 用 big-pickle 模型发一次最小对话验证凭证可用性。
-// 返回 (status, 上游原文片段, error)。判定口径（面板展示用）：
+// 返回 (status, 上游原文片段, viaBackup, error)。判定口径（面板展示用）：
 //   - 200：key 有效且配额正常；
 //   - 429：key 有效但触发限流（匿名共享配额或临时背压）——也算「连通」；
-//   - 401/403：key 无效或被风控；402：付费模型余额不足（key 本身有效，但免费模型不该出现此错）；
+//   - 401/403：key 无效、免费档形态不符或被风控；402：付费模型余额不足；
 //   - 503：上游端点故障（key 无法判定，连接是通的）。
-func (c *Client) TestKey() (int, string, error) {
+//
+// 与 ChatStream 同一条编排（R62 的补充）：直连被地域拒（403/451 + RegionError 文案）时
+// **同样**经备用上游通道重放一次——否则用户点了「测试」看到 403，就无从判断是「备用通道
+// 没生效」还是「上游本来就不给这个出口用」（issue #117）。viaBackup 报告本次答复是否
+// 来自备用出口，供面板如实展示「经备用通道」。
+func (c *Client) TestKey() (status int, body string, viaBackup bool, err error) {
 	obj := map[string]any{
 		"model":      "big-pickle",
 		"stream":     true,
@@ -405,20 +437,39 @@ func (c *Client) TestKey() (int, string, error) {
 	ensureAgentShape(obj)
 	out, err := json.Marshal(obj)
 	if err != nil {
-		return 0, "", err
+		return 0, "", false, err
 	}
-	req, err := http.NewRequest(http.MethodPost, c.base()+"/chat/completions", bytes.NewReader(out))
-	if err != nil {
-		return 0, "", err
+	session := canonicalSessionID(randomID("testkey", 8))
+	via := false
+	attempt := func(useBackup bool) (*http.Response, error) {
+		req, err := http.NewRequest(http.MethodPost, c.base()+"/chat/completions", bytes.NewReader(out))
+		if err != nil {
+			return nil, err
+		}
+		c.headered(req, session)
+		hc := c.HTTP
+		if useBackup {
+			tr, _ := hc.Transport.(*http.Transport)
+			bc := backuplink.Client(tr)
+			if bc == nil {
+				return nil, backuplink.ErrNoBackup
+			}
+			hc = bc
+		}
+		return hc.Do(req)
 	}
-	c.headered(req, canonicalSessionID(randomID("testkey", 8)))
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return 0, "", err
+	rp := &backuplink.Replay{Kind: "oczen-test", Model: "big-pickle", Routes: &c.routes, Attempt: attempt, Blocked: IsRegionBlocked, MaxErrBody: 4 << 10,
+		Note: func(v bool) { via = v }} // 学习路由 + 本次答复出口标记：两者都要（issue #117）
+	rc, st, raw, rerr := rp.Do()
+	if rerr != nil {
+		return 0, "", via, rerr
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-	return resp.StatusCode, string(raw), nil
+	if rc != nil { // 200：读尽小片段后关闭（上游恒流式，同 ChatStream）
+		defer rc.Close()
+		b, _ := io.ReadAll(io.LimitReader(rc, 4<<10))
+		return st, string(b), via, nil
+	}
+	return st, string(raw), via, nil
 }
 
 // FetchModels 拉取上游模型列表并只保留免费集合。

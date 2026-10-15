@@ -84,6 +84,9 @@ type Config struct {
 
 	// ModelFallbacks 模型降级链初始值（面板保存后经 SetModelFallbacks 热更新）。
 	ModelFallbacks []config.ModelFallbackRule
+
+	// ReasoningEfforts 思考强度注入映射初始值（面板保存后经 SetReasoningEfforts 热更新）。
+	ReasoningEfforts map[string]string
 }
 
 // stickyEntry 粘性路由记录：记录上次路由账号及连续使用次数。
@@ -116,6 +119,31 @@ type Handler struct {
 
 	fbMu      sync.RWMutex               // 保护 fallbacks（面板可运行时修改）
 	fallbacks []config.ModelFallbackRule // 模型降级链（cfg.ModelFallbacks 初始，热更新经 SetModelFallbacks）
+
+	efMu    sync.RWMutex      // 保护 efforts（面板可运行时修改）
+	efforts map[string]string // 思考强度注入映射（cfg.ReasoningEfforts 初始，热更新经 SetReasoningEfforts）
+
+	runtimesMu sync.RWMutex               // 保护 customRts 动态热更新（R66）
+	customRts  map[provider.Kind]*Runtime // 自定义渠道运行时
+}
+
+// SetCustomRuntimes 热更新自定义渠道运行时（面板保存后由 app 层回调）。
+func (h *Handler) SetCustomRuntimes(rts map[provider.Kind]*Runtime) {
+	h.runtimesMu.Lock()
+	h.customRts = rts
+	h.runtimesMu.Unlock()
+}
+
+// getRuntime 取渠道运行时。内建渠道优先——自定义渠道名不得与内建同名，
+// 该约束由 custom.ChannelConfig.Validate 强制（否则两层会指向不同 Runtime：
+// 面板/账号操作打到自定义池，而对话请求走内建渠道）。
+func (h *Handler) getRuntime(k provider.Kind) *Runtime {
+	if rt := h.cfg.Runtimes[k]; rt != nil {
+		return rt
+	}
+	h.runtimesMu.RLock()
+	defer h.runtimesMu.RUnlock()
+	return h.customRts[k]
 }
 
 // Traffic 返回累计上游请求数与最后一次派发的 Unix 毫秒时间戳。
@@ -129,6 +157,13 @@ func (h *Handler) SetModelFallbacks(rules []config.ModelFallbackRule) {
 	h.fbMu.Lock()
 	h.fallbacks = rules
 	h.fbMu.Unlock()
+}
+
+// SetReasoningEfforts 热更新思考强度注入映射（面板保存后由 app 层回调；nil/空 = 清空禁用）。
+func (h *Handler) SetReasoningEfforts(efforts map[string]string) {
+	h.efMu.Lock()
+	h.efforts = efforts
+	h.efMu.Unlock()
 }
 
 func NewHandler(cfg Config) *Handler {
@@ -155,7 +190,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger, stats: cfg.Stats, fallbacks: cfg.ModelFallbacks}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger, stats: cfg.Stats, fallbacks: cfg.ModelFallbacks, efforts: cfg.ReasoningEfforts}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -293,8 +328,10 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	accounts := map[string]any{}
 	for _, k := range h.runtimeKinds() {
-		rt := h.cfg.Runtimes[k]
-		accounts[k.String()] = rt.Pool.List()
+		rt := h.getRuntime(k)
+		if rt != nil && rt.Pool != nil {
+			accounts[k.String()] = rt.Pool.List()
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts})
 }
@@ -345,8 +382,8 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) modelList() []map[string]any {
 	out := []map[string]any{}
 	for _, k := range h.runtimeKinds() {
-		rt := h.cfg.Runtimes[k]
-		if rt.Pool == nil || len(rt.Pool.List()) == 0 { // 只暴露已接入账号的平台
+		rt := h.getRuntime(k)
+		if rt == nil || rt.Pool == nil || len(rt.Pool.List()) == 0 { // 只暴露已接入账号的平台
 			continue
 		}
 		infos := h.fetchRuntimeModels(rt)
@@ -376,6 +413,9 @@ func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
 	}
 	if mi.MaxTokens > 0 {
 		entry["max_output_tokens"] = mi.MaxTokens
+	}
+	if mi.SupportsTools {
+		entry["supports_tools"] = true
 	}
 	entry["architecture"] = map[string]any{
 		"input_modalities": mi.InputModalities(),
@@ -539,6 +579,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	// 思考强度注入：客户端未传 reasoning_effort 且面板配置命中（按客户端请求模型 ID 匹配，
+	// 含 `*` 全局默认）时补上档位。未配置 = 零开销直通（applyEffort 内部快检）；
+	// 注入失败仅记日志、原 body 照发，绝不因此中断请求。
+	body = h.applyEffort(body, clientModel)
 
 	// 运行统计插桩：每客户端请求一行（最终结果；中间换号尝试不逐行——对齐 sidecar 口径）。
 	// TTFB 由 statWriter 记首字节，耗时/吞吐在出口由 defer 收口；
@@ -640,8 +684,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					log.Printf("model cooldown (single-account 402) platform=%s uid=%s model=%s cooldown=%s",
 						rt.Kind, acct.UID, model, h.cfg.HardCooldown)
 				}
-				log.Printf("upstream error platform=%s uid=%s status=%d kind=%s（单账号渠道不罚账号，原文透传）",
-					rt.Kind, acct.UID, status, kind)
+				// 日志点明错误性质与上游原文：旧文案（「不罚账号」）会让用户看到 403 时
+				// 误以为「工具把这个错误当成了请求级问题」，掩盖了真实原因（issue #117）。
+				log.Printf("upstream error platform=%s uid=%s status=%d kind=%s body=%s（单账号渠道无号可轮换，故原样透传、不冷却）",
+					rt.Kind, acct.UID, status, kind, truncateBody(respBody))
 				transparentError(w, status, respBody)
 				return
 			}
@@ -941,7 +987,7 @@ func (h *Handler) runtimeForModel(model string) (*Runtime, string, error) {
 	if !ok {
 		return nil, "", fmt.Errorf("model must use explicit prefix: workbuddy/<model> / workbuddyai/<model> / traework/<model> / qoder/<model> / qodercn/<model> / qodercom/<model> / qwenwork/<model> / glm/<model> / oczen/<model>；Cline 免费池直接用上游 ID（cline-free/<model>）")
 	}
-	rt := h.cfg.Runtimes[kind]
+	rt := h.getRuntime(kind)
 	if rt == nil || rt.Pool == nil || rt.Upstream == nil {
 		return nil, "", fmt.Errorf("provider %q is not configured", kind)
 	}
@@ -1114,6 +1160,66 @@ func rewriteModel(body []byte, model string) ([]byte, error) {
 	return json.Marshal(obj)
 }
 
+// applyEffort 思考强度档位注入收口：未传且命中面板配置（lookupEffort 精确未命中回退
+// 通配 `*`）时填入 reasoning_effort；键已存在（任意值含 null，客户端显式意图）不碰；
+// 未配置（空 map，未配置 = 常态）零开销直通。注入失败不中断——原样返回旧 body，
+// 让上游给出权威结果（同模型降级链「仅触发才干活」哲学，也与 rewriteModel 失败
+// 处理同套路）。
+func (h *Handler) applyEffort(body []byte, model string) []byte {
+	h.efMu.RLock()
+	ef, ok := lookupEffort(h.efforts, model)
+	h.efMu.RUnlock()
+	if !ok {
+		return body
+	}
+	nb, changed, err := injectEffortField(body, ef)
+	if err != nil {
+		log.Printf("effort 注入失败 %s: %v", model, err)
+		return body
+	}
+	if changed {
+		log.Printf("effort inject: %s -> %s", model, ef)
+		return nb
+	}
+	return body
+}
+
+// lookupEffort 思考强度映射查询：精确命中优先，未命中回退 `*` 全局默认；皆无 = 不注入。
+// 空 map / 空模型名一律未命中（调用方无需再加前置判断）。
+func lookupEffort(efforts map[string]string, model string) (string, bool) {
+	if len(efforts) == 0 || model == "" {
+		return "", false
+	}
+	if ef, ok := efforts[model]; ok {
+		return ef, true
+	}
+	ef, ok := efforts["*"]
+	return ef, ok
+}
+
+// injectEffortField 思考强度档位注入：请求体顶层**无** reasoning_effort 键时填入配置
+// 档位。整体 map 解析 → 增键 → Marshal，保留其余全部字段；顶层键已存在（任意值含
+// null——客户端显式意图）不碰，返回 changed=false。失败返回 error，调用方保持原样
+// 转发（绝不因注入失败中断请求）。
+func injectEffortField(body []byte, ef string) (nb []byte, changed bool, err error) {
+	var obj map[string]any
+	if err = json.Unmarshal(body, &obj); err != nil {
+		return nil, false, err
+	}
+	if obj == nil {
+		return nil, false, errors.New("body 不是 JSON 对象")
+	}
+	if _, ok := obj["reasoning_effort"]; ok {
+		return nil, false, nil
+	}
+	obj["reasoning_effort"] = ef
+	nb, err = json.Marshal(obj)
+	if err != nil {
+		return nil, false, err
+	}
+	return nb, true, nil
+}
+
 // normalizeToolTurnContent 把「content 为 null 或缺失」的 assistant / tool 消息补成空串。
 //
 // 上游（实测 qoder/deepseek-flash，2026-09-24）要求带 tool_calls 的 assistant
@@ -1166,9 +1272,10 @@ func normalizeToolTurnContent(obj map[string]any) {
 // 供管理端（费率面板）复用，保证「模型列表」与「模型费率」基于同一份清单。
 // 注意：会触发上游网络请求（fetchRuntimeModels），费控面板场景用 CachedChannelModels 避免阻塞。
 func (h *Handler) ChannelModels() map[provider.Kind][]provider.ModelInfo {
-	out := make(map[provider.Kind][]provider.ModelInfo, len(h.cfg.Runtimes))
-	for _, k := range h.runtimeKinds() {
-		rt := h.cfg.Runtimes[k]
+	ks := h.runtimeKinds()
+	out := make(map[provider.Kind][]provider.ModelInfo, len(ks))
+	for _, k := range ks {
+		rt := h.getRuntime(k)
 		if rt == nil || rt.Pool == nil || len(rt.Pool.List()) == 0 {
 			continue
 		}
@@ -1184,9 +1291,10 @@ func (h *Handler) ChannelModels() map[provider.Kind][]provider.ModelInfo {
 // CachedChannelModels 返回各渠道生效的模型列表，仅用内存缓存/静态兜底，不触发上游网络请求。
 // 供费控面板等需要即时返回的场景使用（后台刷新比用户点面板快）。
 func (h *Handler) CachedChannelModels() map[provider.Kind][]provider.ModelInfo {
-	out := make(map[provider.Kind][]provider.ModelInfo, len(h.cfg.Runtimes))
-	for _, k := range h.runtimeKinds() {
-		rt := h.cfg.Runtimes[k]
+	ks := h.runtimeKinds()
+	out := make(map[provider.Kind][]provider.ModelInfo, len(ks))
+	for _, k := range ks {
+		rt := h.getRuntime(k)
 		if rt == nil || rt.Pool == nil || len(rt.Pool.List()) == 0 {
 			continue
 		}
@@ -1215,7 +1323,8 @@ func (h *Handler) InvalidateModels() {
 	dynamicModelsCache.fetched = time.Time{}
 	dynamicModelsCache.lastFail = time.Time{}
 	dynamicModelsCache.Unlock()
-	for _, rt := range h.cfg.Runtimes {
+	for _, k := range h.runtimeKinds() {
+		rt := h.getRuntime(k)
 		if rt == nil {
 			continue
 		}
@@ -1228,9 +1337,23 @@ func (h *Handler) InvalidateModels() {
 }
 
 func (h *Handler) runtimeKinds() []provider.Kind {
-	ks := make([]provider.Kind, 0, len(h.cfg.Runtimes))
+	h.runtimesMu.RLock()
+	customCopy := make(map[provider.Kind]bool, len(h.customRts))
+	for k := range h.customRts {
+		customCopy[k] = true
+	}
+	h.runtimesMu.RUnlock()
+
+	ks := make([]provider.Kind, 0, len(h.cfg.Runtimes)+len(customCopy))
+	seen := map[provider.Kind]bool{}
 	for k := range h.cfg.Runtimes {
 		ks = append(ks, k)
+		seen[k] = true
+	}
+	for k := range customCopy {
+		if !seen[k] {
+			ks = append(ks, k)
+		}
 	}
 	sort.Slice(ks, func(i, j int) bool { return ks[i] < ks[j] })
 	return ks

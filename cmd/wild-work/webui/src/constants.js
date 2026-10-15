@@ -1,6 +1,8 @@
 // 前端侧常量与枚举。这些值编码的是后端语义，改错等于改协议，逐条对账自 web/app.js。
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
+// 未登记的自定义渠道（R66）不再是「未知即 WorkBuddy」——那个兜底会让自定义渠道
+// 顶着 WorkBuddyCN 的徽章与配色出现。改为回落「渠道名本身 + custom 短类」。
 export const CH_LABEL = {
   workbuddy: 'WorkBuddyCN', workbuddyai: 'WorkBuddyAI', traework: 'TraeWork',
   traecode: 'TraeCode', qoder: 'Qoder', qodercn: 'QoderCN', qodercom: 'QoderCOM',
@@ -13,13 +15,23 @@ export const CH_CLASS = {
   glm: 'glm', monkeycode: 'monkeycode', raccoon: 'raccoon', loomy: 'loomy',
   oczen: 'oczen', cline: 'cline',
 };
-export const chLabel = (k) => CH_LABEL[k] || 'WorkBuddy';
-export const chClass = (k) => CH_CLASS[k] || 'wb';
+export const chLabel = (k) => CH_LABEL[k] || k;
+export const chClass = (k) => CH_CLASS[k] || 'custom';
+
+// 与内建渠道（含上游命名空间）冲突的渠道标识：自定义渠道不得占用（R66）。
+// 与后端 provider.BuiltinKinds() 同集——两层指向不同 Runtime 会静默出错，
+// 故前端先给即时反馈（后端同样会拒）。
+export const RESERVED_CHANNEL_NAMES = new Set([
+  'workbuddy', 'workbuddyai', 'traework', 'traecode', 'qoder', 'qodercn', 'qodercom',
+  'qwenwork', 'monkeycode', 'raccoon', 'loomy', 'oczen', 'glm', 'cline', 'cline-free',
+]);
 
 // 不支持显式签到（手动按钮）的渠道：国际版是自动对话保活领日活；千问办公无签到活动；
-// MonkeyCode / 小浣熊 / Loomy 上游无签到端点；OpenCodeZen 匿名通道无账号概念（也无积分）；
+// MonkeyCode / Loomy 上游无签到端点；OpenCodeZen 匿名通道无账号概念（也无积分）；
 // Cline 走官方 API Key，无签到活动、Key 不过期。
-export const NO_EXPLICIT_CHECKIN = new Set(['workbuddyai', 'qwenwork', 'monkeycode', 'raccoon', 'loomy', 'oczen', 'cline']);
+// 小浣熊已实现签到（setting_info 触发每日积分落账，见 internal/raccoon/checkin.go），
+// 支持手动按钮，故从本表移除。
+export const NO_EXPLICIT_CHECKIN = new Set(['workbuddyai', 'qwenwork', 'monkeycode', 'loomy', 'oczen', 'cline']);
 export const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
 
 // 导入型渠道：凭据只来自本机已登录的官方客户端，没有浏览器登录流程

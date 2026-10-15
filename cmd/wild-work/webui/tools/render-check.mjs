@@ -91,6 +91,17 @@ const STATE = {
   autostart: false, checkin_times: ['09:00'], next_checkin: '', expiring_days: 1,
   oczen_api_key: '', channels: ['workbuddy', 'traework'], accounts: ACCOUNTS,
   compat: { default_channel: 'workbuddy', max_tokens_cap: 32000, model_map: {} },
+  // 思考强度注入（R63）与自定义渠道（R66）的编辑副本源数据。
+  // 自定义渠道那条专治三种「编造」：① 容量 k/M 单位必须可解析（1M→1M、64k→64k）；
+  // ② supports_tools 缺省 = 支持（未声明不得画成"无工具"）；③ supports_tools:false 要如实标出。
+  reasoning_efforts: { '*': 'medium', 'workbuddyai/deepseek-v4.1-flash': 'high' },
+  custom_channels: [{
+    name: 'stepfun', base_url: 'https://api.stepfun.com/step_plan/v1', api_key: 'sk-test-1234567890', enabled: true,
+    models: [
+      { id: 'step-3', context_window: 1000000, max_tokens: 64000, supports_images: true, supports_reasoning: true, reasoning_efforts: ['low', 'high'] },
+      { id: 'step-2-mini', context_window: 32000, max_tokens: 8000, supports_tools: false },
+    ],
+  }],
   fees: {
     updated_at: '', channels: [
       // 每条都带 `id`（= Go 侧 provider.PublicModelID 的产物，完整 ID 的唯一真源）。
@@ -150,7 +161,12 @@ try {
     React.createElement(Settings, {
       state: STATE, onClose: noop, onSaved: noop, onToast: noop, onEnsureSession: async () => true,
       setAuthSession: noop, onLogout: noop, onShowLogin: noop, onSaveTimes: async () => {},
-    })), ['chkPet', 'chkLoopGuard', 'btnSettingsSave', 'btnSettingsCancel', 'adminPassInput', 'keyInput', 'selHost', 'btnAddTime']);
+    })), ['chkPet', 'chkLoopGuard', 'btnSettingsSave', 'btnSettingsCancel', 'adminPassInput', 'keyInput', 'selHost', 'btnAddTime',
+      // v2.7.3 新增：思考强度（R63）与自定义渠道（R66）两区的**交互控件**必须真渲染出来。
+      // （effList / customChList 是容器 div，不属可交互控件，故不列在这里；它们由场景 8 断言。）
+      'effGlobalInput', 'effModelInput', 'effEffortInput', 'btnEffAdd', 'btnEffSave',
+      'inCustomName', 'inCustomURL', 'inCustomKey', 'btnCustomAdd', 'btnCustomSave', 'btnCustomTest',
+      'fbFromInput', 'fbToInput', 'btnFbAdd', 'btnFbSave']);
 
   // 4) 渠道费率弹层
   const feesHtml = renderToStaticMarkup(
@@ -204,6 +220,39 @@ try {
   results.push({ name: '缓存三态 + 档位/实测来源标注', visible: visibleControls(feesHtml).length, missing: v7 });
   if (v7.length) console.error(`✗ 缓存三态 + 档位/实测来源标注：${v7.join('；')}`);
   else console.log('✓ 缓存三态（0% 与「—」分流）、档位只在声明时出现、实测值带来源标、双层 ID 前缀护栏均通过');
+
+  // 8) v2.7.3：思考强度（R63）与自定义渠道（R66）的渲染层判据。
+  //    两者都是取数驱动的编辑区，SSR 不跑 useEffect，故判据落在「用 fixture 直接渲染」上。
+  const settingsHtml = renderToStaticMarkup(
+    React.createElement(Settings, {
+      state: STATE, onClose: noop, onSaved: noop, onToast: noop, onEnsureSession: async () => true,
+      setAuthSession: noop, onLogout: noop, onShowLogin: noop, onSaveTimes: async () => {},
+    }));
+  const v8 = [];
+  const has = (needle) => settingsHtml.includes(needle);
+  // 两个编辑区的容器必须真渲染出来（它们是取数驱动的分支，不在场景 3 的控件口径内）
+  has('id="effList"') || v8.push('#effList 容器没渲染（模型档位映射区整块缺失）');
+  has('id="customChList"') || v8.push('#customChList 容器没渲染（自定义渠道区整块缺失）');
+  // 思考强度：`*` 单独回显到「全局默认」行，其余是模型→档位的映射行
+  has('value="medium"') || v8.push('全局默认档位没回显到 effGlobalInput（`*` 必须单独走全局默认行）');
+  has('workbuddyai/deepseek-v4.1-flash') || v8.push('模型档位映射行没渲染（应显示 workbuddyai/deepseek-v4.1-flash）');
+  has('data-test-custom="0"') || v8.push('自定义渠道的「测试连通」按钮没渲染');
+  // 自定义渠道卡片：标识 / 地址 / 脱敏密钥（不得明文回显完整 key）
+  has('stepfun') || v8.push('自定义渠道标识没渲染');
+  has('https://api.stepfun.com/step_plan/v1') || v8.push('自定义渠道 Base URL 没渲染');
+  !has('sk-test-1234567890') || v8.push('自定义渠道的 api_key 明文进了面板 HTML（必须脱敏回显）');
+  has('sk-…7890') || v8.push('脱敏密钥形态应为 sk-…7890（保留首 3 末 4 供识别「未改动」）');
+  // 容量 k/M 单位：1M→"1M"、64k→"64k"（不是 1000000 / 64000）
+  has('>1M<') || v8.push('上下文 1000000 应格式化为 1M');
+  has('>64k<') || v8.push('最大输出 64000 应格式化为 64k');
+  // 能力三态：supports_tools 缺省 = 支持（step-3 有「工具」），显式 false 如实不标（step-2-mini）
+  has('<span class="tag">工具</span>') || v8.push('supports_tools 缺省应画成「工具」能力（缺省 = 支持）');
+  const toolsTags = (settingsHtml.match(/<span class="tag">工具<\/span>/g) || []).length;
+  toolsTags === 1 || v8.push(`supports_tools:false 的模型不得标「工具」；期望恰 1 条带工具标，实际 ${toolsTags} 条`);
+  has('[low, high]') || v8.push('模型声明的思考档位列表没渲染');
+  results.push({ name: '思考强度 + 自定义渠道', visible: visibleControls(settingsHtml).length, missing: v8 });
+  if (v8.length) console.error(`✗ 思考强度 + 自定义渠道：${v8.join('；')}`);
+  else console.log('✓ 思考强度全局默认/映射行、自定义渠道卡片（脱敏 key、k/M 单位、工具能力缺省、档位列表）均通过');
 } finally {
   await server.close();
 }

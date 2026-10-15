@@ -48,3 +48,30 @@ export function isLoopbackHost(h) {
 // 通配监听写法：与后端 config.Listen 归一化口径保持一致，
 // 空/`::` 等通配写法按「全部网卡」看待（即对外暴露）。
 export const isWildcardHost = (h) => h === '0.0.0.0' || h === '' || h === '::';
+
+// parseTokens 解析自定义渠道模型容量输入里的 k/M 单位（"1M"→1000000、"64k"→64000），
+// 纯数字原样返回；空/非法回落 fallback。与后端 custom 包的解析同源（R66）。
+export function parseTokens(str, fallback = 0) {
+  if (str === undefined || str === null || str === '') return fallback;
+  if (typeof str === 'number') return str;
+  const s = String(str).trim();
+  if (!s) return fallback;
+  const upper = s.toUpperCase();
+  let mult = 1;
+  let numStr = upper;
+  if (upper.endsWith('M')) { mult = 1000000; numStr = upper.slice(0, -1).trim(); }
+  else if (upper.endsWith('K')) { mult = 1000; numStr = upper.slice(0, -1).trim(); }
+  const n = parseFloat(numStr);
+  if (Number.isNaN(n) || n < 0) return fallback;
+  return Math.round(n * mult);
+}
+
+// formatTokenCount 反向格式化：优先整数 k/M（1M、64k），非整除时保留一位小数。
+export function formatTokenCount(num) {
+  if (!num) return '—';
+  if (num >= 1000000 && num % 100000 === 0) return `${num / 1000000}M`;
+  if (num >= 1000 && num % 1000 === 0) return `${num / 1000}k`;
+  if (num >= 1000000) return `${(num / 1000000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (num >= 1000) return `${(num / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  return String(num);
+}

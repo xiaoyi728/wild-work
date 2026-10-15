@@ -31,6 +31,8 @@ export function cssVar(name) {
   return v || undefined;
 }
 
+// 未登记渠道（R66 的自定义渠道）回落 --custom：原先回落 --accent 会让自定义渠道
+// 与主色混在一起，`--custom` 才是它的专色（三套主题各一值，与 CH_VAR 同源）。
 export function channelColor(channel) {
-  return cssVar(CH_VAR[channel] || '--accent');
+  return cssVar(CH_VAR[channel] || '--custom');
 }

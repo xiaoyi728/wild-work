@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
-import { CHANNEL_PRESETS, MASK_SENTINEL } from '../constants.js';
-import { isLoopbackHost, isWildcardHost } from '../format.js';
+import { CHANNEL_PRESETS, MASK_SENTINEL, RESERVED_CHANNEL_NAMES } from '../constants.js';
+import { isLoopbackHost, isWildcardHost, parseTokens, formatTokenCount } from '../format.js';
 
 // 现状：监听下拉只有三个语义位。空/`::` 等通配写法按「全部网卡」看待，
 // 与后端 config.Listen 归一化口径保持一致。
@@ -86,6 +86,23 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
   const [fbErr, setFbErr] = useState('');
   const [oczenKey, setOczenKey] = useState(state.oczen_api_key || ''); // 回显脱敏值
   const oczenTouched = useRef(false);
+  // 思考强度注入编辑副本（R63）：`*` 全局默认行单独存，其余为模型→档位映射。
+  const [effGlobal, setEffGlobal] = useState(() => (state.reasoning_efforts || {})['*'] || '');
+  const [effRules, setEffRules] = useState(() => Object.entries(state.reasoning_efforts || {})
+    .filter(([k]) => k !== '*').map(([model, effort]) => ({ model, effort })));
+  const [effModel, setEffModel] = useState('');
+  const [effEffort, setEffEffort] = useState('');
+  const [effErr, setEffErr] = useState('');
+  // 自定义渠道编辑副本（R66）：结构与 config.custom_channels[] 同形。
+  const [customCh, setCustomCh] = useState(() => JSON.parse(JSON.stringify(state.custom_channels || [])));
+  const [newChName, setNewChName] = useState('');
+  const [newChURL, setNewChURL] = useState('');
+  const [newChKey, setNewChKey] = useState('');
+  const [customErr, setCustomErr] = useState('');
+  const [customOk, setCustomOk] = useState('');
+  const [customTesting, setCustomTesting] = useState(false);
+  // 每个渠道的「新增模型」输入草稿，按渠道下标存（下标即渲染顺序，增删后整表重渲染）。
+  const [modelDraft, setModelDraft] = useState({});
   const [autostart, setAutostart] = useState(!!state.autostart);
   // 思考链防癫：后端缺省（旧 config.json 无 features 段）按开启显示，与 config.Default() 一致。
   const [loopGuard, setLoopGuard] = useState(state.loop_guard !== false);
@@ -140,11 +157,16 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
       let k = oczenKey.trim();
       if (k.includes(MASK_SENTINEL)) k = ''; // 脱敏形态 = 未改动，用当前配置值测
       const r = await api('/api/config/oczen_test', { api_key: k });
+      // 与真实对话同源（issue #117）：直连被地区拒时后端会自动改走备用通道，
+      // via_backup 标出答复来自哪个出口——否则配了代理点测试仍看到 403 会误以为功能没生效。
+      const via = r.via_backup ? '经备用通道' : '直连';
       if (r.ok) {
-        onToast(r.status === 200 ? '✓ OpenCodeZen 凭证可用（200）' : '✓ 连通正常（429 匿名限流，属预期）');
+        onToast(r.status === 200 ? `✓ OpenCodeZen 凭证可用（200，${via}）` : `✓ 连通正常（429 匿名限流，属预期，${via}）`);
       } else {
         const brief = (r.body || r.error || '').slice(0, 90).replace(/\s+/g, ' ');
-        onToast(`✗ 测试失败 HTTP ${r.status}：${brief}`);
+        const hint = (!r.via_backup && r.status === 403)
+          ? '（未走备用通道；若已配代理仍为直连，说明本次不是地区拒绝或备用链路拨不动，详见日志）' : '';
+        onToast(`✗ 测试失败 HTTP ${r.status}${hint}：${brief}`);
       }
     } catch (e) {
       onToast('✗ 测试失败：' + e.message);
@@ -184,6 +206,132 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
       onToast('降级链已保存（热生效）');
       onSaved();
     } catch (e) { setFbErr(e.message); }
+  }
+
+  // 行内改主模型 ID（上游 eb0ccec9）：形态校验 + 主模型唯一性校验，失败回滚输入框；
+  // 成功写回并滤掉与新值自环的备胎。输入框是非受控的（key=r.from，提交后随 key 重挂载），
+  // 故校验失败必须手动把 el.value 拨回旧值，否则错误文本会留在框里。
+  function editFbFrom(i, raw, el) {
+    const next = String(raw || '').trim();
+    const cur = fbRules[i].from;
+    if (!next || next === cur) { if (el) el.value = cur; return; }
+    if (!/^[^/]+\/.+/.test(next)) {
+      setFbErr(`主模型 ${next} 需为 channel/model 形式（如 workbuddyai/deepseek-v4.1-flash）`);
+      if (el) el.value = cur;
+      return;
+    }
+    if (fbRules.some((r, k) => k !== i && r.from === next)) {
+      setFbErr(`主模型 ${next} 已有规则（每个主模型只允许一条）`);
+      if (el) el.value = cur;
+      return;
+    }
+    setFbRules((rs) => rs.map((r, k) => (k === i
+      ? { ...r, from: next, to: r.to.filter((t) => t !== next) } : r)));
+    setFbErr('');
+  }
+
+  // ---------- 思考强度注入（R63） ----------
+  // 「添加」：模型 ID 必填、非 `*`（`*` 是全局默认专用键）、档位必填、模型唯一。
+  function addEffRule() {
+    const model = effModel.trim();
+    const effort = effEffort.trim();
+    if (!model) { setEffErr('模型 ID 不能为空（全局默认请在上方「全局默认」行填）'); return; }
+    if (model === '*') { setEffErr('* 是全局默认专用键，请在上方「全局默认」行填'); return; }
+    if (!effort) { setEffErr('思考档位不能为空'); return; }
+    if (effRules.some((r) => r.model === model)) { setEffErr(`模型 ${model} 已有档位（每个模型只允许一条）`); return; }
+    setEffRules((rs) => rs.concat([{ model, effort }]));
+    setEffModel(''); setEffEffort(''); setEffErr('');
+  }
+
+  // 「保存思考强度」：独立端点，保存即热生效。`*` 全局默认只在非空时写入
+  // （空 = 不设全局默认，不是「设成空串」）。
+  async function saveReasoningEfforts() {
+    try {
+      const efforts = {};
+      const g = effGlobal.trim();
+      if (g) efforts['*'] = g;
+      for (const r of effRules) efforts[r.model] = r.effort;
+      await api('/api/config/reasoning_efforts', { efforts });
+      setEffErr('');
+      onToast('思考强度已保存（热生效）');
+      onSaved();
+    } catch (e) { setEffErr(e.message); }
+  }
+
+  // ---------- 自定义渠道（R66） ----------
+  // 新建渠道：标识非空、不与内建同名、URL 非空、标识唯一（后端同样会拒，这里是即时反馈）。
+  function addCustomChannel() {
+    const name = newChName.trim();
+    const base = newChURL.trim();
+    if (!name) { setCustomErr('请填渠道标识（如 stepfun）'); return; }
+    if (RESERVED_CHANNEL_NAMES.has(name.toLowerCase())) {
+      setCustomErr(`渠道标识 ${name} 与内建渠道同名，会与内建运行时冲突，请换一个`); return;
+    }
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) { setCustomErr('渠道标识只能用字母/数字/下划线/连字符'); return; }
+    if (customCh.some((c) => c.name === name)) { setCustomErr(`渠道标识 ${name} 已存在`); return; }
+    if (!/^https?:\/\//i.test(base)) { setCustomErr('Base URL 需以 http:// 或 https:// 开头'); return; }
+    setCustomCh((cs) => cs.concat([{ name, base_url: base, api_key: newChKey.trim(), models: [], enabled: true }]));
+    setNewChName(''); setNewChURL(''); setNewChKey(''); setCustomErr(''); setCustomOk('');
+  }
+
+  async function testCustomChannel(name, baseURL, key) {
+    setCustomTesting(true); setCustomErr(''); setCustomOk('');
+    try {
+      // name + base_url + api_key 一起发：回显态可能是脱敏值，后端按 name 找回真实密钥，
+      // 否则未改动过的渠道点测试会恒报 401（同 issue #117 的「探针没走同一条链路」）。
+      const res = await api('/api/config/custom_channel_test', { name, base_url: baseURL, api_key: key });
+      if (res.ok) {
+        const models = res.models || [];
+        onToast(`[${name}] 连接成功！拉取到 ${models.length} 个模型`);
+        setCustomOk(`[${name}] 连接成功，模型: ${models.slice(0, 6).join(', ')}${models.length > 6 ? '…' : ''}`);
+      } else {
+        setCustomErr(`[${name}] 测试失败：${res.error}`);
+      }
+    } catch (e) {
+      setCustomErr(`[${name}] 测试失败：${e.message}`);
+    } finally { setCustomTesting(false); }
+  }
+
+  // 某个渠道的「新增模型」草稿。默认上下文 1M / 输出 64k / 三项能力全开
+  // （与 vanilla 的输入框默认值一致）；工具能力缺省 = 支持（后端 supports_tools 缺省 true）。
+  const modelDraftOf = (i) => modelDraft[i] || { id: '', ctx: '1M', out: '64k', eff: '', img: true, rsn: true, tools: true };
+  function setModelDraftAt(i, patch) {
+    setModelDraft((d) => ({ ...d, [i]: { ...(d[i] || { id: '', ctx: '1M', out: '64k', eff: '', img: true, rsn: true, tools: true }), ...patch } }));
+  }
+
+  // 追加模型：ID 必填且同渠道内唯一；容量走 parseTokens（k/M）；能力按勾选写入。
+  // 只写非默认字段，避免把「未声明」编造成具体值（同 R49 的哲学）。
+  function addModelAt(i) {
+    const d = modelDraftOf(i);
+    const id = (d.id || '').trim();
+    if (!id) { setCustomErr('请填入模型 ID'); return; }
+    const ch = customCh[i];
+    if (!ch) return;
+    if ((ch.models || []).some((m) => (typeof m === 'string' ? m : m.id) === id)) {
+      setCustomErr(`模型 ${id} 在该渠道下已存在`); return;
+    }
+    const m = { id };
+    const ctx = parseTokens(d.ctx, 0);
+    const out = parseTokens(d.out, 0);
+    if (ctx) m.context_window = ctx;
+    if (out) m.max_tokens = out;
+    if ((d.eff || '').trim()) m.reasoning_efforts = (d.eff || '').split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
+    if (d.img) m.supports_images = true;
+    if (d.rsn) m.supports_reasoning = true;
+    if (!d.tools) m.supports_tools = false; // 缺省 = 支持，故只在显式关闭时落字段
+    setCustomCh((cs) => cs.map((c, k) => (k === i ? { ...c, models: (c.models || []).concat([m]) } : c)));
+    setModelDraft((dd) => ({ ...dd, [i]: { id: '', ctx: '1M', out: '64k', eff: '', img: true, rsn: true, tools: true } }));
+    setCustomErr('');
+  }
+
+  async function saveCustomChannels() {
+    try {
+      await api('/api/config/custom_channels', { channels: customCh });
+      setCustomErr('');
+      setCustomOk('渠道及模型配置已成功保存并立即生效');
+      onToast('自定义渠道已保存（热生效）');
+      onSaved();
+    } catch (e) { setCustomErr(e.message); setCustomOk(''); }
   }
 
   async function saveSettings() {
@@ -481,7 +629,18 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
             <div id="fbList" className="proxy-list">
               {fbRules.length ? fbRules.map((r, i) => (
                 <div key={r.from} className="row proxy-row fb-rule">
-                  <span className="lbl fb-from" title={r.from}>{r.from}</span>
+                  {/* 主模型改成行内可编辑输入框（上游 eb0ccec9）：左列上下两行=主模型 + 备胎添加框，
+                      右侧 → 备胎 chips。主模型 ID 超长时在输入框内横向滚动，不再遮挡箭头与档位。 */}
+                  <span className="fb-from-col">
+                    <input className="input fb-from" spellCheck="false"
+                           title="主模型 ID（channel/model，可编辑；失焦或回车确认，点「保存降级链」生效）"
+                           defaultValue={r.from}
+                           onBlur={(e) => editFbFrom(i, e.target.value, e.target)}
+                           onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }} />
+                    <input className="input fb-to-add" spellCheck="false"
+                           placeholder="＋备胎 ID（回车添加）"
+                           onKeyDown={(e) => { if (e.key === 'Enter') { appendFbTo(i, e.target.value); e.target.value = ''; } }} />
+                  </span>
                   <span className="fb-arrow">→</span>
                   <span className="fb-tos">
                     {r.to.map((t, j) => (
@@ -491,9 +650,6 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
                       </span>
                     ))}
                   </span>
-                  <input className="input fb-to-add" style={{ width: 170 }} spellCheck="false"
-                         placeholder="＋备胎 ID（回车添加）"
-                         onKeyDown={(e) => { if (e.key === 'Enter') { appendFbTo(i, e.target.value); e.target.value = ''; } }} />
                   <button className="icon-btn" title="删除整条规则"
                           onClick={() => setFbRules((rs) => rs.filter((_, idx) => idx !== i))}>🗑</button>
                 </div>
@@ -511,6 +667,188 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
               <button className="btn small primary" id="btnFbSave" onClick={saveModelFallback}>保存降级链</button>
             </div>
             <div className="hint" id="fbErr" style={{ color: 'var(--danger)' }}>{fbErr}</div>
+          </div>
+
+          {/* 思考强度注入（R63）：与 R49「只透传上游声明」互补——这条解决「客户端没说话时用哪档」 */}
+          <div className="cfg-section">
+            <div className="cfg-heading">思考强度</div>
+            <div className="hint" style={{ margin: '0 0 8px' }}>
+              客户端请求<b>未带</b> <span className="mono-inline">reasoning_effort</span> 时，按请求模型 ID 注入配置的思考档位；
+              客户端显式传了的（任意值）一律不覆盖；精确未命中回退全局默认。哑管道不校验档位取值
+              （支持什么档位由渠道模型自己决定）；<b>TraeWork 渠道协议无 reasoning 注入点，注入无害但无效</b>。
+              模型 ID 用 <span className="mono-inline">channel/model</span> 全路径（如 workbuddyai/deepseek-v4.1-flash），
+              <span className="mono-inline">*</span> 为全局默认。
+            </div>
+            <div className="row" style={{ marginTop: 8 }}>
+              <label className="lbl wide" title="全局默认档位：精确未命中时回退注入">全局默认</label>
+              <input id="effGlobalInput" className="input grow" spellCheck="false" list="effortDatalist"
+                     placeholder="留空 = 无全局默认（如 medium）"
+                     value={effGlobal} onChange={(e) => { setEffGlobal(e.target.value); setEffErr(''); }} />
+            </div>
+            <div id="effList" className="proxy-list">
+              {effRules.length ? effRules.map((r, i) => (
+                <div key={r.model} className="row proxy-row">
+                  <span className="lbl wide eff-model" title={r.model}>{r.model}</span>
+                  <span className="fb-arrow">→</span>
+                  <span className="eff-value">{r.effort}</span>
+                  <button className="icon-btn" title="删除该映射"
+                          onClick={() => setEffRules((rs) => rs.filter((_, k) => k !== i))}>🗑</button>
+                </div>
+              )) : <div className="hint">（暂无模型档位——未配置的请求不注入）</div>}
+            </div>
+            <div className="row" style={{ marginTop: 8 }}>
+              <input id="effModelInput" className="input" style={{ width: 230 }} spellCheck="false"
+                     placeholder="模型 ID（channel/model）"
+                     value={effModel} onChange={(e) => { setEffModel(e.target.value); setEffErr(''); }} />
+              <input id="effEffortInput" className="input grow" spellCheck="false" list="effortDatalist"
+                     placeholder="思考档位（可自由输入，建议 none/low/medium/high/max）"
+                     value={effEffort} onChange={(e) => { setEffEffort(e.target.value); setEffErr(''); }}
+                     onKeyDown={(e) => { if (e.key === 'Enter') addEffRule(); }} />
+              <button className="btn small" id="btnEffAdd" title="添加一条模型档位映射" onClick={addEffRule}>添加</button>
+              <button className="btn small primary" id="btnEffSave" onClick={saveReasoningEfforts}>保存思考强度</button>
+            </div>
+            <datalist id="effortDatalist">
+              <option value="none"></option>
+              <option value="low"></option>
+              <option value="medium"></option>
+              <option value="high"></option>
+              <option value="max"></option>
+            </datalist>
+            <div className="hint" id="effErr" style={{ color: 'var(--danger)' }}>{effErr}</div>
+          </div>
+
+          {/* 自定义渠道（R66）：面板配置的 OpenAI 兼容渠道，模型面不做任何本地假设，全按用户填写 */}
+          <div className="cfg-section">
+            <div className="cfg-heading">自定义渠道（OpenAI 兼容）</div>
+            <div className="hint" style={{ margin: '0 0 8px' }}>
+              先配置渠道标识、地址与 API 密钥，再在各渠道下配置模型 ID、上下文大小、思考等级与多模态能力。
+              客户端用 <code>渠道标识/模型名</code> 访问，用量与统计全线统一。
+              渠道标识不得与内建渠道同名（如 workbuddy / cline / oczen / raccoon 等）。
+            </div>
+            <div id="customChList" className="custom-channels-list">
+              {customCh.length ? customCh.map((c, i) => {
+                const isOff = c.enabled === false;
+                const keyMask = c.api_key
+                  ? (c.api_key.length > 8 ? c.api_key.slice(0, 3) + MASK_SENTINEL + c.api_key.slice(-4) : '••••••')
+                  : '无密钥';
+                const models = c.models || [];
+                const d = modelDraftOf(i);
+                return (
+                  <div key={c.name} className="custom-ch-card">
+                    <div className="custom-ch-header">
+                      <span className="badge custom">{c.name}</span>
+                      <span className="custom-ch-url">{c.base_url}</span>
+                      {/* 只显示脱敏形态，**不放 title 明文**：面板本就只应拿到脱敏值
+                          （/api/state 已脱敏），万一拿到明文也不该再往 DOM 里写一份。 */}
+                      <span className="hint">[{keyMask}]</span>
+                      <span className={`tag ${isOff ? 'neutral' : 'ok'}`}>{isOff ? '已禁用' : '已启用'}</span>
+                      <span className="custom-ch-actions">
+                        <button className="btn small" disabled={customTesting}
+                                data-test-custom={i}
+                                onClick={() => testCustomChannel(c.name, c.base_url, c.api_key)}>测试连通</button>
+                        <button className="btn small" data-toggle-custom={i}
+                                onClick={() => setCustomCh((cs) => cs.map((x, k) => (k === i ? { ...x, enabled: x.enabled === false } : x)))}>
+                          {isOff ? '启用' : '停用'}
+                        </button>
+                        <button className="icon-btn" title="删除该渠道"
+                                onClick={() => setCustomCh((cs) => cs.filter((_, k) => k !== i))}>🗑</button>
+                      </span>
+                    </div>
+                    <div className="custom-models-box">
+                      {models.length ? (
+                        <table className="custom-models-table">
+                          <colgroup>
+                            <col style={{ width: 'auto' }} />
+                            <col style={{ width: 75 }} />
+                            <col style={{ width: 75 }} />
+                            <col style={{ width: 130 }} />
+                            <col style={{ width: 130 }} />
+                            <col style={{ width: 36 }} />
+                          </colgroup>
+                          <thead>
+                            <tr>
+                              <th>模型 ID</th><th>上下文</th><th>最大输出</th><th>思考等级</th><th>能力</th>
+                              <th style={{ textAlign: 'center' }}>操作</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {models.map((m, j) => {
+                              const obj = typeof m === 'object' && m !== null;
+                              const mid = obj ? m.id : m;
+                              const ctx = obj && m.context_window ? formatTokenCount(parseTokens(m.context_window, 0)) : '—';
+                              const out = obj && m.max_tokens ? formatTokenCount(parseTokens(m.max_tokens, 0)) : '—';
+                              const efforts = obj && Array.isArray(m.reasoning_efforts) ? m.reasoning_efforts : [];
+                              const defEff = (obj && m.default_reasoning_effort) || efforts[0] || '';
+                              const hasRsn = obj && (m.supports_reasoning || efforts.length > 0);
+                              const caps = [];
+                              if (obj && m.supports_images) caps.push(<span key="i" className="tag">识图</span>);
+                              if (hasRsn) caps.push(<span key="r" className="tag">思考</span>);
+                              // 工具能力缺省 = 支持（与后端 SupportsTools 缺省 true 同源）
+                              if (!obj || m.supports_tools !== false) caps.push(<span key="t" className="tag">工具</span>);
+                              return (
+                                <tr key={mid}>
+                                  <td><code>{mid}</code></td>
+                                  <td>{ctx}</td>
+                                  <td>{out}</td>
+                                  <td>{hasRsn
+                                    ? <><span className="tag ok" title={`默认: ${defEff}`}>{defEff || '开启'}</span>{efforts.length ? <span className="hint"> [{efforts.join(', ')}]</span> : null}</>
+                                    : <span className="hint">—</span>}</td>
+                                  <td>{caps.length ? caps : <span className="hint">—</span>}</td>
+                                  <td style={{ textAlign: 'center' }}>
+                                    <a className="fb-x" title="移除此模型"
+                                       onClick={() => setCustomCh((cs) => cs.map((x, k) => (k === i
+                                         ? { ...x, models: (x.models || []).filter((_, n) => n !== j) } : x)))}>×</a>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      ) : <div className="hint" style={{ margin: '4px 0 8px' }}>（该渠道尚未配置模型，请在下方添加模型及参数）</div>}
+                      {/* 单行紧凑布局：模型表格固定列宽对齐，任一输入框回车即可添加（PR #121） */}
+                      <div className="custom-model-add-row">
+                        <input className="input custom-m-id" placeholder="模型 ID" spellCheck="false"
+                               value={d.id} onChange={(e) => setModelDraftAt(i, { id: e.target.value })}
+                               onKeyDown={(e) => { if (e.key === 'Enter') addModelAt(i); }} />
+                        <input className="input custom-m-num" placeholder="上下文(如 1M)" spellCheck="false"
+                               value={d.ctx} onChange={(e) => setModelDraftAt(i, { ctx: e.target.value })}
+                               onKeyDown={(e) => { if (e.key === 'Enter') addModelAt(i); }} />
+                        <input className="input custom-m-num" placeholder="输出(如 64k)" spellCheck="false"
+                               value={d.out} onChange={(e) => setModelDraftAt(i, { out: e.target.value })}
+                               onKeyDown={(e) => { if (e.key === 'Enter') addModelAt(i); }} />
+                        <input className="input custom-m-eff" placeholder="思考档位" spellCheck="false"
+                               value={d.eff} onChange={(e) => setModelDraftAt(i, { eff: e.target.value })}
+                               onKeyDown={(e) => { if (e.key === 'Enter') addModelAt(i); }} />
+                        <label className="hint custom-m-cap"><input type="checkbox" checked={d.img}
+                               onChange={(e) => setModelDraftAt(i, { img: e.target.checked })} />识图</label>
+                        <label className="hint custom-m-cap"><input type="checkbox" checked={d.rsn}
+                               onChange={(e) => setModelDraftAt(i, { rsn: e.target.checked })} />思考</label>
+                        <label className="hint custom-m-cap"><input type="checkbox" checked={d.tools}
+                               onChange={(e) => setModelDraftAt(i, { tools: e.target.checked })} />工具</label>
+                        <button className="btn small" data-add-model={i} title="添加模型"
+                                onClick={() => addModelAt(i)}>➕</button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              }) : <div className="hint">（暂无自定义渠道，请先在下方输入渠道标识、地址与 API 密钥添加渠道）</div>}
+            </div>
+            <div className="row custom-ch-add-row">
+              <input id="inCustomName" className="input custom-ch-name" placeholder="渠道标识(如stepfun)" spellCheck="false"
+                     value={newChName} onChange={(e) => { setNewChName(e.target.value); setCustomErr(''); }} />
+              <input id="inCustomURL" className="input grow" placeholder="Base URL (如 https://api.stepfun.com/step_plan/v1)" spellCheck="false"
+                     value={newChURL} onChange={(e) => { setNewChURL(e.target.value); setCustomErr(''); }} />
+              <input id="inCustomKey" className="input custom-ch-key" type="password" placeholder="API Key (可选)" spellCheck="false"
+                     autoComplete="new-password"
+                     value={newChKey} onChange={(e) => { setNewChKey(e.target.value); setCustomErr(''); }} />
+              <button className="btn small" id="btnCustomTest" disabled={customTesting || !newChURL.trim()}
+                      title="用当前输入的地址与密钥探测该上游的 /models"
+                      onClick={() => testCustomChannel(newChName.trim() || '(未命名)', newChURL.trim(), newChKey.trim())}>测试连通</button>
+              <button className="btn small" id="btnCustomAdd" onClick={addCustomChannel}>＋ 新增渠道</button>
+              <button className="btn small primary" id="btnCustomSave" onClick={saveCustomChannels}>保存全部配置</button>
+            </div>
+            <div className="hint" id="customChErr" style={{ color: 'var(--danger)', marginTop: 4 }}>{customErr}</div>
+            <div className="hint" id="customChOk" style={{ color: 'var(--ok)', marginTop: 4 }}>{customOk}</div>
           </div>
 
           {/* 桌宠：纯观感层，开关只记在本浏览器（localStorage），不写 config.json、不影响 daemon */}

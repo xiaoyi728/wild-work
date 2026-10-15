@@ -53,6 +53,7 @@
   --loomy: #4d7c0f;
   --oczen: #475569;
   --cline: #15803d;
+  --custom: #6366f1;
 }
 
 @supports (color: oklch()) {
@@ -80,6 +81,7 @@
     --loomy: oklch(0.5322 0.1405 131.589);
     --oczen: oklch(0.4455 0.0374 257.28);
     --cline: oklch(0.5273 0.1371 150.069);
+    --custom: oklch(0.5854 0.2041 277.117);
   }
 }
 
@@ -119,6 +121,7 @@
     --loomy: #bef264;
     --oczen: #94a3b8;
     --cline: #4ade80;
+    --custom: #818cf8;
   }
 
   @supports (color: oklch()) {
@@ -145,6 +148,7 @@
       --loomy: oklch(0.8972 0.1786 126.665);
       --oczen: oklch(0.7107 0.0351 256.79);
       --cline: oklch(0.8003 0.1821 151.711);
+      --custom: oklch(0.6801 0.1583 276.935);
     }
   }
 }
@@ -186,6 +190,7 @@ html[data-theme="paper"] {
   --loomy: #5f8033;
   --oczen: #8a8a84;
   --cline: #3d7a52;
+  --custom: #5b60b8;
 }
 
 @supports (color: oklch()) {
@@ -219,6 +224,7 @@ html[data-theme="paper"] {
     --loomy: oklch(0.5572 0.1119 128.953);
     --oczen: oklch(0.6316 0.0088 106.65);
     --cline: oklch(0.5271 0.0900 153.364);
+    --custom: oklch(0.5286 0.1361 278.210);
   }
 }
 

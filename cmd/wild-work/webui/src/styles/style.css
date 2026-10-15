@@ -814,3 +814,49 @@ html[data-theme="paper"] .shiny {
          background: var(--card-bg); font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; }
 .fb-to .fb-x { cursor: pointer; color: var(--danger); margin-left: 3px; }
 .fb-to-add { font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; }
+
+/* --- v2.7.3 移植：思考强度（R63） + 自定义渠道（R66） + 降级链行内主模型可编辑 ---
+   一律追加新规则，不改既有规则；新类不含 display:none 基础规则
+   （TestHiddenByCssBaseRulesAreExplicitlyShown 要求 JSX 使用点自己点亮）。 */
+
+/* 自定义渠道专色：未登记渠道回落 --custom（三套主题各一值，见 tokens.css） */
+.badge.custom { background: var(--custom); }
+.btn.primary.alt.custom { background: var(--custom); }
+.cs-chip.custom.active { border-color: var(--custom); }
+.fees .ch-header.custom td { color: var(--custom); }
+
+/* 降级链：主模型改行内输入框后，左列上下两行（主模型 + 备胎添加框），定宽 300px。
+   长 ID 在输入框内横向滚动，不再遮挡箭头与备胎 chips（上游 d1255545 的同类修复）。 */
+.fb-from-col { display: flex; flex-direction: column; gap: 4px; width: 300px; flex-shrink: 0; }
+.fb-from { width: 100%; box-sizing: border-box; font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; }
+.fb-rule .fb-tos { min-width: 0; }
+
+/* 思考强度映射行：长模型 ID 用 ellipsis 截断（不换行撑破行高） */
+.eff-model {
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, "SF Mono", monospace;
+}
+.eff-value { flex: 1; font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; }
+
+/* 自定义渠道层级卡片 */
+.custom-channels-list { display: flex; flex-direction: column; gap: 8px; }
+.custom-ch-card { background: var(--code-bg); border: 1px solid var(--hairline); border-radius: 12px; padding: 10px 12px; }
+.custom-ch-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-bottom: 8px; border-bottom: 1px dashed var(--hairline); }
+.custom-ch-url { font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.custom-ch-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.custom-models-box { margin-top: 8px; }
+.custom-models-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 8px; table-layout: fixed; }
+.custom-models-table th, .custom-models-table td { padding: 5px 6px; vertical-align: middle; }
+.custom-models-table th { text-align: left; font-size: 11px; font-weight: 500; color: var(--muted); border-bottom: 1px solid var(--hairline); white-space: nowrap; }
+.custom-models-table td { border-bottom: 1px solid var(--hairline); overflow: hidden; text-overflow: ellipsis; }
+.custom-models-table code { font-size: 11px; overflow-wrap: anywhere; }
+.custom-model-add-row { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; margin-top: 6px; padding: 6px 8px; background: var(--card-bg); border-radius: 10px; border: 1px solid var(--hairline); }
+.custom-model-add-row .input { font-size: 12px; }
+.custom-m-id { flex: 1 1 auto; min-width: 110px; }
+.custom-m-num { width: 84px; flex-shrink: 0; }
+.custom-m-eff { width: 104px; flex-shrink: 0; }
+.custom-m-cap { display: inline-flex; align-items: center; gap: 2px; cursor: pointer; white-space: nowrap; margin: 0 1px; flex-shrink: 0; }
+.custom-ch-add-row { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; background: var(--code-bg); padding: 8px 10px; border-radius: 12px; border: 1px dashed var(--hairline); }
+.custom-ch-name { width: 130px; flex-shrink: 0; }
+.custom-ch-key { width: 150px; flex-shrink: 0; }
+.custom-ch-add-row #btnCustomSave { margin-left: auto; }

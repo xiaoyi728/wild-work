@@ -356,12 +356,12 @@ export default function Stats({ active, onToast }) {
         {!rows.length ? <div className="empty">暂无请求记录</div> : null}
       </div>
 
-      {/* 降级记录（R54）：主模型全冷切备胎的事件流。常显 —— 无事件时给占位行，
+      {/* 降级记录（R54）：原模型无可用账号切备胎的事件流（模型全冷 / 整渠道全灭）。常显 —— 无事件时给占位行，
           否则用户根本不知道有这块面板。进行中事件高亮 + 每秒重算持续时长。 */}
       <div className="ucard st-card" id="stFbBlock">
         <div className="ucard-label">降级记录</div>
         <div className="muted" style={{ marginBottom: 6 }}>
-          主模型全冷切备胎的事件 · 进程内记录（重启清零）· 30s 刷新
+          原模型无可用账号切备胎的事件（模型全冷 / 整渠道全灭）· 进程内记录（重启清零）· 30s 刷新
         </div>
         <table className="table st-fbs" id="stFbs">
           <thead><tr>
@@ -389,7 +389,7 @@ export default function Stats({ active, onToast }) {
                 )}
               </tr>
             )) : (
-              <tr><td className="empty" colSpan={7}>暂无降级记录——主模型全冷切备胎时这里会出现事件（降级/恢复时刻与持续时长）</td></tr>
+              <tr><td className="empty" colSpan={7}>暂无降级记录——原模型无可用账号切备胎时这里会出现事件（降级/恢复时刻与持续时长）</td></tr>
             )}
           </tbody>
         </table>

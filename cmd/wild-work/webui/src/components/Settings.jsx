@@ -653,7 +653,7 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
                   <button className="icon-btn" title="删除整条规则"
                           onClick={() => setFbRules((rs) => rs.filter((_, idx) => idx !== i))}>🗑</button>
                 </div>
-              )) : <div className="hint">（暂无规则——主模型全冷时将直接返回 503 提示）</div>}
+              )) : <div className="hint">（暂无规则——原模型无可用账号时将直接返回 503 提示）</div>}
             </div>
             <div className="row" style={{ marginTop: 8 }}>
               <input id="fbFromInput" className="input" style={{ width: 230 }} spellCheck="false"

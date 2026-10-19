@@ -31,7 +31,7 @@ type Client struct {
 	// IdleTimeout 聊天 SSE 流中空闲超时（StreamHTTP 无总时长上限，靠本字段兜底
 	// 「上游中途卡死」）。<=0 表示禁用（测试用）。
 	IdleTimeout time.Duration
-	Base       string // 默认 https://www.workbuddy.ai
+	Base        string // 默认 https://www.workbuddy.ai
 }
 
 // New 生产默认。配置连接池减少 TLS 握手。
@@ -52,7 +52,7 @@ func NewWithTimeout(timeout time.Duration) *Client {
 	return &Client{
 		HTTP:        &http.Client{Timeout: timeout, Transport: tr},
 		StreamHTTP:  &http.Client{Transport: tr}, // 共用 Transport（连接池复用），不设 Timeout
-		IdleTimeout: idle.DefaultTimeout,          // 流中空闲监控兜底（见 internal/idle）
+		IdleTimeout: idle.DefaultTimeout,         // 流中空闲监控兜底（见 internal/idle）
 		Base:        WBAIHost,
 	}
 }
@@ -281,21 +281,32 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 // 仅传输层失败才返回 err。
 //
 // 对网关类 5xx（502/503/504）与瞬态传输错误做有限重试（见 retry.go）；
-// 4xx 不重试（风控/余额/参数语义，重试无益）。
+// 4xx 不重试（风控/余额/参数语义，重试无益）——**唯一例外是上游显式声明
+// `retry_policy.retry=true` 或 `actions` 含 `RETRY` 的 429**（14003 瞬时拥塞）：
+// 上游自己说可重试，此时直接抛错并让上层罚号，会把一次可自愈的抖动放大成渠道级 503。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	prepared := PrepareBody(body)
+	rateLimitRetries := 0
 	for attempt := 1; attempt <= retryMaxAttempts; attempt++ {
 		rc, status, respBody, err = c.chatStreamOnce(a, prepared)
-		// 成功或 4xx：直接返回，不重试
-		if err == nil && !retryableStatus(status) {
-			return rc, status, respBody, nil
-		}
-		// 传输层错误：仅在可重试时继续
-		if err != nil && !retryableErr(err) {
-			return nil, 0, nil, err
+		ok, isRateLimit := retryDecision(status, respBody, err)
+		if !ok {
+			return rc, status, respBody, err
 		}
 		if attempt == retryMaxAttempts {
 			break
+		}
+		if isRateLimit {
+			// 收紧的独立预算：只重试一次，且不占用 5xx 的重试额度。
+			// 429 频繁重试有风控风险，宁可少试也不能刷屏。
+			rateLimitRetries++
+			if rateLimitRetries >= rateLimitMaxAttempts {
+				break
+			}
+			log.Printf("workbuddyai chat_stream uid=%s: 上游 429 显式声明可重试（retry_policy.retry / actions 含 RETRY），%v 后重试 (%d/%d)",
+				a.UID, rateLimitBackoff.Round(time.Millisecond), rateLimitRetries, rateLimitMaxAttempts-1)
+			time.Sleep(rateLimitBackoff)
+			continue
 		}
 		why := fmt.Sprintf("http %d", status)
 		if err != nil {

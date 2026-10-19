@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -519,5 +520,57 @@ func TestResourceDetailWritesBackPoolSnapshot(t *testing.T) {
 	}
 	if st, ok := p.Status("uid-rd"); !ok || st.Credits != 1234 {
 		t.Fatalf("pool 快照未回写: ok=%v credits=%d, want 1234", ok, st.Credits)
+	}
+}
+
+// addCustomRuntime 挂一个自定义渠道运行时：占位账号故意不带任何 token
+// （与 main.buildCustomRuntimes 一致）。
+func addCustomRuntime(t *testing.T, a *App, up provider.Upstream, name, uid string) *pool.Pool {
+	t.Helper()
+	cp := pool.New(t.TempDir() + "/state-" + name + ".json")
+	cp.Add(&auth.Auth{Kind: name, UID: uid, Nickname: name + " (自定义)", ExpiresAt: 4102444800})
+	a.UpdateCustomRuntimes(map[provider.Kind]*Runtime{
+		provider.Kind(name): {Kind: provider.Kind(name), Pool: cp, Upstream: up, Custom: true},
+	})
+	return cp
+}
+
+// TestRefreshAllSkipsCustomChannels 自定义渠道无积分概念：纳入 RefreshAll 只会
+// 每个渠道记一条 no token 假失败（面板「刷新积分」报失败 N 的噪音）。
+func TestRefreshAllSkipsCustomChannels(t *testing.T) {
+	up := &fakeUpstream{remain: 500}
+	a, _ := newTestApp(t, provider.WorkBuddyAI, up, "uid-real")
+	addCustomRuntime(t, a, up, "mychannel", "custom-mychannel")
+
+	sum := a.RefreshAll()
+	if sum.Failed != 0 {
+		t.Errorf("自定义渠道不应计入失败：failed=%d（accounts=%v）", sum.Failed, sum.Platforms["mychannel"])
+	}
+	if sum.OK != 1 {
+		t.Errorf("真实账号应正常计入成功：ok=%d", sum.OK)
+	}
+	if _, ok := sum.Platforms["mychannel"]; ok {
+		t.Errorf("自定义渠道不应出现在汇总里")
+	}
+}
+
+// TestRefreshCreditsCustomChannelNA 单账号刷新必须明确报「不适用」，
+// 而不是假装成功把 pool 快照写成 0。
+func TestRefreshCreditsCustomChannelNA(t *testing.T) {
+	up := &fakeUpstream{remain: 500}
+	a, _ := newTestApp(t, provider.WorkBuddyAI, up, "uid-real")
+	addCustomRuntime(t, a, up, "mychannel", "custom-mychannel")
+
+	remain, err := a.RefreshCredits("custom-mychannel")
+	if err == nil {
+		t.Fatalf("自定义渠道单账号刷新应报「不适用」，却成功返回 remain=%d", remain)
+	}
+	if !strings.Contains(err.Error(), "不适用") {
+		t.Errorf("错误信息应说明无积分概念，得: %v", err)
+	}
+
+	// 积分明细同理：报错而不是返回空 items 让前端弹空白层。
+	if _, _, _, _, err := a.ResourceDetail("custom-mychannel"); err == nil {
+		t.Error("自定义渠道积分明细应报「不适用」，却成功返回")
 	}
 }

@@ -1178,3 +1178,40 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 - 版本常量 **2.7.1 → 2.7.3**（同 L11/L12/L14 先例，由 `git merge-file` 带成上游值；
   本仓**未打 tag、未写 release note、未发布**，`RELEASES.md` 里的 v2.7.3 段落是上游写的，本轮纯 append 采纳）。
 - 渠道数仍 **13**（自定义渠道是面板配置项，不占 `provider.Kind` 常量位）。
+
+### L16 2026-10-19 摘取上游 v2.8.1/v2.9.1 四项必要修复 + 国际版 R77/R79（不含新渠道）
+
+- **范围裁定（所有者）**：只修已有渠道/引擎，**不新增渠道**；小浣熊迁站、Loomy/MonkeyCode 签到、
+  第二梯队其余项均不做。上游 v2.9.1 的 7 个新渠道（OfficeAce/Kilo/MiniMax/LobsterAI/ZCode/Gemini/CodeArts）
+  与面板改版 R81–R93 一律不移植。
+- **① issue #157**：`pool.RecordCheckin` 的 `if e, ok := ...` 遮蔽同名参数，`lastCheckinOK` 恒 true
+  （面板对失败签到也显示「签到成功」）。改名 `found`；承重测试 `TestRecordCheckinFailureNotMasked`。
+- **② 请求级错误不罚号**：`ErrClient` 单独 case（仅轮转、不 `NoteError`）；
+  `ErrImageInvalid`/`ErrBadParams` 加入 `ErrContentBlocked/ErrPromptTooLong/ErrPassthrough` 透明透传分支。
+  承重测试 `internal/server/request_error_penalty_test.go`。
+- **③ WorkBuddyAI 14018**：429 分支内识别 `"code":14018`（下一字符须非数字，防 `140180` 误伤）与复数
+  `credits exhausted` → `ErrHardCredit`；否则误判软限流只冷 60s，降级链永不触发。测试并入 `TestClassify`。
+- **④ 自定义渠道退出积分体系**：`RefreshAll` 跳过 `rt.Custom`；`RefreshCredits`/`ResourceDetail` 明确报
+  「不适用」。React 按后端 `credits_na` 动态隐藏签到/刷新积分入口、积分明细 hover 与汇总条，
+  保留停用/删除；显示名不可编辑（无凭证文件）。`render-check` 场景 2b 用「按卡片切块」断言，
+  普通渠道入口不得误伤。
+- **⑤ R77 WorkBuddyAI 429 显式可重试**：`retryDecision` 识别 `retry_policy.retry=true` 或 `actions`
+  含 `RETRY`（14003 瞬时拥塞），用独立 `rateLimitMaxAttempts=2` 预算重试一次（20s 退避），
+  不与 5xx 的 3 次额度混用。避免上游说「可重试」时直接罚号，把可自愈抖动放大成
+  `503 no_healthy_account`。测试 `retry_policy_test.go`。
+- **⑥ R79 WorkBuddyAI 目录/费率类型化错误**：`fetchCatalog`/`fetchV3Catalog` 非 200 返回
+  `*provider.Error{Kind: Classify(...)}`，让 `RefreshPricing` 的 `refreshIfSessionDead` 能用
+  `errors.As` 取到分类，401 时 refresh + 重试（不变量 19）。测试 `typederror_test.go`。
+  ⚠️ 上游 R79 还改了共享 `internal/upstream/client.go`（裸 401→SessionDead、14018），
+  影响 WorkBuddy CN 等渠道；**本轮未采纳**，只做 WBAI 面。
+- **负向验证（均实测变红）**：装回 `ok` 遮蔽 → 签到恒真；摘掉 handler 两个 case → `errCount=1`；
+  摘掉 14018 分支 → `soft_rate`；摘掉自定义渠道 guard → `failed=1` / `remain=500`；
+  `noCredits` 退回静态名单 → 场景 2b 点名「仍显示刷新积分」；
+  `retryDecision` 的 429 分支返回 false → 重试用例 429；类型化错误退回裸 `fmt.Errorf` →
+  `TestCatalogReturnTypedError` 点名 `*errors.errorString`。
+- **仍需保留的本地偏离**：`ledger` 的 `prevMonthCutoff`/`monthSegments`（上游 v2.9.1 仍未修）、
+  oczen 五道闸门判据（与上游 R69 相反，以本地实测为准）。
+- **验证**：`go build ./... && go vet ./... && go test ./...` 全绿（34 包 0 FAIL，需 Node 22 PATH 供前端闸门）；
+  `npm run build` + `npm run check` 9 场景绿；`dist/wild-work.exe` 已重建（15,415,296 B，
+  `"code":14018`×1 / `credits exhausted`×1 / `retry_policy.retry`×1 / `models api:`×3 / 自定义渠道文案×1）；
+  版本常量仍 **2.7.3**（未 bump、未发版）。

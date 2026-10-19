@@ -12,7 +12,7 @@ import { countUp } from '../anim.js';
 // 旧版本 state 文件（无 unusable 字段）读入后 credits_stale=true，此时不把旧值当真值，
 // 改显示「待刷新」。
 function Credits({ a, shownRef }) {
-  if (a.credits_na) return <span className="credit-na" title="匿名通道无积分概念">不适用</span>;
+  if (a.credits_na) return <span className="credit-na" title="该渠道无积分概念">不适用</span>;
   if (a.credits_stale) return <span className="credit-stale" title="余额口径已过期（旧版本状态文件），正在自动刷新…">待刷新</span>;
   const meta = [];
   if ((a.expiring_credits || 0) > 0) {
@@ -164,11 +164,15 @@ function CreditTip({ data, uid, anchorRect, expiringDays, onClose }) {
 function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDisable, onRemove, onDetail, onDetailLeave }) {
   const group = chClass(a.group);
   const groupName = chLabel(a.group);
-  const noCheckin = noExplicitCheckin(a.group);
+  const fixedAccount = NO_CREDITS.has(a.group);
+  // credits_na 是后端对「无积分概念」的动态判据（oczen/cline + 全部自定义渠道），
+  // 前端不得再维护一份静态名单：自定义渠道曾经仍显示签到/刷新积分按钮，
+  // 点了只会得到「不适用」错误与假失败（上游 v2.8.1 同款修复）。
+  const noCredits = fixedAccount || !!a.credits_na;
+  const noCheckin = noExplicitCheckin(a.group) || !!a.credits_na;
   const noCheckinTitle = a.group === 'workbuddyai'
     ? '无需手动签到：定时自动对话保活并领取日活奖励'
     : `${groupName} 不支持手动签到`;
-  const noCredits = NO_CREDITS.has(a.group);
   const checkinFail = !!a.last_checkin_at && !a.last_checkin_ok;
   const isNew = !knownUids.has(a.uid);
 
@@ -193,12 +197,14 @@ function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDis
       <div className="acct-top">
         <div>
           <span className={`badge ${group}`}>{groupName}</span>
-          {noCredits
+          {fixedAccount
             ? <span className="acct-name">{oczenName}</span>
-            : <span className="acct-name editable" title="点击修改显示名" onClick={() => onRename(a.uid, name)}>{name}</span>}
+            : noCredits
+              ? <span className="acct-name">{name}</span>
+              : <span className="acct-name editable" title="点击修改显示名" onClick={() => onRename(a.uid, name)}>{name}</span>}
         </div>
         <div className="acct-ops">
-          {noCredits ? (
+          {fixedAccount ? (
             <>
               {/* 问号图标：hover 展示 oczen 通道说明。title 内换行用 &#10;，
                   字面 \n 会被部分浏览器吞掉导致无 tooltip。 */}
@@ -211,7 +217,9 @@ function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDis
               {noCheckin
                 ? <span className="icon-op off" title={noCheckinTitle}>✓</span>
                 : <span className="icon-op" title="签到" onClick={() => onCheckin(a.uid)}>✓</span>}
-              <span className="icon-op" title="刷新积分" onClick={() => onRefresh(a.uid)}>↻</span>
+              {noCredits
+                ? null
+                : <span className="icon-op" title="刷新积分" onClick={() => onRefresh(a.uid)}>↻</span>}
               <span className="icon-op warn" title={a.disabled ? '启用' : '停用'}
                     onClick={() => onToggleDisable(a.uid, a.disabled)}>{a.disabled ? '▶' : '⏸'}</span>
               <span className="icon-op danger" title="删除账号" onClick={() => onRemove(a.uid)}>✕</span>
@@ -243,7 +251,7 @@ function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDis
 function channelSummary(acc) {
   const map = new Map();
   for (const a of acc) {
-    if (NO_CREDITS.has(a.group)) continue; // 匿名通道无积分概念，不占汇总条
+    if (NO_CREDITS.has(a.group) || a.credits_na) continue; // 无积分概念，不占汇总条
     if (!map.has(a.group)) {
       map.set(a.group, { group: a.group, n: 0, num: 0, exp: 0, unu: 0, stale: 0, off: 0 });
     }

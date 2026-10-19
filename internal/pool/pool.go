@@ -372,7 +372,9 @@ func (p *Pool) ReenableIfCredits(uid string, remain, expiring, unusable int64) {
 func (p *Pool) RecordCheckin(uid string, ok bool, msg string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if e, ok := p.byUID[uid]; ok {
+	// ⚠️ 第二个返回值不能命名为 ok：那会遮蔽同名参数 ok bool，
+	// 使 e.lastCheckinOK 恒写 true（issue #157，本仓 2026-10-19 摘取上游修复）。
+	if e, found := p.byUID[uid]; found {
 		e.lastCheckinOK = ok
 		e.lastCheckinAt = time.Now()
 		e.lastCheckinMsg = msg

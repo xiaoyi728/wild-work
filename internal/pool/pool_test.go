@@ -232,6 +232,28 @@ func TestRecordCheckinAndRemove(t *testing.T) {
 	}
 }
 
+// TestRecordCheckinFailureNotMasked 锁死 issue #157：RecordCheckin 内层
+// `if e, ok := ...` 曾遮蔽同名参数 ok，账号必然存在于池中 ⇒ lastCheckinOK 恒 true，
+// 面板对失败签到也显示「签到成功」。
+func TestRecordCheckinFailureNotMasked(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.RecordCheckin("u1", false, "401 unauthorized")
+	st, ok := p.Status("u1")
+	if !ok {
+		t.Fatal("account should exist")
+	}
+	if st.LastCheckinOK {
+		t.Fatalf("失败签到现在被记成成功（last_checkin_ok=true）: %+v", st)
+	}
+	if st.LastCheckinMsg != "401 unauthorized" {
+		t.Errorf("失败原因应透出，得 %q", st.LastCheckinMsg)
+	}
+	if st.LastCheckinAt.IsZero() {
+		t.Error("签到时刻应记录")
+	}
+}
+
 // TestLoadLegacyStateMarksCreditsStale v2.2.0 及之前的 state 文件无 version/unusable 字段，
 // 读入后必须置 creditsStale，避免面板把旧口径余额当真值（需删除 data 目录才能恢复的兼容缺陷）。
 // 自动刷新首刷成功（SetCreditDetail）后即清除标记。

@@ -156,6 +156,37 @@ try {
   check('Accounts 有数据', renderToStaticMarkup(
     React.createElement(Accounts, { state: STATE, actions: { ...stubActions, busy }, knownUids: new Set(['u-normal']) })), PANEL_ACTIONS);
 
+  // 2b) 自定义渠道（R66 收尾）：无积分概念 ⇒ 不显示签到/刷新积分入口，
+  //     但停用/删除仍须在场；普通渠道的签到/刷新入口不得被误伤。
+  //     判据按卡片切块，否则「找到一个刷新按钮」会掩盖自定义卡片上的同一个按钮。
+  const customState = {
+    ...STATE,
+    accounts: [
+      { uid: 'custom-stepfun', group: 'stepfun', nickname: 'stepfun (自定义)', credits: 0, unusable_credits: 0,
+        credits_na: true, cooling: false, until: '', reason: '', disabled: false, err_count: 0,
+        last_checkin_at: '', last_checkin_ok: false, last_used_at: '' },
+      ACCOUNTS[0],
+    ],
+  };
+  const customHtml = renderToStaticMarkup(
+    React.createElement(Accounts, { state: customState, actions: { ...stubActions, busy }, knownUids: new Set() }));
+  const cardOf = (uid) => (customHtml.split('<div class="acct-card').slice(1).find((c) => c.includes(uid)) || '');
+  const customCard = cardOf('custom-stepfun');
+  const normalCard = cardOf('u-normal');
+  const v2b = [];
+  if (!customCard) v2b.push('自定义渠道卡片没渲染');
+  if (/title="刷新积分"/.test(customCard)) v2b.push('自定义渠道仍显示「刷新积分」入口（后端恒报不适用）');
+  if (/title="签到"/.test(customCard)) v2b.push('自定义渠道仍显示「签到」入口（后端 noExplicitCheckin 恒拒绝）');
+  if (!/不支持手动签到/.test(customCard)) v2b.push('自定义渠道应显示「不支持手动签到」状态');
+  if (!/title="停用"/.test(customCard)) v2b.push('自定义渠道的停用入口被误删（应保留）');
+  if (!/title="删除账号"/.test(customCard)) v2b.push('自定义渠道的删除入口被误删（应保留）');
+  if (/acct-name editable/.test(customCard)) v2b.push('自定义渠道无凭证文件，显示名不得标成可改名');
+  if (!/title="刷新积分"/.test(normalCard)) v2b.push('普通渠道的刷新积分入口被误伤');
+  if (!/title="签到"/.test(normalCard)) v2b.push('普通渠道的签到入口被误伤');
+  results.push({ name: '自定义渠道无积分入口', visible: visibleControls(customHtml).length, missing: v2b });
+  if (v2b.length) console.error(`✗ 自定义渠道无积分入口：${v2b.join('；')}`);
+  else console.log('✓ 自定义渠道隐藏签到/刷新积分、保留停用/删除，普通渠道入口未受影响');
+
   // 3) 设置弹层：chkPet 必须在场（L6.3 第 8 条那个受控改动没把控件弄丢）
   check('Settings 弹层', renderToStaticMarkup(
     React.createElement(Settings, {

@@ -711,9 +711,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				rt.Pool.Disable(acct.UID, "session dead")
 			case provider.ErrNotFound:
 				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "upstream 404")
-			case provider.ErrContentBlocked, provider.ErrPromptTooLong, provider.ErrPassthrough:
-				// 内容拦截/上下文超限/请求级拒绝：不冷却不熔断不计错，直接透传原文回客户端。
+			case provider.ErrContentBlocked, provider.ErrPromptTooLong, provider.ErrImageInvalid,
+				provider.ErrBadParams, provider.ErrPassthrough:
+				// 内容拦截 / 上下文超限 / 图片无效 / 出站 body 不合格 / 请求级拒绝：
+				// 不冷却不熔断不计错，直接透传原文回客户端。
 				// 这些是请求内容或请求形态问题，与账号健康无关，轮转白费时间且浪费好号配额。
+				//
+				// ⚠️ ErrImageInvalid 与 ErrBadParams 的 ErrKind 注释早已写着「不罚号不轮转」，
+				// 但本 case 曾漏掉它们 ⇒ 落到 default 做 NoteError 计数，等于拿客户端的问题
+				// 惩罚健康账号（2026-10-19 摘取上游修复）。
 				transparentError(w, status, respBody)
 				return
 			case provider.ErrWafBlock, provider.ErrAccountFault, provider.ErrModelBlocked:
@@ -723,6 +729,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					transparentError(w, status, respBody)
 					return
 				}
+			case provider.ErrClient:
+				// 请求内容/形态类 4xx（如 workbuddy 11148 工具调用与结果不配对）：
+				// 错误跟着请求体走，换号必然同样拒收——不累计错误计数。否则一个
+				// 坏会话的客户端重试风暴能在几分钟内把全池账号记满冷却（阈值默认 3），
+				// 面板呈现「渠道自己挂了」假象，且诱发无意义的模型降级链触发。
+				// 仅轮转以兼容「同模型不同账号权益差异」场景；候选耗尽后透传最后
+				// 错误（与上游分类器注释「BadParams：不罚号但仍轮转」对齐）。
 			case provider.ErrServer:
 				if rt.NoCooldownOnServerError {
 					// 该渠道声明 5xx 为上游网关抖动（账号本身健康），

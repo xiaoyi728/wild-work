@@ -1,8 +1,8 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api.js';
-import { chLabel, chClass, noExplicitCheckin, noCheckinText, NO_CREDITS, CH_SUMMARY_ORDER, DETAIL_PAGE_SIZE } from '../constants.js';
-import { shortUid } from '../format.js';
+import { chLabel, chClass, noExplicitCheckin, noCheckinText, NO_CREDITS, CH_SUMMARY_ORDER, DETAIL_PAGE_SIZE, hasWebLogin, isImportLocal } from '../constants.js';
+import { shortUid, fmtDateTime24 } from '../format.js';
 import { countUp } from '../anim.js';
 
 // 积分文案：拆「可用 / 不可用 / 临期」三个数字。
@@ -13,6 +13,14 @@ import { countUp } from '../anim.js';
 // 改显示「待刷新」。
 function Credits({ a, shownRef }) {
   if (a.credits_na) return <span className="credit-na" title="该渠道无积分概念">不适用</span>;
+  if (a.credits_unit === 'token') {
+    return (
+      <span className="credit-main">
+        <CreditValue a={a} shownRef={shownRef} />
+        <span className="credit-unit" title="该渠道额度以 Token 计量，不并入积分合计">Token 计数</span>
+      </span>
+    );
+  }
   if (a.credits_stale) return <span className="credit-stale" title="余额口径已过期（旧版本状态文件），正在自动刷新…">待刷新</span>;
   const meta = [];
   if ((a.expiring_credits || 0) > 0) {
@@ -161,7 +169,7 @@ function CreditTip({ data, uid, anchorRect, expiringDays, onClose }) {
   );
 }
 
-function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDisable, onRemove, onDetail, onDetailLeave }) {
+function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDisable, onRemove, onDetail, onDetailLeave, onRelogin }) {
   const group = chClass(a.group);
   const groupName = chLabel(a.group);
   const fixedAccount = NO_CREDITS.has(a.group);
@@ -180,7 +188,9 @@ function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDis
   useEffect(() => { shownRef.current = {}; }, []);
 
   let tag;
-  if (a.last_checkin_at) {
+  if (a.session_dead) {
+    tag = <span className="tag bad" title={a.session_dead_reason || '登录态失效，请重新登录'}>需重新登录</span>;
+  } else if (a.last_checkin_at) {
     tag = <span className={`tag ${a.last_checkin_ok ? 'ok' : 'bad'}`}>{a.last_checkin_ok ? '签到成功' : '签到失败'}</span>;
   } else if (noCheckin) {
     tag = <span className="tag neutral" title={noCheckinTitle}>{noCheckinText(a.group)}</span>;
@@ -197,6 +207,18 @@ function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDis
       <div className="acct-top">
         <div>
           <span className={`badge ${group}`}>{groupName}</span>
+          {a.session_dead && !(isImportLocal(a.group) && !hasWebLogin(a.group)) ? (
+            <button className="tag bad" style={{ cursor: 'pointer' }} title="登录态失效：点击重新登录"
+                    onClick={() => onRelogin && onRelogin(a.group)}>⟳ 重登</button>
+          ) : null}
+          {a.session_dead && isImportLocal(a.group) && !hasWebLogin(a.group) ? (
+            <span className="tag bad" title={a.session_dead_reason || '登录态失效'}>需重新导入</span>
+          ) : null}
+          {a.cooling && a.until_ts ? (
+            <span className="tag neutral" title={a.reason || '冷却中'}>
+              {`冷却至 ${fmtDateTime24(a.until_ts)}（剩 ${Math.max(0, Math.ceil((a.until_ts * 1000 - Date.now()) / 60000))} 分）`}
+            </span>
+          ) : null}
           {fixedAccount
             ? <span className="acct-name">{oczenName}</span>
             : noCredits
@@ -275,6 +297,17 @@ export default function Accounts({ state, actions, knownUids, active }) {
   // uid -> {credits, unusable_credits, expiring_credits}：明细响应的同源值，
   // 只覆盖展示，不回写 state（state 是 /api/state 的快照，前端不该伪造它）。
   const [synced, setSynced] = useState({});
+  // 无积分概念渠道（oczen/cline/自定义）默认收起：它们不反映余额也不参与合计，
+  // 但保留一个原位开关（诊断入口）。选择记在 localStorage。
+  const [showNA, setShowNA] = useState(() => {
+    try { return localStorage.getItem('ww-show-na') === '1'; } catch { return false; }
+  });
+  const toggleNA = () => setShowNA((v) => {
+    const nv = !v;
+    try { localStorage.setItem('ww-show-na', nv ? '1' : '0'); } catch { /* 忽略 */ }
+    if (!nv && filter && rawAcc.some((a) => a.group === filter && a.credits_na)) setFilter(null);
+    return nv;
+  });
   const cache = useRef({});
   const hideTimer = useRef(null);
 
@@ -332,7 +365,9 @@ export default function Accounts({ state, actions, knownUids, active }) {
   const rawAcc = state ? (state.accounts || []) : [];
   const acc = rawAcc.map((a) => (synced[a.uid] ? { ...a, ...synced[a.uid], credits_stale: false } : a));
   const rows = channelSummary(acc); // state 为 null 时是空数组 ⇒ 汇总条不渲染（未登录）
-  const shown = filter ? acc.filter((a) => a.group === filter) : acc;
+  const naAcc = acc.filter((a) => a.credits_na);
+  const shownAll = filter ? acc.filter((a) => a.group === filter) : acc;
+  const shown = showNA ? shownAll : shownAll.filter((a) => !a.credits_na);
   const totals = rows.reduce((t, s) => ({ n: t.n + s.n, num: t.num + s.num }), { n: 0, num: 0 });
 
   return (
@@ -384,6 +419,11 @@ export default function Accounts({ state, actions, knownUids, active }) {
               {s.stale ? <span className="cs-stale">{`待刷新 ${s.stale}`}</span> : null}
             </button>
           ))}
+          {naAcc.length ? (
+            <button className={`cs-chip${showNA ? ' active' : ''}`} id="btnToggleNA"
+                    title="无积分概念渠道（OpenCodeZen / Cline / 自定义）：不参与合计，仅作诊断入口"
+                    onClick={toggleNA}>{showNA ? '收起不适用' : `不适用 ${naAcc.length} 号 · 展开`}</button>
+          ) : null}
           <span className="cs-total">{`合计 ${totals.num} 分`}</span>
         </div>
       ) : null}
@@ -392,13 +432,17 @@ export default function Accounts({ state, actions, knownUids, active }) {
           <Card key={a.uid} a={a} state={state} knownUids={knownUids}
                 onRename={actions.openRename} onCheckin={actions.checkin} onRefresh={actions.refreshOne}
                 onToggleDisable={actions.toggleDisable} onRemove={actions.removeAcct}
-                onDetail={show} onDetailLeave={hide} />
+                onDetail={show} onDetailLeave={hide}
+                onRelogin={(g) => (g === 'glm' ? actions.startGLMLogin() : actions.startLogin(g))} />
         ))}
       </div>
       {/* 提示语只在该账号列表真的加载过之后才出现：vanilla 未登录时 renderAccounts
           根本不执行，#acctEmpty 一直带着 hidden 类。所以判据是「state 存在且为空」，
           不是「数组为空」——后者会让未登录页面凭空多出一行提示。 */}
       {state && !acc.length ? <div id="acctEmpty" className="empty">还没有账号，点击上方按钮添加</div> : null}
+      {state && acc.length && !shown.length && !showNA ? (
+        <div className="empty" id="acctAllNAHidden">当前仅有无积分概念账号（已收起）——点上方「不适用 N 号 · 展开」查看</div>
+      ) : null}
       {tipState ? <CreditTip data={tipState.data} uid={tipState.uid} anchorRect={tipState.rect}
                              expiringDays={state && state.expiring_days} onClose={hide} /> : null}
     </>

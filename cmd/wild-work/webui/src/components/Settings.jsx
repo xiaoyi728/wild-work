@@ -81,6 +81,10 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
   const [proxyErr, setProxyErr] = useState('');
   // 模型降级链编辑副本（打开弹层时深拷贝；「保存降级链」是独立按钮，保存即热生效）
   const [fbRules, setFbRules] = useState(() => JSON.parse(JSON.stringify(state.model_fallback || [])));
+  // 设置内「查询模型」：复用费率页的查找弹层（降级链/思考强度都要填完整 model ID）。
+  const [msOpen, setMsOpen] = useState(false);
+  const [msFees, setMsFees] = useState(null);
+  const [bodyLog, setBodyLog] = useState(!!state.body_log);
   const [fbFrom, setFbFrom] = useState('');
   const [fbTo, setFbTo] = useState('');
   const [fbErr, setFbErr] = useState('');
@@ -175,15 +179,29 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
     }
   }
 
+  // 收编降级链底部草稿：两框都有内容时作为一条规则追加；只填一侧视为未填完并阻断。
+  // 「添加规则」「保存降级链」与弹层底部「保存」三处共用，否则填完直接点底部保存会静默丢规则。
+  function collectFbDraft(base, requireDraft) {
+    const from = fbFrom.trim();
+    const to = fbTo.trim();
+    if (!from && !to) {
+      return requireDraft ? [null, '先在输入框填主模型与备胎，再点「添加规则」'] : [base, ''];
+    }
+    if (!from || !to) return [null, '主模型与备胎需同时填写（或清空两框）'];
+    if (!/^[^/]+\/.+/.test(from)) return [null, `主模型 ${from} 需为 channel/model 形式`];
+    if (base.some((r) => r.from === from)) return [null, `主模型 ${from} 已有规则（每个主模型只允许一条）`];
+    const [tos, err] = parseModelList(to);
+    if (err) return [null, err];
+    const backups = tos.filter((t) => t !== from);
+    if (!backups.length) return [null, '备胎不能与主模型相同'];
+    return [base.concat([{ from, to: backups }]), ''];
+  }
+
   // 「添加规则」：主模型须为 channel/model 全路径且全局唯一（与后端 SetModelFallback 同源校验）。
   function addFbRule() {
-    const from = fbFrom.trim();
-    if (!/^[^/]+\/.+/.test(from)) { setFbErr(`主模型 ${from || '（空）'} 需为 channel/model 形式`); return; }
-    if (fbRules.some((r) => r.from === from)) { setFbErr(`主模型 ${from} 已有规则（每个主模型只允许一条）`); return; }
-    const [tos, err] = parseModelList(fbTo);
+    const [rules, err] = collectFbDraft(fbRules, true);
     if (err) { setFbErr(err); return; }
-    if (!tos.length) { setFbErr('至少填一个备胎模型'); return; }
-    setFbRules((rs) => rs.concat([{ from, to: tos.filter((t) => t !== from) }]));
+    setFbRules(rules);
     setFbFrom(''); setFbTo(''); setFbErr('');
   }
 
@@ -199,9 +217,14 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
   }
 
   // 「保存降级链」：独立端点，保存即热生效（无需重启），与设置弹层的其它项互不牵连。
+  // 底部草稿一并收编——「添加规则」不是保存的前置步骤，用户填完直接保存也应生效。
   async function saveModelFallback() {
+    const [rules, fbDraftErr] = collectFbDraft(fbRules, false);
+    if (fbDraftErr) { setFbErr(fbDraftErr); return; }
     try {
-      await api('/api/config/model_fallback', { rules: fbRules });
+      await api('/api/config/model_fallback', { rules });
+      setFbRules(rules);
+      setFbFrom(''); setFbTo('');
       setFbErr('');
       onToast('降级链已保存（热生效）');
       onSaved();
@@ -324,9 +347,35 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
     setCustomErr('');
   }
 
+  async function openModelSearch() {
+    setMsOpen(true);
+    if (msFees) return;
+    try { setMsFees(await api('/api/fees')); } catch (e) { onToast(e.message); }
+  }
+
+  async function toggleBodyLog(on) {
+    setBodyLog(on);
+    try {
+      await api('/api/config/body_log', { on });
+      onToast(on ? '请求体摘要记录已开启（写 data/ledger/body-trace-*.jsonl）' : '请求体摘要记录已关闭');
+      onSaved();
+    } catch (e) { setBodyLog(!on); onToast(e.message); }
+  }
+
   async function saveCustomChannels() {
     try {
-      await api('/api/config/custom_channels', { channels: customCh });
+      // 自动收录「填了输入行但没点＋新增渠道」的那一条（否则会静默保存空列表）。
+      let list = customCh;
+      const name = newChName.trim();
+      if (name && !customCh.some((c) => c.name === name)) {
+        if (RESERVED_CHANNEL_NAMES.has(name.toLowerCase())) { setCustomErr('渠道标识与内建渠道同名，请换一个'); return; }
+        if (!/^[A-Za-z0-9_-]+$/.test(name)) { setCustomErr('渠道标识只能用字母/数字/下划线/连字符'); return; }
+        if (!/^https?:\/\//i.test(newChURL.trim())) { setCustomErr('Base URL 需以 http:// 或 https:// 开头'); return; }
+        list = customCh.concat([{ name, base_url: newChURL.trim(), api_key: newChKey.trim(), models: [], enabled: true }]);
+        setCustomCh(list);
+        setNewChName(''); setNewChURL(''); setNewChKey('');
+      }
+      await api('/api/config/custom_channels', { channels: list });
       setCustomErr('');
       setCustomOk('渠道及模型配置已成功保存并立即生效');
       onToast('自定义渠道已保存（热生效）');
@@ -400,6 +449,20 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
         try {
           await api('/api/config/loop_guard', { on: loopGuard });
         } catch (e) { onToast(e.message); return; }
+      }
+
+      // 4.6) 模型降级链：底部「保存」与区块内「保存降级链」同源提交。
+      // 否则「添加规则 → 点底部保存」会关窗并丢掉规则（草稿也一并收编）。
+      // 未变更则不发请求，避免每次改监听都重写一遍降级链。
+      const [fbFinal, fbConfErr] = collectFbDraft(fbRules, false);
+      if (fbConfErr) { setFbErr(fbConfErr); onToast(fbConfErr); return; }
+      if (JSON.stringify(fbFinal) !== JSON.stringify(state.model_fallback || [])) {
+        try {
+          await api('/api/config/model_fallback', { rules: fbFinal });
+          setFbRules(fbFinal);
+          setFbFrom(''); setFbTo('');
+          setFbErr('');
+        } catch (e) { setFbErr(e.message); onToast(e.message); return; }
       }
 
       // 5) API-Key（最后保存：改 Key 可能影响当前会话的后续请求）
@@ -581,6 +644,15 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
               </label>
               <span className="hint" style={{ marginLeft: 8 }}>检测模型思维链死循环，命中即中断；不罚账号</span>
             </div>
+            <div className="row" style={{ marginTop: 8 }}>
+              <label className="lbl wide" title="把每次请求的上下文构成摘要写入 data/ledger/body-trace-*.jsonl（含消息前 200 字预览），用于定位上下文膨胀；默认关闭">请求体摘要</label>
+              <label className="switch">
+                <input type="checkbox" id="chkBodyLog" checked={bodyLog}
+                       onChange={(e) => toggleBodyLog(e.target.checked)} />
+                <span className="slider"></span>
+              </label>
+              <span className="hint" style={{ marginLeft: 8 }}>诊断用：记录上下文构成摘要（含预览），用完请关</span>
+            </div>
           </div>
 
           <div className="cfg-section">
@@ -620,11 +692,14 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
 
           {/* 模型降级链：主模型在其渠道全池模型级冷却时按链顶备胎，不粘滞自动切回（R54） */}
           <div className="cfg-section">
-            <div className="cfg-heading">模型降级链</div>
+            <div className="cfg-heading">模型降级链
+              <button className="btn small" id="btnSearchModelFb" style={{ marginLeft: 8 }} onClick={openModelSearch}>🔍 查询模型</button>
+            </div>
             <div className="hint" style={{ margin: '0 0 8px' }}>
               主模型在渠道全部账号上限流冷却（503 提示解冻时间）时，按顺序找第一个可用的备胎模型顶上，
               响应头 <span className="mono-inline">X-Model-Fallback</span> 标注实际备胎；原模型解冻后自动切回，不粘滞。
               模型 ID 用 <span className="mono-inline">channel/model</span> 全路径（如 workbuddyai/deepseek-v4.1-flash），备胎可跨渠道。
+              填完两个输入框后点「添加规则」或任一保存按钮都会提交；右下角「保存」也会一并保存本区块。
             </div>
             <div id="fbList" className="proxy-list">
               {fbRules.length ? fbRules.map((r, i) => (
@@ -644,7 +719,21 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
                   <span className="fb-arrow">→</span>
                   <span className="fb-tos">
                     {r.to.map((t, j) => (
-                      <span key={t} className="fb-to" title={t}>{t}
+                      <span key={t} className="fb-to" title={`${t}（可拖拽调整备胎顺序）`} draggable
+                            onDragStart={(e) => e.dataTransfer.setData('text/plain', String(j))}
+                            onDragOver={(e) => e.preventDefault()}
+                            onDrop={(e) => {
+                              e.preventDefault();
+                              const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+                              if (Number.isNaN(from) || from === j) return;
+                              setFbRules((rs) => rs.map((x, idx) => {
+                                if (idx !== i) return x;
+                                const to = x.to.slice();
+                                const [moved] = to.splice(from, 1);
+                                to.splice(j, 0, moved);
+                                return { ...x, to };
+                              }));
+                            }}>{t}
                         <a className="fb-x" title="移除该备胎"
                            onClick={() => setFbRules((rs) => rs.map((x, idx) => (idx === i ? { ...x, to: x.to.filter((_, k) => k !== j) } : x)))}>×</a>
                       </span>
@@ -671,7 +760,9 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
 
           {/* 思考强度注入（R63）：与 R49「只透传上游声明」互补——这条解决「客户端没说话时用哪档」 */}
           <div className="cfg-section">
-            <div className="cfg-heading">思考强度</div>
+            <div className="cfg-heading">思考强度
+              <button className="btn small" id="btnSearchModelEff" style={{ marginLeft: 8 }} onClick={openModelSearch}>🔍 查询模型</button>
+            </div>
             <div className="hint" style={{ margin: '0 0 8px' }}>
               客户端请求<b>未带</b> <span className="mono-inline">reasoning_effort</span> 时，按请求模型 ID 注入配置的思考档位；
               客户端显式传了的（任意值）一律不覆盖；精确未命中回退全局默认。哑管道不校验档位取值
@@ -871,6 +962,8 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
           <button className="btn small primary" id="btnSettingsSave" disabled={busy} onClick={saveSettings}>保存</button>
         </div>
       </div>
+      {msOpen ? <ModelSearch fees={msFees} onClose={() => setMsOpen(false)}
+          onCopy={async (id) => { try { await navigator.clipboard.writeText(id); onToast(`已复制 ${id}`); } catch { onToast('复制失败，请手动选择'); } }} /> : null}
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { chLabel, chClass, UNKNOWN_TIP, MODEL_SEARCH_MAX } from '../constants.js';
+import { chLabel, chClass, UNKNOWN_TIP } from '../constants.js';
 import { fmtTokens } from '../format.js';
 
 // 能力图标：模型 ID 后的小标记，title 提供文字描述。
@@ -158,7 +158,7 @@ export function collectAllModels(fees) {
 // 模型查找弹层：按关键字（模型名 / 渠道 / 完整 ID）即时过滤，点击复制完整模型 ID。
 // 关键字同时匹配裸名与完整 ID —— 两处都含渠道名，故搜渠道亦可。
 // 结果限量、超出只提示不纵向滚动，配合固定高度的 .modal-search，避免对话框随结果跳变。
-function ModelSearch({ fees, onClose, onCopy }) {
+export function ModelSearch({ fees, onClose, onCopy }) {
   const [q, setQ] = useState('');
   const inputRef = useRef(null);
   useEffect(() => { if (inputRef.current) inputRef.current.focus(); }, []);
@@ -166,15 +166,11 @@ function ModelSearch({ fees, onClose, onCopy }) {
   const all = collectAllModels(fees);
   const kw = String(q || '').trim().toLowerCase();
   const hit = kw ? all.filter((x) => x.full.toLowerCase().includes(kw) || x.short.toLowerCase().includes(kw)) : all;
-  const shown = hit.slice(0, MODEL_SEARCH_MAX);
-  const hidden = hit.length - shown.length;
-
+  // 全量渲染、由 .ms-list 纵向滚动（不再截断前 12 条：渠道多时想找的模型看不到）。
+  const shown = hit;
   const foot = !all.length ? ''
     : hit.length === 0 ? '无匹配'
-      : hidden > 0
-        ? (kw ? `命中 ${hit.length} 个，仅显示前 ${shown.length} 个，还有 ${hidden} 个未显示，请细化关键字`
-              : `共 ${hit.length} 个模型，仅显示前 ${shown.length} 个，输入关键字可缩小范围`)
-        : `共 ${hit.length} 个匹配`;
+      : `共 ${hit.length} 个匹配`;
 
   return (
     <div className="overlay" id="modelSearchOverlay"

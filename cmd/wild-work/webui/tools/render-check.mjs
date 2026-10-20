@@ -168,8 +168,11 @@ try {
       ACCOUNTS[0],
     ],
   };
+  // R103：无积分概念卡片默认收起；本场景要检查卡片内部入口，故临时让 localStorage 报告「已展开」。
+  globalThis.localStorage = { getItem: () => '1', setItem: () => {}, removeItem: () => {} };
   const customHtml = renderToStaticMarkup(
     React.createElement(Accounts, { state: customState, actions: { ...stubActions, busy }, knownUids: new Set() }));
+  delete globalThis.localStorage;
   const cardOf = (uid) => (customHtml.split('<div class="acct-card').slice(1).find((c) => c.includes(uid)) || '');
   const customCard = cardOf('custom-stepfun');
   const normalCard = cardOf('u-normal');

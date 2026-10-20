@@ -84,6 +84,23 @@ export default function LoginFlow({ flow, actions }) {
                   ? `已为你打开一个独立的浏览器窗口，请在其中完成${chLabel(pending.channel)}登录；登录完成后无需任何操作，本工具会自动捕获凭据并添加账号。`
                   : '请在浏览器新窗口中完成登录…'}
               </div>
+              {pending.manual ? (
+                <div id="manualCallback" style={{ marginTop: 10 }}>
+                  <div className="hint" style={{ marginBottom: 6 }}>
+                    如果浏览器与网关不在同一台机器（例如从局域网另一台电脑打开面板），
+                    登录完成后浏览器可能停在一条打不开的 <code>127.0.0.1</code> 地址上。
+                    把地址栏里的<b>完整 URL</b>复制粘贴到下面即可完成登录。
+                  </div>
+                  <input className="input grow" id="manualCallbackInput" spellCheck="false" autoComplete="off"
+                         placeholder="粘贴登录完成后浏览器地址栏里的完整 URL（含 ? 后的全部参数）"
+                         value={pending.manualURL || ''}
+                         onChange={(e) => actions.setPendingManualURL(e.target.value)} />
+                  <button className="btn small primary" id="btnManualCallback" style={{ marginLeft: 8 }}
+                          disabled={pending.manualBusy} onClick={actions.submitManual}>
+                    {pending.manualBusy ? '提交中…' : '提交回调'}
+                  </button>
+                </div>
+              ) : null}
               <div className="login-buttons">
                 <button className="btn small glare" id="btnCopyUrl" onClick={() => actions.copyUrl(pending.url)}>复制链接</button>
                 <button className="btn small danger" id="btnCancelLogin" onClick={actions.cancelLogin}>取消</button>

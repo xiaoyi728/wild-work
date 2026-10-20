@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { chLabel, CH_SUMMARY_ORDER, STATS_POLL_MS, APPLOG_POLL_MS, APPLOG_MAX_LINES, STATS_LOGS_URL, STATS_TOAST_SEEN_KEY } from '../constants.js';
-import { fmtTokensFull, shortUid } from '../format.js';
+import { fmtTokensFull, shortUid, fmtExpireInstant } from '../format.js';
 import { cacheRate, cacheNoneTitle } from './CacheCell.jsx';
 
 // 运行统计（上游 v2.5.5–v2.6.2 新增）：把服务端账本 internal/stats 的快照摊成人看的表。
@@ -201,7 +201,7 @@ export default function Stats({ active, onToast }) {
         <table className="table" id="stPlat">
           <thead><tr>
             <th>平台</th><th className="num">账号</th><th className="num">可用积分</th>
-            <th className="num">今日消耗</th><th className="num">累计消耗</th><th className="num">tokens</th>
+            <th className="num">今日消耗</th><th className="num" id="st-plat-expd" title="今天已经到期消失的额度（没花就没了）">今日作废</th><th className="num">累计消耗</th><th className="num">tokens</th>
             <th className="num">7 天内到期</th>
           </tr></thead>
           <tbody>
@@ -211,6 +211,7 @@ export default function Stats({ active, onToast }) {
                 <td className="num">{r.accounts}</td>
                 <td className={`num${r.credits ? '' : ' zero'}`}>{creditCell(r.group, r.credits)}</td>
                 <td className={`num${r.credit_out ? '' : ' zero'}`}>{creditCell(r.group, r.credit_out)}</td>
+                <td className={`num ${r.credit_expired ? 'danger' : 'zero'}`}>{r.credit_expired || '—'}</td>
                 <td className={`num${r.credit_out_exact ? '' : ' zero'}`}>{creditCell(r.group, r.credit_out_exact)}</td>
                 <td className={`num${r.tokens ? '' : ' zero'}`}>{fmtTokensFull(r.tokens)}</td>
                 <td className={`num${r.expire_7d ? ' warn' : ' zero'}`}>{r.expire_7d || '—'}</td>
@@ -255,10 +256,11 @@ export default function Stats({ active, onToast }) {
                 <td title={r.uid}>{r.nickname || shortUid(r.uid)}</td>
                 <td>{chLabel(r.group)}</td>
                 <td className="num">{fmtCreditS(r.amount)}</td>
-                <td>{r.expire_at || '—'}</td>
+                <td className={r.urgency === 'today' ? 'danger' : (r.urgency === 'tomorrow' ? 'warn' : '')}
+                    title="完整到期时刻（秒级）">{fmtExpireInstant(r.expire_at)}</td>
                 <td className="num">{fmtCreditS(r.today_out)}</td>
-                <td className={`num${r.days_left <= 3 ? ' warn' : ''}`}>
-                  {r.days_left <= 0 ? '今日到期' : (r.days_left === 1 ? '明日到期' : `${r.days_left} 天后到期`)}
+                <td className={`num${r.hours_left != null && r.hours_left < 24 ? ' warn' : ''}`}>
+                  {r.hours_left != null ? `${r.hours_left} 小时后` : (r.days_left <= 0 ? '今日到期' : `${r.days_left} 天后到期`)}
                   {r.risk ? <span className="muted">{` · 预计作废 ${fmtCreditS(Math.max(0, r.amount - r.burn_forecast))}分`}</span> : null}
                 </td>
               </tr>

@@ -31,7 +31,7 @@ export const RESERVED_CHANNEL_NAMES = new Set([
 // Cline 走官方 API Key，无签到活动、Key 不过期。
 // 小浣熊已实现签到（setting_info 触发每日积分落账，见 internal/raccoon/checkin.go），
 // 支持手动按钮，故从本表移除。
-export const NO_EXPLICIT_CHECKIN = new Set(['workbuddyai', 'qwenwork', 'monkeycode', 'loomy', 'oczen', 'cline']);
+export const NO_EXPLICIT_CHECKIN = new Set(['workbuddyai', 'qwenwork', 'oczen', 'cline']);
 export const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
 
 // 导入型渠道：凭据只来自本机已登录的官方客户端，没有浏览器登录流程

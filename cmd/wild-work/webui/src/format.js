@@ -31,10 +31,28 @@ export function fmtDay(ts) {
   return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// fmtDateTime24 强制 24 小时制格式化（不依赖浏览器 locale/ICU：
+// toLocaleString 在部分环境会渲染成 12 小时制或带「上午/下午」前缀）。
+export function fmtDateTime24(ts) {
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 export function fmtEntryTime(ts) {
-  return new Date(ts * 1000).toLocaleString('zh-CN', {
-    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-  });
+  return fmtDateTime24(ts);
+}
+
+// fmtExpireInstant 上游到期时刻（RFC3339 或纯日期）→ "YYYY-MM-DD HH:MM:SS"。
+// 纯日期语义是「该日全天可用」，展示成该日 23:59:59。
+export function fmtExpireInstant(at) {
+  if (!at) return '—';
+  const s = String(at).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `${s} 23:59:59`;
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 // isLoopbackHost 判定是否「仅本机可访问」：环回 IP / localhost。

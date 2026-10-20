@@ -93,14 +93,20 @@ function tokenOption(st) {
   const dates = byDay.map((d) => d.date);
   // 渠道系列：取所有出现过的渠道并集，线条颜色与该渠道徽章同源
   const chans = [...new Set(byDay.flatMap((d) => Object.keys(d.by_channel || {})))];
+  // 0 值画成 null（断点）：画成 0 会在底部连出一条贴轴长线；区间总量为 0 的系列整条不画。
   const series = chans.map((ch) => {
     const c = channelColor(ch) || '#0071e3';
+    const vals = byDay.map((d) => {
+      const v = d.by_channel[ch] || 0;
+      return v === 0 ? null : v;
+    });
+    if (!vals.some((v) => v != null)) return null;
     return {
       name: CH_NAMES[ch] || ch, type: 'line', smooth: true,
       itemStyle: { color: c }, lineStyle: { color: c },
-      data: byDay.map((d) => d.by_channel[ch] || 0),
+      data: vals,
     };
-  });
+  }).filter(Boolean);
   return buildOption(chartBase(), dates, series, fmtTokensFull);
 }
 
@@ -120,7 +126,10 @@ function creditOption(entries, names) {
   const top10 = Object.keys(totals).sort((a, b) => totals[b] - totals[a]).slice(0, 10);
   const series = top10.map((uid) => ({
     name: names[uid] || shortUid(uid), type: 'line', smooth: true,
-    data: dates.map((d) => (byAcct[uid] || {})[d] || 0),
+    data: dates.map((d) => {
+      const v = (byAcct[uid] || {})[d] || 0;
+      return v === 0 ? null : v; // 0 → 断点，避免贴轴长线
+    }),
   }));
   return buildOption(chartBase(), dates, series, fmtCredits);
 }

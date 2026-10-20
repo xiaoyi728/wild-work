@@ -61,6 +61,10 @@ function NavShell({ state, theme, toggleTheme, onSettings, onHelp, onAbout, onCo
     : (state.listen_host === 'localhost' ? '127.0.0.1' : state.listen_host)) : '';
   const apiURL = state ? `http://${host}:${state.listen_port}/v1` : '';
   const keyText = state ? (state.api_key === '' ? '（无鉴权）' : state.api_key) : '';
+  // 顶栏不全文展示密钥（防旁人瞟屏）：中间省略，完整值留在 data-key 供点击复制。
+  const keyShown = state && state.api_key
+    ? (state.api_key.length <= 14 ? state.api_key : state.api_key.slice(0, 6) + '…' + state.api_key.slice(-4))
+    : keyText;
   return (
     <nav className="topbar">
       <div className="topbar-inner">
@@ -82,13 +86,13 @@ function NavShell({ state, theme, toggleTheme, onSettings, onHelp, onAbout, onCo
           </div>
           <div className="info-cell">
             <span className="info-label">API-Key</span>
-            <code className="info-value" id="apiKeyDisplay" title="点击复制密钥；进入设置修改"
+            <code className="info-value" id="apiKeyDisplay" data-key={keyText} title="点击复制完整密钥；进入设置修改"
                   onClick={() => {
                     if (!state || disabled) return;
                     if (keyText === '（无鉴权）') { onCopy(null, 'API-Key'); return; }
                     onCopy(keyText, 'API-Key');
                   }}>
-              <span className="val">{keyText}</span>
+              <span className="val">{keyShown}</span>
             </code>
           </div>
         </div>
@@ -373,7 +377,9 @@ export default function App() {
       const r = await api('/api/login/start', { channel });
       const url = r.auth_url;
       if (!url) { toast('无法获取登录链接'); return; }
-      setFlow((f) => ({ ...f, confirm: null, pending: { channel, url, web: hasWebLogin(channel) } }));
+      setFlow((f) => ({ ...f, confirm: null, pending: {
+        channel, url, web: hasWebLogin(channel), manual: !!r.manual_callback, manualURL: '', manualBusy: false,
+      } }));
       // 网页版登录渠道（小浣熊 R44）：浏览器由后端拉起（独立 profile + CDP 调试端口），
       // 这里不能再 window.open —— 那会在用户日常浏览器里多开一个没有调试端口的标签页，
       // 后端根本捕获不到，用户却以为已经在「按指示登录」了。
@@ -392,6 +398,23 @@ export default function App() {
         } catch (e) { /* 忽略 */ }
       }, 3000);
     } catch (e) { toast(e.message); }
+  }
+
+  // submitManual 粘贴回调地址（远程/局域网登录的兜底通道，issue #98）。
+  async function submitManual() {
+    const p = flow.pending;
+    if (!p) return;
+    const raw = (p.manualURL || '').trim();
+    if (!raw) { toast('请粘贴登录完成后浏览器地址栏里的完整 URL'); return; }
+    setFlow((f) => ({ ...f, pending: { ...f.pending, manualBusy: true } }));
+    try {
+      await api('/api/login/callback', { channel: p.channel, url: raw });
+      toast('回调地址已提交，正在兑换登录态…');
+      setFlow((f) => ({ ...f, pending: { ...f.pending, manualBusy: false, manualURL: '' } }));
+    } catch (e) {
+      setFlow((f) => ({ ...f, pending: { ...f.pending, manualBusy: false } }));
+      toast(e.message);
+    }
   }
 
   async function cancelLogin() {
@@ -480,7 +503,8 @@ export default function App() {
   // 顶栏渲染已收敛到 NavShell（登录态与非登录态共用）。
 
   const actions = useMemo(() => ({
-    promptLogin, startGLMLogin, checkin, refreshOne, toggleDisable, removeAcct,
+    promptLogin, startGLMLogin, checkin, refreshOne, toggleDisable, removeAcct, startLogin, submitManual,
+    setPendingManualURL: (v) => setFlow((f) => ({ ...f, pending: { ...f.pending, manualURL: v } })),
     checkinAll, refreshAll, refreshFees, openRename, copyUrl: (u) => copyText(u, '链接', toast),
     cancelLogin, confirmLogin: () => flow.confirm && startLogin(flow.confirm.channel),
     importLocal,

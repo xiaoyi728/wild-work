@@ -147,6 +147,7 @@ GET  /api/login/glm_auto_status    # → {status: idle|pending|success|failed|ca
 POST /api/login/glm_auto_cancel    # 取消自动登录并关闭浏览器
 POST /api/login/glm_token          # {refresh_token} → {uid} 智谱清言手工兜底（见 R22）
 POST /api/login/cline_key           # {api_key} → {uid,warning} Cline 粘贴官方 sk_ Key（见 R46；只调 /api-keys 验证，零 token 消耗；warning=同账号告警）
+POST /api/login/callback          # {channel,url} 粘贴回调地址（TraeWork 等回环回调渠道，L18）
 POST /api/login/cancel
 POST /api/account/checkin          # {uid}
 POST /api/account/checkin_all
@@ -164,11 +165,14 @@ POST /api/config/autostart         # {on:bool}
 POST /api/config/compat            # 模型路由（默认渠道 / 封顶 tokens / 映射表）
 POST /api/config/expiring_days     # {days} 临期阈值
 POST /api/config/loop_guard        # {on:bool} 思考链防癫热切换（R50，atomic 全局、无需重启；GET /api/state 回读 loop_guard）
+POST /api/config/body_log          # {on:bool} 请求体摘要诊断开关（L18，默认关；写 data/ledger/body-trace-*.jsonl）
 POST /api/config/proxy             # {proxy,oczen_api_key?} 全局备用上游通道（R57；空串 = 关闭）
 POST /api/config/model_fallback    # {rules:[{from,to[]}]} 模型降级链（R54，保存即热生效）
 POST /api/config/reasoning_efforts # {efforts:{"channel/model":"high","*":"medium"}} 思考强度注入映射（R63，保存即热生效）
 POST /api/config/oczen_test        # {api_key} OpenCodeZen 凭证连通性测试
 POST /api/config/custom_channels   # {channels:[{name,base_url,api_key,models,enabled}]} 自定义 OpenAI 兼容渠道（R66，保存即热生效；api_key 提交脱敏值 = 不修改）
+# 推理面另有 glm 生图端点（L18）：POST /v1/images/generations、POST /v1/images/edits（同 API-Key 鉴权）
+
 GET  /api/fees                     # 渠道费率（本地缓存 + 按需刷新）
 POST /api/fees/refresh             # 异步刷新费率
 GET  /api/usage                    # 用量/积分流水聚合（R17，ledger 口径）
@@ -205,8 +209,8 @@ POST /api/quit                     # 退出程序
 > 两路都是无状态 SSE；上游无目录/额度/刷新接口 → 模型表静态、额度恒 0、`RefreshToken` 空实现。
 > 协议对照参考：`codkeep/MonkeyCodeReverseEngineer`（Apache-2.0）。
 > **小浣熊（`raccoon/*`）**：两条添加路径 —— 面板登录按钮走**网页版自动登录**（拉起独立 profile 的
-> Edge/Chrome，登录后经 CDP 捕获 Cookie `raccoon_refresh_token`，见 internal/login_raccoon/web.go；
-> 跨平台，不再依赖 Windows 注册表，详见 R44），弹窗次按钮「从客户端导入」读本机
+> Edge/Chrome，登录后经 CDP 捕获 Cookie `xhx_token`（R67 迁站后），见 internal/login_raccoon/web.go；
+> 跨平台，不再依赖 Windows 注册表，详见 R44/R67），弹窗次按钮「从客户端导入」读本机
 > `.box-agent/config/auth.json`。凭据 access_token ≈1h + refresh_token ≈30d，保活每 4 小时一次
 > 以减少「请求先 401 再刷新」的往返。**签到走 `setting_info`**（每日积分的惰性落账触发点，
 > 见 R65 与 internal/raccoon/checkin.go）。**注意互踢**：上游 refresh 轮换 refresh_token，
@@ -215,9 +219,9 @@ POST /api/quit                     # 退出程序
 > 接口结构整理：`xxhhlk/raccoon2api`（MIT）。
 > **Loomy（`loomy/*`）**：导入型渠道 —— 凭据由面板「从本机客户端导入」读
 > `C:\Users\Public\Loomy\<hash>\userData\auth-session.json`。上游**无 refresh 端点**，
-> session 约 14 天，到期需重新导入；故 `RefreshToken` 留空、定时任务全关（保活会被
-> 按「无 refresh token」跳过，但每天仍空跑一次并记失败）。鉴权失败是 **HTTP 200 +
-> 业务码 `100002`**（不是 401），业务码判定必须排在状态码判定之前。
+> session 约 14 天，到期需重新导入；`RefreshToken` 留空、保活关闭。**每日签到 = 宠物打工奖励**
+> （按有效对话轮次结算，`internal/loomy/checkin.go`，L18 接入），签到时段随全局配置。
+> 鉴权失败是 **HTTP 200 + 业务码 `100002`**（不是 401），业务码判定必须排在状态码判定之前。
 > 接口结构整理：`xxhhlk/loomy2api`（MIT）。
 > **Cline（`cline/*`）**：**粘贴型渠道** —— 凭据是官方文档化的 `sk_` API Key
 > （`app.cline.bot` → Settings → API Keys 创建，形如 `sk_` + 64 hex，**只在创建时完整显示一次**）。
@@ -242,8 +246,8 @@ POST /api/quit                     # 退出程序
 > 依据与实测全表见 `docs/cline渠道接入计划.md` 与 `docs/cline2api线索项目评估.md`。
 
 > **OpenCodeZen（`oczen/*`，匿名免费）**：凭证固定字面量 `public`，无账号/无签到/无积分；
-> 免费档有三道闸门（规范 `ses_<12hex><14Base62>` 会话头 + `stream:true` 且 tools 含 `bash`/`read` +
-> OpenCode CLI 伪装头），缺一即 403 FreeTierError；面板固定一项「[OpenCodeZen] 匿名」、积分显示「不适用」，
+> 免费档有五道闸门（规范且位合法的 `ses_<12hex><14Base62>` 会话头 + `/inference/v1` 车道 +
+> `stream:true` 且 tools 含 `bash`/`read` + 全套伪装头 + 禁发亲和头），缺一即 403 FreeTierError；面板固定一项「[OpenCodeZen] 匿名」、积分显示「不适用」，
 > 不可增删停用。详见 `docs/opencodezen渠道接入备忘.md`。
 > **智谱清言（`glm/*`）**：网页版私有接口（**非**开放平台 open.bigmodel.cn），凭据是浏览器 Cookie 里的
 > `chatglm_refresh_token`；所有私有接口需签名 `X-Sign = md5(ts-nonce-secret)`；模型 = `assistant_id`
@@ -261,7 +265,10 @@ POST /api/quit                     # 退出程序
 > 该接口网页版打开时自己就会调，幂等安全（`status=10001 今日已领取` 是正常语义）。
 > 「签到」的实质是**保活对话**。**操作建议**：面板加完账号 → 手机 App 登录同账号一次 → 之后每天自动领。
 > SSE 为**增量 delta**（`finish` 帧给全文，见 R25）。登录走 CDP 自动捕获 Cookie（R27/R28），
-> 支持多账号（独立 profile 逐个添加）。详见 `docs/智谱清言渠道接入备忘.md`。
+> 支持多账号（独立 profile 逐个添加）。**2026-10-20（L18/R106）**：调用侧迁到 IDE(Electron) 指纹；
+> 对话简化为**一来一回**（忽略 system、拒绝 assistant/多 user、不支持 tool_calls）；
+> 新增 `/v1/images/generations|edits` 生图端点。⚠️ **多参考图改图**会把拼版图上传到第三方图床
+> （`sang.pub`，上游协议只收公网 URL）；单张 http(s) 参考图直传、不落第三方。详见 `docs/智谱清言渠道接入备忘.md`。
 > **自定义渠道（`custom_channels`）**：不写代码、只在面板配置的 OpenAI 兼容渠道（R66）——
 > 用户填 `name`/`base_url`/`api_key` 与模型清单（含上下文/思考档位/多模态能力，**配什么返回什么、
 > 绝不向上去拉或推测**），即可以 `name/<model>` 访问并统一纳入流水与运行统计。
@@ -306,6 +313,9 @@ POST /api/quit                     # 退出程序
     TraeWork 是 `expire_time`（Unix 秒），Qoder 无此字段。均按 **UTC+8 墙钟**解析（`softRateResetLoc`），
     用 `time.Local` 会在非 UTC+8 机器上算错一天。上游未下发时 `ResourceItem.ExpireAt` 必须为空串，
     前端据此隐藏整列——**不得用零值时间冒充「永不过期」**。
+    **2026-10-20（L18/R105）**：`ExpireAt` 允许两种形态——纯日期（该日全天可用 ⇒ 次日 00:00 失效）
+    与 RFC3339 精确时刻。解析统一走 `provider.ExpireInstant`；**ledger 伪键必须用 `provider.ExpireDate`
+    只取日期前缀**，否则升级瞬间每包一对假 expire/earn 流水。
 19. **401 必须自愈，不能只信本地 `expiresAt`**：上游刷新会作废旧 access token（refresh token 同步轮换）。若新 token 未落盘、
     或同一账号在别处被刷新，本地文件里的 token `expiresAt` 仍在未来，但上游已拒绝 → `NeedsRefresh` 恒为假、永不刷新、
     积分恒 0、明细恒空。因此积分/明细/费率路径遇 `ErrSessionDead` 必须「refresh + 落盘 + 重试一次」
@@ -1215,3 +1225,91 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   `npm run build` + `npm run check` 9 场景绿；`dist/wild-work.exe` 已重建（15,415,296 B，
   `"code":14018`×1 / `credits exhausted`×1 / `retry_policy.retry`×1 / `models api:`×3 / 自定义渠道文案×1）；
   版本常量仍 **2.7.3**（未 bump、未发版）。
+
+### L17 2026-10-20 按需摘取上游 v2.8.2–v2.9.3 五项（仍不做全量融合）
+
+- **范围裁定（所有者）**：只做与在用渠道（workbuddy / workbuddyai / traework / qodercn）
+  相关的稳定性修复；**不做**新渠道（上游 14→20）、面板改版 R81–R104、glm IDE 指纹与生图（R106）、
+  hostguard（生产已设管理密码，不适用）、mac 自启、body_log、Token 单位面板。
+  `session_dead` 标记与「请求内降级重入」改动面大（跨 pool/handler/面板、handler 重构），本轮不动。
+- **① 5xx 默认不罚号（上游 v2.9.2）**：`server.Runtime.NoCooldownOnServerError` 改为
+  `CountServerErrorAsAccountFault`（默认 false = 不计数，5xx 仍可轮转）。动机：一次上游 500 风暴
+  会让单个请求轮转 3 个健康账号各 +1，`err_threshold=3` ⇒ 重试一次即整池冷却、整条渠道 503。
+  回归 `internal/server/upstream_fault_no_account_penalty_test.go`（默认不冷 + 逃生门仍有效）。
+  R66 里写的 `NoCooldownOnServerError` 是历史记录，字段本身已不存在。
+- **② 共享 client 类型化错误（R79 全量）**：`internal/upstream/client.go` 的 models/pricing
+  HTTP ≥400 改返回 `*Error{Kind: Classify(...)}`。此前只有 WBAI 面做了（L16 ⑥），共享 client 仍是
+  裸 `fmt.Errorf` ⇒ `RefreshPricing` 的 `errors.As` 取不到分类，**WorkBuddy CN 的目录/费率 401 自愈
+  永远不触发**。回归 `internal/upstream/typederror_test.go`。
+- **③ Qoder 双区签到窗口（R95）**：`qodercn` / `qodercom` 的 `checkin.go` **整文件采纳上游**
+  （claimStatus 双形态容错 + `startAt/endAt` 过滤 + benefit 金额上报 + 诊断文案），
+  修复「窗口外残留 CLAIMED 被读成今日已领 ⇒ 当天漏领」与「未开始活动被直接 POST ⇒ 假失败」。
+  新增 `checkin_alignment_test.go` / `checkin_window_test.go` / `checkin_variant_test.go`（均上游同源）。
+- **④ WorkBuddy CN 签到只读探测（#147）**：新增 `internal/upstream/checkin_activity.go`
+  （实现 `provider.CheckinReporter`）：先查 `checkin-activity-status`，已签**零写请求**，
+  活动未开归 `no_campaign`，探测失败降级回直接领取。**配套**：`scheduler.dailyCheckin` 的
+  reporter 路径补权威入账（`report.Amount → RecordCheckinEarn`），否则 #67 的「签到成功但今日收入 0」
+  会在 reporter 路径重现。回归 `checkin_activity_test.go`、`scheduler/checkin_reporter_earn_test.go`。
+- **⑤ ledger 整包到期归因（R101）**：`credit.go` 增 `itemSnap.Total` + 快照保留键 `@ch`
+  （渠道级「分别上报 total/used」事实，永久共享）+ `poolShrankExpiry` 三门槛
+  （无到期日 / 渠道分别记账 / total 确实下降）。修复 QoderCN 整包到期被记成「今日消耗」。
+  **刻意不动 `expired()`**：本仓 ledger 仍 local-first，R105 的自然日/RFC3339 口径未采纳；
+  `prevMonthCutoff`/`monthSegments` 两个上游至今未修的月末缺陷继续保留（见 L4/L8）。
+  回归 `internal/ledger/credit_poolshrink_test.go`（7 例，含老快照兼容与渠道级标记）。
+- **负向验证（均实测变红）**：5xx 分支恒计数 → 账号被冷却；类型化错误退回裸 `fmt.Errorf` →
+  点名 `*errors.errorString`；`campaignWindow` 恒 active → 未开始活动被 POST、边界用例红；
+  已签到分支短路 → 发写请求；reporter 入账短路 → earn 缺 100；`poolShrankExpiry` 摘除/恒 true →
+  整包到期记 spend、真实消耗渠道被误记 expire。
+- **有意不采纳并留档**：v2.9.2 的 `loginFlows` 收表**自带回归**（登录发起 2 秒静默死亡，
+  v2.9.3 #168 才修）⇒ 不要单独摘中间态；`ErrModelBlocked` 改模型级冷却、
+  R105 到期口径、R100–R104 面板改动均未做。
+- **附带修（测试面，非功能）**：`internal/stats/persist_test.go` 两处 fixture 写死
+  `"2026-09-20"`，自 **2026-10-20** 起滑出 30 日窗口 ⇒ `go test ./...` 必红（上游 master 同款
+  日期炸弹，与 L11 的 PR #88 同族）。改为相对日期（昨天），断言语义不变。
+- **验证**：`go build ./... && go vet ./... && go test ./...` 全绿（34 包 0 FAIL）；
+  `npm run check` 9 场景绿；`dist/wild-work.exe` 已重建（15,459,328 B，
+  `checkin-activity-status`×2 / `CountServerErrorAsAccountFault`×1 / `该账号无积分领取活动资格`×1 /
+  `poolShrankExpiry`×1，`NoCooldownOnServerError`×0，版本仍 **2.7.3**）。
+  生产 daemon 未重启、未重建 `dist/wild-work-linux`（运行中会 ETXTBSY）。
+
+### L18 2026-10-20 对齐上游 v2.8.2–v2.9.3 的其余行为（不做 P3 新渠道、不做 macOS 自启）
+
+- **范围**：在 L17 五项之上，把「与在用渠道/面板有关」的剩余差异全部对齐；**不做**新渠道（P3）、
+  macOS 自启、以及本仓刻意保留的三处设计（oczen 五道闸门、ledger 月末修复、React 面板结构）。
+  `internal/oczen/**` 与桌宠文件（`pet.js`/`pet.css`/`public/pet/**`/`anim.css`）本轮**零改动**。
+- **后端**：
+  1. 共享 `Classify` 补「所有 401→SessionDead」与 429 内 `14018`（复数 `Credits exhausted`）；
+     `ErrModelBlocked` 改为只冻（账号×模型）。
+  2. `session_dead` 标记替代永久 `Disable`：pool 字段/持久化/挑号跳过/粘性路由跳过/
+     `MarkSessionDead`/`ClearSessionDead`/签到失败识别/重登后按 auth 文件 mtime 自动清除；
+     `AccountView` 增加 `session_dead*`。
+  3. 请求内降级重入（`fallbackWorthy = ErrHardCredit || ErrSoftRate`，只跨渠道、封顶一次）；
+     成功换号复位 `statRow.Status`；降级记账改为**实际执行模型**（§6 默认项）。
+  4. R73：402 硬冷却截到 `cooldown.daily_grant_at`（默认 `00:00`）+ `daily_grant_buffer`（`30m`）。
+  5. R105：`provider.ExpireInstant/ExpireDate/ExpireIn/ExpireBucketOf/ExpireWithinDays/
+     ExpiringWithinDays`；ledger 与 stats 改为按精确时刻/自然日分桶（逐条目，非「最早日」）；
+     WorkBuddy CN/WBAI/TraeWork/QwenWork 的 `ExpireAt` 改 RFC3339，ledger 伪键仍取日期前缀。
+  6. `data:` 无空格 SSE 容错（`sseDataPayload`，Aggregate 与 streamCore 共用）。
+  7. `checkinOne` 长会话守卫（无 refresh 但 access 非空不再短路）+ `sessionDeadSeen` 终态收口；
+     Loomy 宠物打工签到、MonkeyCode 钱包签到（Cap.js PoW，新增 `captcha.go`）。
+  8. TraeWork 人工回调（`SubmitCallbackURL` + `CallbackPort` 端口自检）、`POST /api/login/callback`。
+  9. R67 小浣熊迁站：入口 `/login?product_code=work…`、Cookie `xhx_token`、`raccoon.JWTUID` 单点。
+  10. traework 排队心跳观测（`queue_begin`/`request_wait_in_queue`，首条 + 30s 限频）。
+  11. DNS rebinding `hostGuard`（未设密码时只认环回 Host）、`body_log` 请求体摘要
+      （`ledger/bodytrace.go`，默认关）、`ResourceItem.Unit`/`credits_unit`（token 计量不进积分口径）、
+      devdump tee 流式落盘。
+  12. glm R106：IDE 指纹迁移、一来一回对话语义（拒 assistant/多 user）、
+      `/v1/images/generations|edits`（新增 `internal/imgutil`，依赖 `golang.org/x/image`）。
+- **React（只改 webui/src，产物 web-app）**：设置内「查询模型」两处 + 结果全量滚动；
+  顶栏 API-Key 中间省略（`data-key` 保留完整值）；自定义渠道保存自动收录未提交输入行；
+  `body_log` 开关；平台表「今日作废」列；NA 卡片默认收起（原位开关 + localStorage）；
+  折线 0→null；24h 时间；`session_dead` 徽标 + ⟳ 重登；冷却时刻（`until_ts`）；
+  TraeWork 粘贴回调输入行；Token 计数标签；最近临期精确时刻/剩余小时/紧迫度配色；
+  降级链备胎 chip 支持拖拽改序。**保留** hover 明细与既有面板结构。
+- **已知未做（如实披露）**：登录编排 `loginFlows` 收表（其唯一功能收益是新增渠道的实现收敛，
+  P3 已裁掉；单独摘 v2.9.2 中间态会带入 #168 回归）；fallback/effort 输入框未做上游同款
+  combobox 模糊下拉（模型查找入口 + 拖拽改序已补）；token 计量渠道只在账号卡标注，未单开统计面板。
+- **验证**：`go build/vet/test ./...` 全绿（新增 app/provider/stats/ledger/pool/scheduler/server/
+  login_trae/login_raccoon/loomy/monkeycode/glm/imgutil 回归）；`npm run build` + `npm run check`
+  9 场景绿；`scripts` 无改动。`dist/wild-work.exe` 已重建；版本仍 **2.7.3**（未 bump、未发版）。
+  生产 daemon 未重启、`dist/wild-work-linux` 未重建。

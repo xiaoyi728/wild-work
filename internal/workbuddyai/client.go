@@ -552,7 +552,7 @@ func (c *Client) userResource(a *auth.Auth) (int64, []provider.ResourceItem, err
 			Remain:   remain,
 			ExpireAt: expireDate(acct.CycleEndTime),
 			// 套餐名+到期日组合伪键（同国内版口径）
-			Key:    fmt.Sprintf("%s|%s", acct.PackageName, expireDate(acct.CycleEndTime)),
+			Key:    fmt.Sprintf("%s|%s", acct.PackageName, expireDay(acct.CycleEndTime)),
 			Usable: true, // 国际版无端点分区，所有套餐均可被本工具消耗
 		})
 	}
@@ -566,10 +566,13 @@ func expireDate(ts string) string {
 		return ""
 	}
 	if t, err := time.ParseInLocation("2006-01-02 15:04:05", ts, softRateResetLoc); err == nil {
-		return t.Format("2006-01-02")
+		return t.Format(time.RFC3339)
 	}
 	return ""
 }
+
+// expireDay 取到期日的日期前缀，专供 ledger 伪键。
+func expireDay(ts string) string { return provider.ExpireDate(expireDate(ts)) }
 
 // DailyCheckin 国际版的「每日活跃」任务：用免费模型对话一次保持账号活跃，
 // 并顺带探测签到活动是否开启（开启则自动领取）。

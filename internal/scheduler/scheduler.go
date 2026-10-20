@@ -61,6 +61,9 @@ type Scheduler struct {
 	onCheckin func(CheckinResult)        // 结果观察器，供 GUI 接收自动签到结果
 	onRefresh func(string, bool, string) // token 刷新结果观察器
 
+	// refreshOverride 仅测试使用：替换 refreshForCheckin 的刷新动作（模拟「刷新也失败」）。
+	refreshOverride func(*auth.Auth, string) error
+
 	// retryMu 保护签到完成状态（自动调度的 Run goroutine 与手动签到并发）。
 	retryMu sync.Mutex
 	// checkinDone 当日已完成签到的时段集合，键为 "YYYY-MM-DD@起始分钟数"。
@@ -465,13 +468,18 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 	name := s.name()
 	log.Printf("checkin start platform=%s uid=%s", name, uid)
 	a := s.cfg.Pool.AuthByUID(uid)
-	if a == nil || a.RefreshToken == "" {
-		// 无 refresh token 属上游 no_token 状态：仍标可重试（期间用户重新登录即可恢复），
-		// 且该账号会在面板上以失败状态显示，不会静默漏领。
-		return s.finishCheckin(uid, CheckinResult{UID: uid, Msg: "no refresh token", Retryable: true})
+	if a == nil {
+		return s.finishCheckin(uid, CheckinResult{UID: uid, Msg: "unknown account", Retryable: true})
 	}
-	// 签到前保证 access token 有效；否则仅依赖晚间 keepalive 时，早上的签到可能拿过期 token。
-	if a.NeedsRefresh(2 * time.Hour) {
+	// 「无凭据」判定不能只看 refresh token：loomy / monkeycode 这类长会话渠道
+	// 凭据本体是 accessToken（上游无 refresh 端点，refreshToken 刻意留空）。
+	// 旧判据 `a.RefreshToken == ""` 会把这类账号当 no_token 提前返回 ⇒ 渠道里
+	// 已实现的签到根本不会被调用（静默失效）。
+	if a.RefreshToken == "" && a.AccessToken == "" {
+		return s.finishCheckin(uid, CheckinResult{UID: uid, Msg: "no credential", Retryable: true})
+	}
+	// 签到前保证 access token 有效；但只有存在 refresh token 才谈得上「刷新」。
+	if a.RefreshToken != "" && a.NeedsRefresh(2*time.Hour) {
 		if err := s.refreshForCheckin(a, uid); err != nil {
 			// 上游把 no_token/刷新失败归为可重试（窗口内再试一次往往就好了）；
 			// 只有 session dead 才不再重试——那需要人工重新登录。
@@ -481,26 +489,42 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 	r := CheckinResult{UID: uid}
 	structured, checkinErr := s.dailyCheckin(a, &r)
 	// 签到接口本身就是令牌有效性验证；若返回 session dead，刷新一次后重试整套签到。
-	// 要求渠道返回类型化的 provider.Error（见 qodercn/qodercom 的 sessionDead）。
+	// sessionDeadSeen 记录「本次 401 自愈也救不回来」：此时才把结果定为终态。
+	// 只判 checkinErr 的类型不够——刷新失败后被 %w 包成普通错误，会掉进
+	// 「非 session dead 一律可重试」分支，导致 401 在窗口内被反复重试（无效请求）。
+	sessionDeadSeen := false
 	if checkinErr != nil && isSessionDead(checkinErr) {
 		log.Printf("checkin token invalid platform=%s uid=%s, refreshing and retrying", name, uid)
 		if err := s.refreshForCheckin(a, uid); err != nil {
-			checkinErr = fmt.Errorf("token invalid; refresh failed: %w", err)
+			sessionDeadSeen = true
+			checkinErr = fmt.Errorf("登录已失效，请重新登录（refresh failed: %v）", err)
 		} else {
 			structured, checkinErr = s.dailyCheckin(a, &r)
+			sessionDeadSeen = checkinErr != nil && isSessionDead(checkinErr)
 		}
 	}
-	if checkinErr != nil {
-		log.Printf("checkin failed platform=%s uid=%s err=%v", name, uid, checkinErr)
+	if checkinErr != nil && sessionDeadSeen {
+		// 401 是终态（不变式 19：刷新一次仍失效 ⇒ 需人工重新登录）。
+		// 不得透出渠道的中间态文案（如「无可用签到活动」），那会把用户引向错误方向。
+		log.Printf("checkin failed platform=%s uid=%s err=%v (session dead, terminal)", name, uid, checkinErr)
+		r.OK = false
+		r.Retryable = false
 		r.Msg = shortErr(checkinErr)
-		if isAlready(checkinErr) {
-			r.OK = true // 已签到时视为成功状态
-			r.Msg = "已签到"
-			r.Retryable = false // 已签到即当日完成，不得继续重试
+	} else if checkinErr != nil {
+		log.Printf("checkin failed platform=%s uid=%s err=%v", name, uid, checkinErr)
+		// 结构化渠道的失败可能伴随一条有用的渠道文案（如 503 原始体），
+		// 未给出时退回错误文本，保证面板永远有可读原因。
+		if r.Msg == "" || !structured {
+			r.Msg = shortErr(checkinErr)
 		}
-		// 非 session dead 的失败均可重试（网络抖动/上游 5xx），
-		// session dead 已由上方自愈处理，不在此处重复标记。
-		if !isSessionDead(checkinErr) && !isAlready(checkinErr) {
+		if isAlready(checkinErr) {
+			r.OK = true
+			r.Msg = "已签到"
+			r.Retryable = false
+		} else {
+			// 未达成（no_campaign / error 等）：失败且窗口内可重试。
+			// OK 必须与 Retryable 取反——两者同时为真会让面板同时显示成功与待领取。
+			r.OK = false
 			r.Retryable = true
 		}
 	} else if !structured {
@@ -534,7 +558,7 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 		}
 	} else {
 		_, unusable := provider.Summarize(items)
-		expiring := provider.ExpiringWithin(items, s.cfg.ExpiringThreshold)
+		expiring := provider.ExpiringWithinDays(items, s.cfg.expiringDays(), time.Now())
 		r.Remain, r.HasRemain = usable, true
 		log.Printf("checkin credits platform=%s uid=%s remain=%d expiring=%d unusable=%d", name, uid, usable, expiring, unusable)
 		s.cfg.Pool.ReenableIfCredits(uid, usable, expiring, unusable)
@@ -577,7 +601,36 @@ func (s *Scheduler) dailyCheckin(a *auth.Auth, r *CheckinResult) (structured boo
 	if report.Msg != "" {
 		r.Msg = report.Msg
 	}
+	// 结构化渠道也可能在回执里给出权威发放额（如 WorkBuddy 的 CheckinReporter，
+	// issue #147）：与 CheckinGranter 同口径记 earn——否则 issue #67 的「发放即消耗」
+	// 差分归零问题会在 reporter 路径上重现（同一渠道两条路径不能不一致）。
+	if report.Status == provider.CheckinClaimed && report.Amount > 0 && s.cfg.Ledger != nil {
+		note := "签到奖励"
+		if s.cfg.ActivitiesOnly {
+			note = "活跃保活奖励"
+		}
+		if s.cfg.Ledger.RecordCheckinEarn(s.name(), a.UID, report.Amount, r.Remain, note) {
+			log.Printf("checkin earn recorded platform=%s uid=%s amount=%d (来自结构化回执)", s.name(), a.UID, report.Amount)
+		}
+	}
 	return true, err
+}
+
+// expiringDays 把时长阈值换算成自然日数（非整日向上取整）。
+// 自 R105 起临期判据是自然日，不能再直接拿时长与 ExpireAt 比较。
+func (c Config) expiringDays() int {
+	h := int(c.ExpiringThreshold / time.Hour)
+	if h <= 0 {
+		h = 24
+	}
+	days := h / 24
+	if h%24 != 0 {
+		days++
+	}
+	if days < 1 {
+		days = 1
+	}
+	return days
 }
 
 // isAlready 只匹配明确的“今日已签到”，不能因错误文本包含 checkin 就判成功。
@@ -607,6 +660,9 @@ func (s *Scheduler) name() string {
 func (s *Scheduler) refreshForCheckin(a *auth.Auth, uid string) error {
 	name := s.name()
 	log.Printf("refresh start platform=%s uid=%s reason=checkin", name, uid)
+	if s.refreshOverride != nil { // 仅测试注入
+		return s.refreshOverride(a, uid)
+	}
 	if err := s.cfg.Upstream.RefreshToken(a); err != nil {
 		log.Printf("refresh failed platform=%s uid=%s err=%v", name, uid, err)
 		return err

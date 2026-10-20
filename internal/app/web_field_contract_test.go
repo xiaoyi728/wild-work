@@ -89,6 +89,8 @@ var uiWantsState = []string{
 	// 面板用的是 `state.loop_guard !== false`，Go 侧哪天漏发这个字段，读出来是 undefined，
 	// 判据照样成立 ⇒ 开关恒显示「开」而实际配置可能是关 —— 静默的错，正是本闸门要拦的形态。
 	"loop_guard",
+	// body_log 自 L18 起被 Settings.jsx 的「请求体摘要」开关读取（Go 漏发 ⇒ 开关恒 off）。
+	"body_log",
 	// reasoning_efforts / custom_channels 自 v2.7.3（R63/R66）起被 Settings.jsx 读取
 	// （思考强度编辑区与自定义渠道编辑区）。同理必须进表：Go 侧漏发时面板读出空对象，
 	// 编辑区画成「未配置」而实际配置是别的 —— 静默的错。
@@ -98,12 +100,14 @@ var uiWantsState = []string{
 	"accounts.uid", "accounts.group", "accounts.nickname", "accounts.disabled",
 	"accounts.credits", "accounts.expiring_credits", "accounts.unusable_credits",
 	"accounts.credits_stale", "accounts.credits_na",
-	"accounts.cooling", "accounts.err_count",
+	"accounts.cooling", "accounts.err_count", "accounts.reason",
+	// L18：登录态失效徽标 / 重登、冷却相对时长、Token 计量标签。
+	"accounts.session_dead", "accounts.session_dead_reason", "accounts.until_ts", "accounts.credits_unit",
 	"accounts.last_checkin_at", "accounts.last_checkin_ok",
 }
 
 // 面板不读、React 类型里不必声明（Go 仍发，属对外兼容余量或内部自用，不算缺陷）：
-//   State.keepalive_hours · AccountView.until / reason / last_checkin_msg
+//   State.keepalive_hours · AccountView.until / last_checkin_msg
 //   ResourceItem.key（ledger 差分自用）· RefreshSummary.total / platforms（动态 key 大 map）
 //   CheckinResult.uid / has_remain · feesModelRow.supports_tools
 //   Stats.token.pt|ct|by_day.total · CreditStats.expire · RecentCredit.name

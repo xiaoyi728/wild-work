@@ -28,8 +28,8 @@ func TestUserResourceDetailCarriesExpiryAndUsable(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("items=%d want 2", len(items))
 	}
-	if items[0].ExpireAt != "2026-09-30" {
-		t.Errorf("ExpireAt=%q want 2026-09-30", items[0].ExpireAt)
+	if items[0].ExpireAt != "2026-09-30T23:59:59+08:00" {
+		t.Errorf("ExpireAt=%q want 2026-09-30T23:59:59+08:00", items[0].ExpireAt)
 	}
 	if items[1].ExpireAt != "" {
 		t.Errorf("无到期包 ExpireAt=%q want 空串", items[1].ExpireAt)
@@ -84,8 +84,8 @@ func TestExpireAtRejectsMalformed(t *testing.T) {
 		"   ":                 "",
 		"2026-09-30":          "",
 		"not-a-time":          "",
-		"2026-09-30 23:59:59": "2026-09-30",
-		"2026-01-01 00:00:00": "2026-01-01",
+		"2026-09-30 23:59:59": "2026-09-30T23:59:59+08:00",
+		"2026-01-01 00:00:00": "2026-01-01T00:00:00+08:00",
 	}
 	for in, want := range cases {
 		r := resourceAccount{CycleEndTime: in}

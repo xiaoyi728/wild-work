@@ -47,6 +47,7 @@ type SOLOEvent struct {
 	FinishReason string          // done
 	ErrorCode    int64           // error
 	ErrorMessage string          // error
+	QueuePos     int64           // request_wait_in_queue: 上游排队位置（拥塞观测用）
 }
 
 // SOLOStreamError 上游 SSE 流内的业务错误（event:error）。非流式聚合时返回，
@@ -118,8 +119,33 @@ func ParseSOLOLine(eventName, dataLine string) (*SOLOEvent, error) {
 		if v, ok := raw["message"].(string); ok {
 			ev.ErrorMessage = v
 		}
+	case "queue_begin", "request_wait_in_queue":
+		// 上游拥塞排队心跳：position 递减。queue_begin 无 position（=0），消费方跳过。
+		if v, ok := raw["position"].(float64); ok {
+			ev.QueuePos = int64(v)
+		}
 	}
 	return ev, nil
+}
+
+// queueLogger 排队心跳限频：首条 + 每 30s 一条（避免拥塞时段刷屏）。
+type queueLogger struct {
+	model string
+	first bool
+	last  time.Time
+}
+
+func (q *queueLogger) log(pos int64) {
+	if pos <= 0 {
+		return
+	}
+	now := time.Now()
+	if !q.first && now.Sub(q.last) < 30*time.Second {
+		return
+	}
+	log.Printf("solo queue congested model=%s position=%d", q.model, pos)
+	q.first = true
+	q.last = now
 }
 
 // sseState 维护一行 SSE 的 event/data 跨行累积。
@@ -176,6 +202,7 @@ func AggregateWithModel(r io.Reader, model string) (map[string]any, error) {
 		upstreamErr  error
 	)
 	st := &sseState{}
+	ql := &queueLogger{model: model}
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil && err != io.EOF {
@@ -199,6 +226,8 @@ func AggregateWithModel(r io.Reader, model string) (map[string]any, error) {
 				}
 			case "error":
 				upstreamErr = &SOLOStreamError{Code: ev.ErrorCode, Msg: ev.ErrorMessage}
+			case "queue_begin", "request_wait_in_queue":
+				ql.log(ev.QueuePos)
 			}
 		}
 		if err == io.EOF {
@@ -363,6 +392,7 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 	var pendingUsage map[string]any
 	sawDone := false
 	st := &sseState{}
+	ql := &queueLogger{model: model}
 	// 思考链死循环守卫（发癫检测）：仅在全局启用时创建。命中即中断、不罚账号。
 	var guard *loopguard.Guard
 	if loopguard.Enabled() {
@@ -527,6 +557,9 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 				// （若上游在本帧之前已发过 done，则 [DONE] 已写出、此处不再补第二个——
 				// 两个终止信号会让严格客户端行为未定义。此顺序上游理论上不会发，仅防御。）
 				return usage, se
+			case "queue_begin", "request_wait_in_queue":
+				// 上游拥塞排队心跳：限频透传日志（纯观测，不影响计数/罚号）。
+				ql.log(ev.QueuePos)
 			}
 		}
 		if err == io.EOF {

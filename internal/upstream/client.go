@@ -64,6 +64,11 @@ func Classify(status int, body string) ErrKind {
 	if status == http.StatusPaymentRequired {
 		return ErrHardCredit
 	}
+	// 401：登录态失效（令牌过期/被吊销）。放在文案匹配之前：HTML 形态的
+	// 401 Authorization Required（无业务信封）没有可匹配文案，也要归入 SessionDead。
+	if status == http.StatusUnauthorized {
+		return ErrSessionDead
+	}
 	lower := strings.ToLower(body)
 	for _, m := range sessionDeadMarkers {
 		if strings.Contains(body, m) {
@@ -71,6 +76,14 @@ func Classify(status int, body string) ErrKind {
 		}
 	}
 	if status == http.StatusTooManyRequests {
+		// 例外：积分耗尽（14018 "Credits exhausted"，复数 s 漏配 hardMarkers）是
+		// 账号级余额问题而非限流——误判软限流只冷 60s 且降级链永不触发。
+		// 与 workbuddyai 的同构特判保持一致；防前缀误伤："code":140180 含子串。
+		if idx := strings.Index(body, `"code":14018`); idx >= 0 {
+			if end := idx + len(`"code":14018`); end >= len(body) || body[end] < '0' || body[end] > '9' {
+				return ErrHardCredit
+			}
+		}
 		return ErrSoftRate
 	}
 	for _, m := range hardMarkers {
@@ -345,12 +358,12 @@ type catalogModel struct {
 
 // catalogReasoning 目录 reasoning 对象（仅取可透传的权威字段）。
 type catalogReasoning struct {
-	SupportedEfforts   []string `json:"supportedEfforts"`
-	DefaultEffort      string   `json:"defaultEffort"`
+	SupportedEfforts []string `json:"supportedEfforts"`
+	DefaultEffort    string   `json:"defaultEffort"`
 	// Effort 老式默认档字段（上游 deepseek 系实测：reasoning:{effort:"high"}）；
 	// DefaultEffort 为空时回退取它。
-	Effort             string   `json:"effort"`
-	CanDisableThinking bool     `json:"canDisableThinking"`
+	Effort             string `json:"effort"`
+	CanDisableThinking bool   `json:"canDisableThinking"`
 }
 
 // FetchModels 调上游动态模型接口。
@@ -374,7 +387,11 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("models api status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+		// 必须返回**类型化**错误：上层 RefreshPricing 靠 errors.As 取分类才能走
+		// 「refresh + 重试」自愈（不变量 19）。裸 fmt.Errorf 会让模型/费率面的 401
+		// 自愈永远不生效——本地 expiresAt 仍在未来而上游已拒绝时，目录与费率只能一直陈旧。
+		return nil, &Error{Kind: Classify(resp.StatusCode, string(raw)), Status: resp.StatusCode,
+			Msg: fmt.Sprintf("models api: %s", truncate(string(raw), 200))}
 	}
 	var env struct {
 		Code int `json:"code"`
@@ -495,7 +512,7 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 			Remain:   remain,
 			ExpireAt: acct.expireAt(),
 			// 套餐名+到期日组合伪键：上游无显式 ID，同名录包靠周期结束时间区分
-			Key:    fmt.Sprintf("%s|%s", acct.PackageName, acct.expireAt()),
+			Key:    fmt.Sprintf("%s|%s", acct.PackageName, acct.expireDay()),
 			Usable: true, // 国内版无端点分区，所有套餐均可被本工具消耗
 		})
 	}
@@ -550,10 +567,13 @@ func (r resourceAccount) expireAt() string {
 		return ""
 	}
 	if t, err := time.ParseInLocation("2006-01-02 15:04:05", ts, softRateResetLoc); err == nil {
-		return t.Format("2006-01-02")
+		return t.Format(time.RFC3339)
 	}
 	return ""
 }
+
+// expireDay 取到期日的日期前缀，专供 ledger 伪键（键要稳定、不含时刻）。
+func (r resourceAccount) expireDay() string { return provider.ExpireDate(r.expireAt()) }
 
 // userResourceResp get-user-resource 响应信封。
 type userResourceResp struct {
@@ -673,7 +693,9 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("pricing api status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+		// 类型化错误，同 models 面：401 时 RefreshPricing 才能 refresh + 重试（不变量 19）。
+		return nil, &Error{Kind: Classify(resp.StatusCode, string(raw)), Status: resp.StatusCode,
+			Msg: fmt.Sprintf("pricing api: %s", truncate(string(raw), 200))}
 	}
 	var env struct {
 		Code int `json:"code"`

@@ -63,12 +63,11 @@ func TestCustomChannelChatCompletionsAndModels(t *testing.T) {
 
 	runtimes := map[provider.Kind]*Runtime{
 		provider.Kind("stepfun"): {
-			Kind:                    provider.Kind("stepfun"),
-			Pool:                    p,
-			Upstream:                customClient,
-			StaticModels:            customClient.StaticModels(),
-			SingleAccount:           true,
-			NoCooldownOnServerError: true,
+			Kind:          provider.Kind("stepfun"),
+			Pool:          p,
+			Upstream:      customClient,
+			StaticModels:  customClient.StaticModels(),
+			SingleAccount: true,
 		},
 	}
 

@@ -350,20 +350,24 @@ type StreamErrorClassifier interface {
 	Kind() ErrKind
 }
 
-// CheckinReporter 由「签到结果可结构化上报」的渠道实现（当前 QoderCN / QoderCOM）。
+// CheckinReporter 由「签到结果可结构化上报」的渠道实现（当前 QoderCN / QoderCOM / WorkBuddy）。
 // 调度器优先使用它；未实现的渠道回退 DailyCheckin + isAlready 文本判定。
 // 之所以需要独立接口：error 通道无法区分 no_campaign 与 error——两者都不是
 // 「已签到」，却都需要在当日窗口内继续重试，而 error 文本判定做不到。
+// 实现若在回执里给出权威发放额（Report.Amount），调度器按 CheckinGranter 同口径记 earn。
 type CheckinReporter interface {
 	DailyCheckinReport(a *auth.Auth) (CheckinReport, error)
 }
 
-// CheckinGranter 由「签到回执自带发放额」的渠道实现（当前 WorkBuddy，issue #67）。
+// CheckinGranter 由「只提供发放额、不提供结构化状态」的渠道实现（issue #67）。
 // 上游 daily-checkin 回执的 credit/today_credit 是本次发放的权威值；调度器在签到
 // 成功后用它直接记 earn（ledger.RecordCheckinEarn），不再完全依赖快照差分——
 // WorkBuddy 签到包落在「明日到期」key 上且提前一天以 r=0 建档，「发放即消耗」
 // 场景下差分会把当日 earn 抵消为 0（面板今日收入显示 0 的根因）。
 // granted<=0 时调度器静默降级回差分口径；未实现本接口的渠道行为不变。
+// ⚠️ 调度器**优先** CheckinReporter：实现 Reporter 的渠道应把权威发放额放进
+// CheckinReport.Amount（WorkBuddy 自 2026-10-20 起即走这条路径），否则该渠道
+// 的 Grant 实现不会被调用。本接口保留给只实现 Grant 的渠道，目前无渠道单独使用。
 type CheckinGranter interface {
 	DailyCheckinGrant(a *auth.Auth) (granted int64, err error)
 }
@@ -428,6 +432,9 @@ type ResourceItem struct {
 	// 两者都该显示，但相加无意义。
 	// 注意：InfoOnly 条目应同时置 Usable=true（它在界面上既非「不可用」，也不该被小计）。
 	InfoOnly bool `json:"info_only,omitempty"`
+	// Unit 计量单位：空串 = 积分（credits，默认），"token" = Token 计数。
+	// token 渠道的额度不能按积分展示（上亿 token 像巨额积分），前端另设面板。
+	Unit string `json:"unit,omitempty"`
 }
 
 // Summarize 按 Usable 标记汇总条目：返回 (可消耗剩余, 不可消耗剩余)。
@@ -449,6 +456,146 @@ func Summarize(items []ResourceItem) (usable, unusable int64) {
 // expireLoc 各渠道 ExpireAt 的统一墙钟口径（见各渠道 softRateResetLoc，固定 UTC+8）。
 var expireLoc = time.FixedZone("UTC+8", 8*60*60)
 
+// ExpireDateToday 返回 UTC+8 墙钟下的今天日期（YYYY-MM-DD）。
+// 供「当日有效」类额度填 ExpireAt；与 ExpiringWithin/ledger 差分共用同一日期粒度与时区。
+func ExpireDateToday() string {
+	return time.Now().In(expireLoc).Format("2006-01-02")
+}
+
+// ExpireInstant 把 ExpireAt 解析为**失效时刻**（UTC+8 墙钟）。
+//   - "YYYY-MM-DD"：该日全天可用 ⇒ 失效时刻 = **次日 00:00**；
+//   - RFC3339：精确时刻，到点失效。
+//
+// ok=false 表示空串或不可解析，调用方按「无到期信息」处理。
+func ExpireInstant(expireAt string) (time.Time, bool) {
+	s := strings.TrimSpace(expireAt)
+	if s == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.ParseInLocation("2006-01-02", s, expireLoc); err == nil {
+		return t.AddDate(0, 0, 1), true
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.In(expireLoc), true
+	}
+	return time.Time{}, false
+}
+
+// ExpireDate 返回 ExpireAt 的日期部分（UTC+8 墙钟）。用于生成 ledger 伪键——
+// 键必须只含日期，否则升级瞬间会凭空产出一批 expire+earn 流水。
+func ExpireDate(expireAt string) string {
+	s := strings.TrimSpace(expireAt)
+	if s == "" {
+		return ""
+	}
+	// 纯日期：它表达的就是这一天（全天可用），不能经 ExpireInstant（会把失效时刻
+	// 平移到次日 00:00，导致伪键/分桶整体偏移一天）。
+	if t, err := time.ParseInLocation("2006-01-02", s, expireLoc); err == nil {
+		return t.Format("2006-01-02")
+	}
+	t, ok := ExpireInstant(s)
+	if !ok {
+		return ""
+	}
+	return t.In(expireLoc).Format("2006-01-02")
+}
+
+// ExpireIn 返回距失效还剩多久（负数 = 已过期）。ok=false 表示无到期信息。
+func ExpireIn(expireAt string, now time.Time) (time.Duration, bool) {
+	t, ok := ExpireInstant(expireAt)
+	if !ok {
+		return 0, false
+	}
+	return t.Sub(now), true
+}
+
+// expireAnchor 临期判定的锚点：日期粒度取该日 00:00（不是次日），RFC3339 取精确时刻。
+// 保持 ExpiringWithin 既有口径「到期日 ≤ 明天」不变。
+func expireAnchor(expireAt string) (time.Time, bool) {
+	s := strings.TrimSpace(expireAt)
+	if s == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.ParseInLocation("2006-01-02", s, expireLoc); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.In(expireLoc), true
+	}
+	return time.Time{}, false
+}
+
+const expireMidnightGrace = 5 * time.Minute
+
+// 自然日到期分桶（与平台表三列、临期阈值同一口径）。
+const (
+	BucketNone     = iota // 无到期信息，或已失效
+	BucketToday           // 今日到期（含次日 00:00）
+	BucketTomorrow        // 明日到期
+	Bucket7d              // 7 日内到期
+)
+
+func expireDayOf(expireAt string, now time.Time) (time.Time, bool) {
+	t, ok := ExpireInstant(expireAt)
+	if !ok {
+		return time.Time{}, false
+	}
+	t = t.In(expireLoc).Add(-expireMidnightGrace)
+	if !t.After(now.In(expireLoc)) {
+		return time.Time{}, false
+	}
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, expireLoc), true
+}
+
+// ExpireBucketOf 返回 expireAt 属于哪个自然日桶。次日 00:00:00 失效算今日
+// （上游每日额度实测在 00:00:00~00:00:07 抖动，5 分钟宽限覆盖）。
+func ExpireBucketOf(expireAt string, now time.Time) int {
+	day, ok := expireDayOf(expireAt, now)
+	if !ok {
+		return BucketNone
+	}
+	y, m, d := now.In(expireLoc).Date()
+	today := time.Date(y, m, d, 0, 0, 0, 0, expireLoc)
+	switch {
+	case day.Equal(today):
+		return BucketToday
+	case day.Equal(today.AddDate(0, 0, 1)):
+		return BucketTomorrow
+	case !day.After(today.AddDate(0, 0, 6)):
+		return Bucket7d
+	}
+	return BucketNone
+}
+
+// ExpireWithinDays 报告 expireAt 是否在 days 个自然日内到期（今天算第 1 天）。
+func ExpireWithinDays(expireAt string, now time.Time, days int) bool {
+	day, ok := expireDayOf(expireAt, now)
+	if !ok {
+		return false
+	}
+	if days < 1 {
+		days = 1
+	}
+	y, m, d := now.In(expireLoc).Date()
+	limit := time.Date(y, m, d, 0, 0, 0, 0, expireLoc).AddDate(0, 0, days-1)
+	return !day.After(limit)
+}
+
+// ExpiringWithinDays 统计 days 个自然日内到期的**可消耗**积分小计。
+func ExpiringWithinDays(items []ResourceItem, days int, now time.Time) int64 {
+	var expiring int64
+	for _, it := range items {
+		if !it.Usable || it.InfoOnly || it.ExpireAt == "" {
+			continue
+		}
+		if ExpireWithinDays(it.ExpireAt, now, days) {
+			expiring += it.Remain
+		}
+	}
+	return expiring
+}
+
 // ExpiringWithin 统计 horizon 时长内到期的**可消耗**积分小计（临期额度）。
 // 仅累计 Usable=true 且 ExpireAt 非空的条目——不可用池本工具消耗不到，
 // 临期与否不影响路由决策，混入会虚高临期值。
@@ -463,7 +610,7 @@ func ExpiringWithin(items []ResourceItem, horizon time.Duration) int64 {
 			continue
 		}
 		// 日期解析到当天零点（UTC+8），零点落在 deadline 之前即视为临期
-		if t, err := time.ParseInLocation("2006-01-02", it.ExpireAt, expireLoc); err == nil && t.Before(deadline) {
+		if t, ok := expireAnchor(it.ExpireAt); ok && t.Before(deadline) {
 			expiring += it.Remain
 		}
 	}

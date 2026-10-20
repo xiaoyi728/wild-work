@@ -116,7 +116,14 @@ func (c *Client) idleTimeout() time.Duration {
 	return c.IdleTimeout
 }
 
-func session(a *auth.Auth) string { return strings.TrimSpace(a.AccessTokenValue()) }
+func sessionOf(a *auth.Auth) string {
+	if a == nil {
+		return ""
+	}
+	return strings.TrimSpace(a.AccessTokenValue())
+}
+
+func session(a *auth.Auth) string { return sessionOf(a) }
 
 // traceparent 生成 W3C traceparent；官方源码注释实测：**缺这个头 chat/completions 会挂死到超时**。
 func traceparent() string {

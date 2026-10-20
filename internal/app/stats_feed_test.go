@@ -11,22 +11,27 @@ import (
 	statsEngine "wild-work/internal/stats"
 )
 
-// TestExpiryDayAmount 临期喂入口径：可用条目按日归组，取最早到期日 + 当日合计。
-func TestExpiryDayAmount(t *testing.T) {
+// TestExpiryItems 逐条目喂入口径：只保留可用/有余额/带到期时刻的条目，
+// 且保留原始 ExpireAt（精确时刻）供引擎按自然日分桶。
+func TestExpiryItems(t *testing.T) {
 	items := []provider.ResourceItem{
 		{Remain: 100, ExpireAt: "2026-10-08T00:00:00+08:00", Usable: true},
 		{Remain: 50, ExpireAt: "2026-10-08T00:00:00+08:00", Usable: true},
 		{Remain: 30, ExpireAt: "2026-10-05T00:00:00+08:00", Usable: true},
-		{Remain: 999, ExpireAt: "2026-10-09T00:00:00+08:00", Usable: false}, // 不可用：不计
-		{Remain: 0, ExpireAt: "2026-10-01T00:00:00+08:00", Usable: true},    // 零额度：不计
-		{Remain: 88, ExpireAt: "", Usable: true},                            // 无到期日：不计
+		{Remain: 999, ExpireAt: "2026-10-09T00:00:00+08:00", Usable: false},               // 不可用：不计
+		{Remain: 0, ExpireAt: "2026-10-01T00:00:00+08:00", Usable: true},                  // 零额度：不计
+		{Remain: 88, ExpireAt: "", Usable: true},                                          // 无到期日：不计
+		{Remain: 77, ExpireAt: "2026-10-10T00:00:00+08:00", Usable: true, InfoOnly: true}, // 仅展示：不计
 	}
-	day, amount := expiryDayAmount(items)
-	if day != "2026-10-05" || amount != 30 {
-		t.Fatalf("最早日+合计错误：day=%s amount=%d", day, amount)
+	got := expiryItems(items)
+	if len(got) != 3 {
+		t.Fatalf("应保留 3 条，实际 %d: %+v", len(got), got)
 	}
-	if day, amount := expiryDayAmount(nil); day != "" || amount != 0 {
-		t.Fatalf("空条目应返回空值，实际 day=%s amount=%d", day, amount)
+	if got[2].At != "2026-10-05T00:00:00+08:00" || got[2].Amount != 30 {
+		t.Fatalf("应保留原始精确时刻与金额，实际 %+v", got[2])
+	}
+	if n := len(expiryItems(nil)); n != 0 {
+		t.Fatalf("空条目应返回空切片，实际 %d", n)
 	}
 }
 

@@ -256,10 +256,10 @@ func TestTruncCredits(t *testing.T) {
 
 // TestExpireDate 验证 UTC+8 墙钟解析（含带偏移与不带偏移两种形态）。
 func TestExpireDate(t *testing.T) {
-	if got := expireDate("2026-09-19T00:00:00+08:00"); got != "2026-09-19" {
+	if got := expireDate("2026-09-19T00:00:00+08:00"); got != "2026-09-19T00:00:00+08:00" {
 		t.Fatalf("RFC3339 = %q", got)
 	}
-	if got := expireDate("2026-09-19T00:00:00"); got != "2026-09-19" {
+	if got := expireDate("2026-09-19T00:00:00"); got != "2026-09-19T00:00:00+08:00" {
 		t.Fatalf("无时区 = %q", got)
 	}
 	if got := expireDate(""); got != "" {

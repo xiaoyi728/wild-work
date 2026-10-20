@@ -758,7 +758,7 @@ func unixDate(sec int64) string {
 	if sec <= 0 {
 		return ""
 	}
-	return time.Unix(sec, 0).In(softRateResetLoc).Format("2006-01-02")
+	return time.Unix(sec, 0).In(softRateResetLoc).Format(time.RFC3339)
 }
 
 func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, err error) {

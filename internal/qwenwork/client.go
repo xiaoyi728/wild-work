@@ -59,7 +59,7 @@ func NewWithTimeout(timeout time.Duration) *Client {
 	return &Client{
 		HTTP:        &http.Client{Timeout: timeout, Transport: tr},
 		StreamHTTP:  &http.Client{Transport: tr}, // 共用 Transport，不设 Timeout
-		IdleTimeout: idle.DefaultTimeout,          // 流中空闲监控兜底（见 internal/idle）
+		IdleTimeout: idle.DefaultTimeout,         // 流中空闲监控兜底（见 internal/idle）
 		Gateway:     GatewayBase,
 		Web:         WebBase,
 	}
@@ -619,13 +619,17 @@ func expireDate(ts string) string {
 		return ""
 	}
 	if t, err := time.Parse(time.RFC3339, ts); err == nil {
-		return t.In(softRateResetLoc).Format("2006-01-02")
+		return t.In(softRateResetLoc).Format(time.RFC3339)
 	}
 	// 无时区后缀时按 UTC+8 墙钟解析
-	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02 15:04:05", "2006-01-02"} {
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02 15:04:05"} {
 		if t, err := time.ParseInLocation(layout, ts, softRateResetLoc); err == nil {
-			return t.Format("2006-01-02")
+			return t.Format(time.RFC3339)
 		}
+	}
+	// 纯日期：该日全天可用 ⇒ 失效时刻为次日 00:00（不能当当天零点，否则刚拿到就判过期）。
+	if t, err := time.ParseInLocation("2006-01-02", ts, softRateResetLoc); err == nil {
+		return t.AddDate(0, 0, 1).Format(time.RFC3339)
 	}
 	return ""
 }

@@ -3,6 +3,7 @@ package login_raccoon
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"wild-work/internal/raccoon"
@@ -62,17 +63,21 @@ func TestJwtExp(t *testing.T) {
 	}
 }
 
-// TestWebLoginURL 登录入口必须指向网页版登录页（带 loginModal=true 直接弹登录框）。
+// TestWebLoginURL 登录入口必须指向新版登录页（R67：不带 loginModal，避免重定向死循环）。
 func TestWebLoginURL(t *testing.T) {
-	if WebLoginURL != "https://office.xiaohuanxiong.com/home?loginModal=true" {
+	const want = "https://xiaohuanxiong.com/login?product_code=work&redirect_url=https%3A%2F%2Fxiaohuanxiong.com%2Fwork%2Fhome"
+	if WebLoginURL != want {
 		t.Fatalf("WebLoginURL 不符：%s", WebLoginURL)
+	}
+	if strings.Contains(WebLoginURL, "loginModal") {
+		t.Fatal("新版入口不得带 loginModal（会触发重定向死循环）")
 	}
 }
 
-// TestCookieConstants Cookie 名与域必须与实盘抓包一致
-// （2026-10-10 抓包：raccoon_refresh_token 落在 .xiaohuanxiong.com 域）。
+// TestCookieConstants Cookie 名与域必须与上游新版一致
+// （R67：登录态凭据从 raccoon_refresh_token 改为 xhx_token）。
 func TestCookieConstants(t *testing.T) {
-	if CookieName != "raccoon_refresh_token" {
+	if CookieName != "xhx_token" {
 		t.Fatalf("CookieName 不符：%s", CookieName)
 	}
 	if CookieDomain != "xiaohuanxiong.com" {

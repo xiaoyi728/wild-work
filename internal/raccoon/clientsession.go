@@ -33,11 +33,28 @@ func clientAuthFile() string {
 	return ""
 }
 
-// jwtName 解出 JWT 的 name claim（小浣熊 uid），失败返回空串。
-func jwtName(tok string) string {
+// JWTUID 取小浣熊 JWT 里的账号标识（uid）：优先 name（旧版），否则回落 sub（新版 OIDC）。
+// 这是唯一取数点——登录落盘、会话自愈、从客户端导入四处都必须用它。
+func JWTUID(tok string) string {
+	claims := jwtClaimMap(tok)
+	if claims == nil {
+		return ""
+	}
+	for _, k := range []string{"name", "sub"} {
+		if s, ok := claims[k].(string); ok {
+			if v := strings.TrimSpace(s); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// jwtClaimMap 解出 JWT 的 payload（失败返回 nil）。
+func jwtClaimMap(tok string) map[string]any {
 	parts := strings.Split(strings.TrimSpace(tok), ".")
 	if len(parts) < 2 {
-		return ""
+		return nil
 	}
 	seg := strings.NewReplacer("-", "+", "_", "/").Replace(parts[1])
 	if m := len(seg) % 4; m != 0 {
@@ -45,15 +62,13 @@ func jwtName(tok string) string {
 	}
 	raw, err := base64.StdEncoding.DecodeString(seg)
 	if err != nil {
-		return ""
+		return nil
 	}
-	var payload struct {
-		Name string `json:"name"`
+	var out map[string]any
+	if json.Unmarshal(raw, &out) != nil {
+		return nil
 	}
-	if json.Unmarshal(raw, &payload) != nil {
-		return ""
-	}
-	return strings.TrimSpace(payload.Name)
+	return out
 }
 
 // RescueFromClientSession 从本机客户端会话文件采纳最新令牌到 a。
@@ -87,7 +102,7 @@ func RescueFromClientSession(a *auth.Auth) error {
 	if access == "" || refresh == "" {
 		return fmt.Errorf("raccoon: 客户端会话缺少令牌（%s），请先在客户端完成登录", path)
 	}
-	if uid := jwtName(access); uid == "" || uid != a.UID {
+	if uid := JWTUID(access); uid == "" || uid != a.UID {
 		return fmt.Errorf("raccoon: 客户端会话 uid 不匹配（客户端=%q 账号=%q），拒绝采纳", uid, a.UID)
 	}
 	// 客户端令牌已过期（如客户端登出后残留旧会话）时不采纳——采纳一个过期

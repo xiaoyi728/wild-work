@@ -8,9 +8,11 @@
 package devdump
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +21,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -35,7 +38,28 @@ var state atomic.Pointer[string]
 func init() { Refresh() }
 
 // Refresh 重读环境变量（启动期由 main 调一次）。
-func Refresh() { set(os.Getenv(envVar)) }
+//
+// 2026-10-17 增强：环境变量为空时**默认落盘到 exe 同目录的 `dump/`**。
+// 理由：本包只存在于 `-tags devdump` 构建里，而那种构建的唯一目的就是抓包；
+// 再要求使用者去设环境变量（Windows 上要么开命令行、要么写 .bat，而 .bat 又会被代码页
+// 折腾得中文报错）只会把简单事做复杂。发布版不含本包，故不存在「忘了关开关」的风险。
+// 需要换目录时仍可用 WILDWORK_DUMP_DIR 覆盖。
+func Refresh() {
+	if d := strings.TrimSpace(os.Getenv(envVar)); d != "" {
+		set(d)
+		return
+	}
+	set(defaultDir())
+}
+
+// defaultDir 抓包默认落盘目录：exe 同目录下的 `dump/`（取不到 exe 路径时退回工作目录）。
+func defaultDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "dump"
+	}
+	return filepath.Join(filepath.Dir(exe), "dump")
+}
 
 // Enable 以 dir 为落盘根目录开启（空串等价 Disable）。
 func Enable(dir string) { set(dir) }
@@ -117,28 +141,68 @@ func (t *dumpTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	start := time.Now()
 	resp, err := t.base.RoundTrip(req)
-	dur := time.Since(start)
 
 	// 只有「真需要看上游原文」的请求才落盘：目录/费率探测与回环请求一律跳过。
-	if !shouldDump(req) {
+	if !shouldDump(req) || dir() == "" {
 		return resp, err
 	}
-
-	var (
-		status     int
-		respHeader http.Header
-		respBody   []byte
-	)
-	if err != nil {
-		respBody = []byte("<<transport error: " + err.Error() + ">>")
-	} else if resp != nil {
-		status, respHeader = resp.StatusCode, resp.Header
-		respBody, _ = io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+	// ⚠️ 不得写 t.channel：dumpTransport 挂在共享 http.Client.Transport 上，
+	// 同一 transport 会被多个 goroutine 并发使用，改写字段即数据竞争。用局部值。
+	channel := t.channel
+	if channel == "" {
+		channel = "unknown"
 	}
-	writeDump(t.channel, req, reqBody, status, respHeader, respBody, err, dur)
-	return resp, err
+
+	// ⚠️ 这里**不得** io.ReadAll(resp.Body)：那会把整个响应缓冲到底才交给调用方，
+	// 对 SSE 响应等于「上游流完之后客户端才一次性收到全部内容」——实测表现为
+	// 「对话时正文突然整段出现」（本机常开 WILDWORK_DUMP_DIR 时必现）。
+	// 故改为 tee 边转发边落盘：响应体原样交给调用方逐帧读取并即时 flush，
+	// 落盘走带缓冲的独立写入（见 respRecorder），既不攒批也不逐字节写盘。
+	rec := newRespRecorder(channel, req, reqBody, start)
+	// ⚠️ 错误路径必须 close()：否则已建的文件句柄泄漏、且只留一个空文件
+	// （close 里会 writeHeadLocked 把请求块 + TRANSPORT ERROR 落盘）。
+	if resp == nil || err != nil {
+		rec.fail("### TRANSPORT ERROR\n" + errText(err) + "\n")
+		_ = rec.close()
+		return resp, err
+	}
+	rec.setResp(resp.StatusCode, resp.Header)
+	if resp.Body == nil {
+		rec.fail("### TRANSPORT ERROR\nno response body\n")
+		_ = rec.close()
+		return resp, err
+	}
+	resp.Body = &teeBody{rc: resp.Body, rec: rec}
+	return resp, nil
+}
+
+// errText 归一化错误文本（nil → "unknown"），避免 panic 且落盘可读。
+func errText(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	return err.Error()
+}
+
+// newRespRecorder 建目录并创建落盘文件。任何失败返回「空转」recorder（active=false），
+// 调试工具不得干扰主流程。文件此时即为空文件，正文由 tee 边收边写。
+func newRespRecorder(channel string, req *http.Request, reqBody []byte, start time.Time) *respRecorder {
+	r := &respRecorder{
+		start: start, channel: channel, req: req, reqBody: reqBody,
+		tail: make([]byte, 0, 2*tailKeep),
+	}
+	sub := filepath.Join(dir(), channel)
+	if os.MkdirAll(sub, 0o755) != nil {
+		return r
+	}
+	f, ferr := os.OpenFile(filepath.Join(sub, dumpName(req, int(seq.Add(1)))), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if ferr != nil {
+		return r
+	}
+	r.f = f
+	r.w = bufio.NewWriterSize(f, dumpBufSize)
+	r.active = true
+	return r
 }
 
 // dumpSubstr 命中即落盘的路径片段（各渠道对话/推理入口，实测路径全列）。
@@ -149,6 +213,7 @@ var dumpSubstr = []string{
 	"llm_utils_chat",        // traework / traecode（SOLO）
 	"/messages",             // monkeycode（Anthropic 形状）
 	"/responses",            // monkeycode（Responses 形状）
+	"/snap-manager/",        // codearts 控制面（statistics/plugin 额度统计，含身份字段线索）
 }
 
 // noDumpSubstr 命中即跳过的路径片段（目录/费率/凭据/状态探测，噪音高）。
@@ -159,9 +224,13 @@ var noDumpSubstr = []string{
 	"/v1/messages/count_tokens", // Anthropic 兼容层的 token 计数（非推理）
 }
 
-// shouldDump 判定该请求是否值得落盘（只 dump 对话类 POST）。
+// shouldDump 判定该请求是否值得落盘：**白名单驱动**（含 GET 的额度/统计端点）。
+//
+// 2026-10-17 调整：原先要求「必须是 POST」，于是像 codearts 的
+// `/snap-manager/v1/statistics/plugin`（**GET**）这类端点永远抓不到——而它正是核查
+// 「上游是否下发 domain_id/user_id 等身份字段」的关键。现改为：命中白名单即落盘，方法不限。
 func shouldDump(req *http.Request) bool {
-	if req == nil || req.URL == nil || req.Method != http.MethodPost {
+	if req == nil || req.URL == nil {
 		return false
 	}
 	switch req.URL.Hostname() {
@@ -182,45 +251,174 @@ func shouldDump(req *http.Request) bool {
 	return false
 }
 
-// writeDump 落盘一份快照；任何失败静默（调试工具不得干扰主流程）。
-func writeDump(channel string, req *http.Request, reqBody []byte, status int,
-	respHeader http.Header, respBody []byte, err error, dur time.Duration) {
-	root := dir()
-	if root == "" {
-		return
-	}
-	if channel == "" {
-		channel = "unknown"
-	}
-	sub := filepath.Join(root, channel)
-	if os.MkdirAll(sub, 0o755) != nil {
-		return
-	}
-	f, ferr := os.OpenFile(filepath.Join(sub, dumpName(req, int(seq.Add(1)))), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if ferr != nil {
-		return
-	}
-	defer func() { _ = f.Close() }()
+// dumpBufSize 落盘写缓冲：上游每来一小帧只写进内存，攒满此值才落一次盘
+// （延迟写，**不是**逐字节写盘）。放在 4 MiB 的 maxBody 下限之下，
+// 典型几百 KB 的对话响应只需几次系统调用。
+const dumpBufSize = 64 << 10
 
-	var b bytes.Buffer
-	// 响应侧 usage 速览放文件头：分析时一眼可见，无需翻正文（本包的存在理由）。
-	fmt.Fprintf(&b, "# channel=%s status=%d duration=%s\n", channel, status, dur.Round(time.Millisecond))
-	fmt.Fprintf(&b, "# usage=%s\n", usageHint(respBody))
-	fmt.Fprintf(&b, "### REQUEST %s %s\n", req.Method, req.URL.String())
-	writeHeaderBlock(&b, req.Header)
-	b.WriteString("\n")
-	b.Write(truncateBody(reqBody))
-	b.WriteString("\n\n")
-	if err != nil {
-		fmt.Fprintf(&b, "### TRANSPORT ERROR\n%s\n", err.Error())
-	} else {
-		fmt.Fprintf(&b, "### RESPONSE %d\n", status)
-		writeHeaderBlock(&b, respHeader)
-		b.WriteString("\n")
-		b.Write(truncateBody(respBody))
-		b.WriteString("\n")
+// bodyCap 写入文件正文的字节上限。与旧 truncateBody 的「前 maxBody-tailKeep + 后 tailKeep」
+// 等效：正文流式写入到 bodyCap，收尾再补最近 tailKeep 字节，总量不超过 maxBody。
+const bodyCap = maxBody - tailKeep
+
+// respRecorder 以 tee 方式把响应体**边转发边落盘**：不缓冲整个响应（否则 SSE 会被攒批成
+// 「上游流完之后一次性到达」，见 RoundTrip 注释），只在内存保留最近 tailKeep 字节供收尾
+// 计算尾部与 usage 速览（usage 只在末帧）。
+type respRecorder struct {
+	mu sync.Mutex
+
+	f      *os.File
+	w      *bufio.Writer
+	active bool // 文件是否可用（建目录/建文件失败时为 false，全部操作空转）
+
+	start   time.Time
+	channel string
+	req     *http.Request
+	reqBody []byte
+	status  int
+	header  http.Header
+	hasResp bool
+
+	headerWritten bool
+	closed        bool
+
+	tail    []byte // 最近 tailKeep 字节
+	written int64  // 已写入文件的响应体字节数（≤ bodyCap）
+	total   int64  // 已转发的响应体字节总数
+	capped  bool   // 达 bodyCap 后正文不再写文件
+	readErr error  // 读响应体错误（EOF 除外）
+}
+
+// newRespRecorder 见上；此处仅保留构造函数体在 newRespRecorder 中。
+
+// setResp 记录响应状态与头（写文件头时需要）。
+func (r *respRecorder) setResp(status int, h http.Header) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.status, r.header, r.hasResp = status, h, true
+}
+
+// fail 记录传输错误（resp 为 nil 或 RoundTrip 报错时）。
+func (r *respRecorder) fail(msg string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.readErr = errors.New(strings.TrimRight(msg, "\n"))
+}
+
+// Write 由转发路径调用：写文件并维护尾部窗口，恒返回 (len(p), nil)。
+func (r *respRecorder) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || !r.active {
+		return len(p), nil
 	}
-	_, _ = f.Write(b.Bytes())
+	r.writeHeadLocked()
+	r.total += int64(len(p))
+
+	// 尾部窗口：一次裁到 tailKeep（每写满一个窗口才复制一次，避免逐帧复制的 O(n²)）。
+	r.tail = append(r.tail, p...)
+	if len(r.tail) > 2*tailKeep {
+		nt := make([]byte, tailKeep)
+		copy(nt, r.tail[len(r.tail)-tailKeep:])
+		r.tail = nt
+	}
+
+	// 正文：只写到 bodyCap，超出部分仅保留在尾部窗口里（收尾补写）。
+	if !r.capped {
+		room := bodyCap - int(r.written)
+		if room < 0 {
+			room = 0
+		}
+		n := len(p)
+		if n > room {
+			n = room
+		}
+		if n > 0 {
+			_, _ = r.w.Write(p[:n])
+			r.written += int64(n)
+		}
+		if r.written >= bodyCap {
+			r.capped = true
+		}
+	}
+	return len(p), nil
+}
+
+// writeHeadLocked 首字节（或收尾兜底）时写文件头：摘要行 + 请求块 + 响应头。
+func (r *respRecorder) writeHeadLocked() {
+	if r.headerWritten {
+		return
+	}
+	r.headerWritten = true
+	fmt.Fprintf(r.w, "# channel=%s status=%d ttfb=%s\n", r.channel, r.status, time.Since(r.start).Round(time.Millisecond))
+	fmt.Fprintf(r.w, "### REQUEST %s %s\n", r.req.Method, r.req.URL.String())
+	writeHeaderBlock(r.w, r.req.Header)
+	_, _ = r.w.WriteString("\n")
+	_, _ = r.w.Write(truncateBody(r.reqBody))
+	_, _ = r.w.WriteString("\n\n")
+	if !r.hasResp {
+		_, _ = r.w.WriteString("### TRANSPORT ERROR\n")
+		return
+	}
+	fmt.Fprintf(r.w, "### RESPONSE %d\n", r.status)
+	writeHeaderBlock(r.w, r.header)
+	_, _ = r.w.WriteString("\n")
+}
+
+// close 收尾：补尾部窗口 + 写汇总行（duration/usage），随后刷盘。
+// 幂等；任何失败静默（调试工具不得干扰主流程），恒返回 nil 以免影响转发路径。
+func (r *respRecorder) close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	if !r.active {
+		return nil
+	}
+	r.writeHeadLocked() // 未读到任何字节时也要留下请求块
+	if r.readErr != nil {
+		fmt.Fprintf(r.w, "%s\n", r.readErr)
+	}
+	if r.total > bodyCap {
+		if r.total > maxBody {
+			_, _ = r.w.WriteString("\n<<...omitted...>>\n")
+		}
+		_, _ = r.w.Write(r.tail)
+	}
+	_, _ = r.w.WriteString("\n")
+	fmt.Fprintf(r.w, "# duration=%s usage=%s\n", time.Since(r.start).Round(time.Millisecond), usageHint(r.tail))
+	_ = r.w.Flush()
+	_ = r.f.Close()
+	return nil
+}
+
+// teeBody 包装上游响应体：读取原样转发（调用方逐帧拿到并即时 flush，不受落盘影响），
+// 同时把字节喂给 recorder。EOF/错误时收尾落盘。
+type teeBody struct {
+	rc  io.ReadCloser
+	rec *respRecorder
+}
+
+func (t *teeBody) Read(p []byte) (int, error) {
+	n, err := t.rc.Read(p)
+	if n > 0 {
+		_, _ = t.rec.Write(p[:n])
+	}
+	if err != nil {
+		if err != io.EOF {
+			t.rec.mu.Lock()
+			t.rec.readErr = err
+			t.rec.mu.Unlock()
+		}
+		_ = t.rec.close()
+	}
+	return n, err
+}
+
+func (t *teeBody) Close() error {
+	_ = t.rec.close()
+	return t.rc.Close()
 }
 
 // usageHint 从响应体里抓出 usage 片段压缩成一行速览（**本包存在的唯一目的**：
@@ -242,8 +440,8 @@ func usageHint(body []byte) string {
 	return strings.Join(strings.Fields(seg), " ")
 }
 
-// writeHeaderBlock 写 HTTP 头（keys 排序，便于跨请求 diff）。
-func writeHeaderBlock(b *bytes.Buffer, h http.Header) {
+// writeHeaderBlock 写 HTTP 头（keys 排序，便于跨请求 diff）。w 可为 *bytes.Buffer 或 *bufio.Writer。
+func writeHeaderBlock(w io.Writer, h http.Header) {
 	keys := make([]string, 0, len(h))
 	for k := range h {
 		keys = append(keys, k)
@@ -251,7 +449,7 @@ func writeHeaderBlock(b *bytes.Buffer, h http.Header) {
 	sort.Strings(keys)
 	for _, k := range keys {
 		for _, v := range h[k] {
-			fmt.Fprintf(b, "%s: %s\n", k, v)
+			fmt.Fprintf(w, "%s: %s\n", k, v)
 		}
 	}
 }

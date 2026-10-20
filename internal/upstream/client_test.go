@@ -27,7 +27,7 @@ func TestClassify(t *testing.T) {
 		{429, ``, ErrSoftRate},
 		{401, `Offline user session not found`, ErrSessionDead},
 		{401, `{"code":12153,"msg":"Offline user session not found"}`, ErrSessionDead},
-		{401, `{"code":9999,"msg":"bad token"}`, ErrClient},
+		{401, `{"code":9999,"msg":"bad token"}`, ErrSessionDead}, // 所有 401 都是登录态失效（#134）
 		{500, `boom`, ErrServer},
 		{503, `unavailable`, ErrServer},
 		{200, ``, ErrNone},

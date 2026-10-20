@@ -36,3 +36,17 @@ func TestSummarizeExpiring(t *testing.T) {
 		t.Fatalf("usable=%d unusable=%d expiring=%d want 100/200/100", u, un, e)
 	}
 }
+
+// TestExpireDateKeepsDateOnly 纯日期必须原样保留日期，不能经 ExpireInstant 平移到次日
+// （否则 ledger 伪键与统计分桶会整体偏移一天）。
+func TestExpireDateKeepsDateOnly(t *testing.T) {
+	if got := ExpireDate("2026-10-19"); got != "2026-10-19" {
+		t.Fatalf("ExpireDate(纯日期)=%q want 2026-10-19", got)
+	}
+	if got := ExpireDate("2026-10-19T20:00:00+08:00"); got != "2026-10-19" {
+		t.Fatalf("ExpireDate(RFC3339)=%q want 2026-10-19", got)
+	}
+	if got := ExpireDate(""); got != "" {
+		t.Fatalf("ExpireDate(空)=%q want 空串", got)
+	}
+}

@@ -54,10 +54,15 @@ func TestRaccoonCheckinWiring(t *testing.T) {
 		t.Error("❌ noExplicitCheckin(Raccoon) 仍为 true —— 面板手动签到按钮会被禁用，" +
 			"批量签到也会跳过该渠道（App.CheckinAccount/CheckinAll 两处守卫）")
 	}
+	// R17 修复后 MonkeyCode / Loomy 已实现签到，必须显式开放手动入口。
+	for _, k := range []provider.Kind{provider.MonkeyCode, provider.Loomy} {
+		if noExplicitCheckin(k) {
+			t.Errorf("❌ noExplicitCheckin(%s) 仍为 true —— 该渠道已实现签到，按钮会被禁用", k)
+		}
+	}
 	// 反向守门：真正无签到的渠道不得被误移除（防止将来「顺手删多了」）。
 	for _, k := range []provider.Kind{
-		provider.WorkBuddyAI, provider.QwenWork, provider.MonkeyCode,
-		provider.Loomy, provider.Oczen, provider.Cline,
+		provider.WorkBuddyAI, provider.QwenWork, provider.Oczen, provider.Cline,
 	} {
 		if !noExplicitCheckin(k) {
 			t.Errorf("❌ noExplicitCheckin(%s) 应为 true（该渠道确无签到活动）", k)

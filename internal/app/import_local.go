@@ -15,6 +15,7 @@ import (
 
 	"wild-work/internal/monkeycode"
 	"wild-work/internal/provider"
+	"wild-work/internal/raccoon"
 )
 
 // 本文件实现「导入型」渠道的凭据获取：凭据由官方客户端在本机维护，
@@ -77,12 +78,12 @@ type accountSection struct {
 //
 // 跨平台口径（issue #75）：不在此处做整体 Windows 门禁——三个导入渠道的
 // 路径探测各自尽力而为、找不到客户端凭据时返回明确错误。
-//  - Raccoon 用 os.UserHomeDir() + BOX_AGENT_CONFIG_DIR，天然跨平台
-//    （macOS/Linux 同样有官方客户端）；
-//  - Loomy / MonkeyCode 的路径候选以 POSIX/Win 通用环境变量为主，
-//    客户端配置落在标准目录即可命中，非 Windows 上找不到时给出明确报错。
-//  注：真正仅 Windows 的是「浏览器授权登录」（raccoon 依赖 HKCU 的
-//  office-raccoon:// 协议注册，见 protocol_windows.go）。
+//   - Raccoon 用 os.UserHomeDir() + BOX_AGENT_CONFIG_DIR，天然跨平台
+//     （macOS/Linux 同样有官方客户端）；
+//   - Loomy / MonkeyCode 的路径候选以 POSIX/Win 通用环境变量为主，
+//     客户端配置落在标准目录即可命中，非 Windows 上找不到时给出明确报错。
+//     注：真正仅 Windows 的是「浏览器授权登录」（raccoon 依赖 HKCU 的
+//     office-raccoon:// 协议注册，见 protocol_windows.go）。
 func (a *App) ImportLocalCredentials(channel string) (*ImportLocalResult, error) {
 	switch provider.Kind(strings.TrimSpace(channel)) {
 	case provider.MonkeyCode:
@@ -489,7 +490,8 @@ func (a *App) importRaccoon() (*ImportLocalResult, error) {
 	if access == "" {
 		return nil, fmt.Errorf("客户端凭据里没有 access_token（%s）：请先在客户端完成登录", path)
 	}
-	uid := strings.TrimSpace(jwtClaim(access, "name"))
+	// uid 提取统一走 raccoon.JWTUID（旧版取 name、新版 OIDC 回落 sub）。
+	uid := raccoon.JWTUID(access)
 	if uid == "" {
 		uid = "default"
 	}

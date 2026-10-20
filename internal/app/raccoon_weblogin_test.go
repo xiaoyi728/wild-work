@@ -54,7 +54,7 @@ func TestRaccoonWebLoginConstants(t *testing.T) {
 	}
 	code := string(src)
 	for _, want := range []string{
-		`CookieName = "raccoon_refresh_token"`,
+		`CookieName = "xhx_token"`,
 		`CookieDomain = "xiaohuanxiong.com"`,
 		`ownerTypeUsers = "users"`,
 	} {

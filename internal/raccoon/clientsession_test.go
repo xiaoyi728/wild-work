@@ -11,7 +11,7 @@ import (
 	"wild-work/internal/auth"
 )
 
-// makeJWT 构造未签名的三段式 JWT（jwtName/jwtExp 只解 payload，签名段内容无所谓）。
+// makeJWT 构造未签名的三段式 JWT（JWTUID/jwtExp 只解 payload，签名段内容无所谓）。
 func makeJWT(t *testing.T, claims map[string]any) string {
 	t.Helper()
 	b64 := func(v any) string {
@@ -91,13 +91,13 @@ func TestRescueFromClientSession_MissingTokens(t *testing.T) {
 	}
 }
 
-// TestJWTName jwtName 对真实结构的解析与容错。
+// TestJWTName JWTUID 对真实结构的解析与容错。
 func TestJWTName(t *testing.T) {
 	tok := makeJWT(t, map[string]any{"name": "RaccoonX", "exp": 123})
-	if got := jwtName(tok); got != "RaccoonX" {
-		t.Fatalf("jwtName = %q, want RaccoonX", got)
+	if got := JWTUID(tok); got != "RaccoonX" {
+		t.Fatalf("JWTUID = %q, want RaccoonX", got)
 	}
-	if got := jwtName("not-a-jwt"); got != "" {
+	if got := JWTUID("not-a-jwt"); got != "" {
 		t.Fatalf("非 JWT 应返回空, got %q", got)
 	}
 }

@@ -557,7 +557,7 @@ func (c *Client) DailyCheckin(_ *auth.Auth) error {
 //   - 其它 4xx（含 401/402/403 的 FreeTierError/RegionError）→ ErrPassthrough：
 //     原文透传、不计错不冷却 —— 这些是请求形态/地域限制，换账号无从规避；
 //     尤其不得归 ErrSessionDead：那会 pool.Disable 永久禁用，而匿名账号不可重登；
-//   - 5xx → ErrServer（server.Runtime 已置 NoCooldownOnServerError，同样不罚账号）。
+//   - 5xx → ErrServer（5xx 自 2026-10-20 起默认不计入账号错误，同样不罚账号）
 //
 // 注：RegionError 现在**多半到不了这里**——ChatStream 会在渠道内部先经备用上游通道
 // 重放一次（R62），成功则客户端拿到 200。只有「未配备用通道 / 备用也受限 / 备用拨不动」

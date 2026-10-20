@@ -340,6 +340,11 @@ func (l *Ledger) AutoFlush(stop <-chan struct{}) {
 			return
 		case <-t.C:
 			l.Flush()
+			// 每小时清理一次过期的请求体摘要分片（诊断数据保留 7 天）
+			if now := time.Now().Unix(); now-btClean.Load() >= 3600 {
+				btClean.Store(now)
+				l.cleanupBodyTrace()
+			}
 		}
 	}
 }

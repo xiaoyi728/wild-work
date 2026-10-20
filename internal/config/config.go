@@ -117,6 +117,12 @@ type Config struct {
 		SoftRate    string `json:"soft_rate"`     // "60s"
 		ErrThresh   int    `json:"err_threshold"` // 默认 3
 		ErrCooldown string `json:"err_cooldown"`  // "10m"
+		// DailyGrantAt 每日额度发放时刻（UTC+8 墙钟 "HH:MM"）。非空时硬冷却
+		// （402/余额不足）截到下一个发奖窗口而不跑满 hard_credit：额度一到账就能用。
+		// 仅适用于「每日固定时刻发放」的渠道（qwenwork 00:00 UTC+8 实测 00:01~00:20 到账）。
+		DailyGrantAt string `json:"daily_grant_at,omitempty"`
+		// DailyGrantBuffer 发奖窗口缓冲（默认 30m，覆盖实测最晚到账值）。
+		DailyGrantBuffer string `json:"daily_grant_buffer,omitempty"`
 	} `json:"cooldown"`
 
 	Schedule struct {
@@ -185,6 +191,10 @@ type Config struct {
 		LoopGuard bool `json:"loop_guard"`
 	} `json:"features"`
 
+	// BodyLog 诊断开关：把每次请求的「上下文构成摘要」写入 data/ledger/body-trace-*.jsonl，
+	// 用于定位上下文为何膨胀。默认关；摘要含消息内容前 200 字预览，用完请关掉。
+	BodyLog bool `json:"body_log,omitempty"`
+
 	// CustomChannels 自定义第三方 OpenAI 兼容渠道列表（R66）。
 	CustomChannels []custom.ChannelConfig `json:"custom_channels,omitempty"`
 
@@ -192,6 +202,13 @@ type Config struct {
 	HardCreditDur  time.Duration `json:"-"`
 	SoftRateDur    time.Duration `json:"-"`
 	ErrCooldownDur time.Duration `json:"-"`
+	// DailyGrantAt 每日发奖窗口（UTC+8 墙钟时刻）。注意 00:00 解析后是 0，
+	// 与「未配置」不可区分，故是否启用看 DailyGrantEnabled。
+	DailyGrantAt time.Duration `json:"-"`
+	// DailyGrantEnabled 是否启用「硬冷却截到发奖窗口」策略（配置了 daily_grant_at 即启用）。
+	DailyGrantEnabled bool `json:"-"`
+	// DailyGrantBufferDur 发奖窗口缓冲（默认 30m）。
+	DailyGrantBufferDur time.Duration `json:"-"`
 	// ExpiringThresholdDur 临期阈值解析结果（normalize 里钳到 >= 24h）。
 	ExpiringThresholdDur time.Duration `json:"-"`
 }
@@ -217,6 +234,8 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "60s"
 	c.Cooldown.ErrThresh = 3
 	c.Cooldown.ErrCooldown = "10m"
+	c.Cooldown.DailyGrantAt = "00:00"
+	c.Cooldown.DailyGrantBuffer = "30m"
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.CheckinTimes = []string{"09:00", "21:00"}
 	c.Schedule.KeepaliveHours = []int{22}
@@ -431,6 +450,19 @@ func (c *Config) normalize() error {
 	if c.ErrCooldownDur, err = time.ParseDuration(c.Cooldown.ErrCooldown); err != nil {
 		return fmt.Errorf("cooldown.err_cooldown: %w", err)
 	}
+	// 每日发奖窗口：空串 = 不启用（走完整 hard_credit）；非空必须是合法 "HH:MM"。
+	if c.Cooldown.DailyGrantAt != "" {
+		c.DailyGrantEnabled = true
+		if c.DailyGrantAt, err = parseClockHM(c.Cooldown.DailyGrantAt); err != nil {
+			return fmt.Errorf("cooldown.daily_grant_at: %w", err)
+		}
+		if c.Cooldown.DailyGrantBuffer == "" {
+			c.Cooldown.DailyGrantBuffer = "30m"
+		}
+		if c.DailyGrantBufferDur, err = time.ParseDuration(c.Cooldown.DailyGrantBuffer); err != nil {
+			return fmt.Errorf("cooldown.daily_grant_buffer: %w", err)
+		}
+	}
 	if c.Cooldown.ErrThresh <= 0 {
 		c.Cooldown.ErrThresh = 3
 	}
@@ -507,4 +539,65 @@ func (c *Config) normalize() error {
 		seenCustom[ch.Name] = true
 	}
 	return nil
+}
+
+// ExpiringThresholdDays 临期阈值（自然日数）：由 ExpiringThresholdHours 换算，
+// 非整日向上取整（保守，宁可提前预警）。
+func (c *Config) ExpiringThresholdDays() int {
+	h := c.Schedule.ExpiringThresholdHours
+	if h <= 0 {
+		h = 24
+	}
+	days := h / 24
+	if h%24 != 0 {
+		days++
+	}
+	if days < 1 {
+		days = 1
+	}
+	return days
+}
+
+// parseClockHM 把 "HH:MM" 解析为当天分钟数（time.Duration）。
+func parseClockHM(v string) (time.Duration, error) {
+	mins, err := ParseClockTimes([]string{v})
+	if err != nil || len(mins) != 1 {
+		return 0, fmt.Errorf("invalid HH:MM %q", v)
+	}
+	return time.Duration(mins[0]) * time.Minute, nil
+}
+
+// hardCooldownLoc 每日发奖窗口的时区口径：固定 UTC+8 墙钟（与各渠道上游一致）。
+var hardCooldownLoc = time.FixedZone("UTC+8", 8*60*60)
+
+// HardCooldownFor 返回一次「硬冷却」（402 余额/权益不足）应持续多久。
+//
+// 为什么不是固定 HardCreditDur：qwenwork 等渠道每日 00:00（UTC+8）服务端自动
+// 发放额度（账本实测 00:01~00:20 到账）。固定 12h 会把「19:07 撞 402」锁到次日
+// 07:07——额度早在 00:20 就到账了，却被白锁 7 小时。故当 DailyGrantAt 已配置时，
+// 冷却截到「下一个发奖窗口 + 缓冲」。窗口配置为空时退回完整 HardCreditDur。
+// 上限保护：截断只会缩短、不会延长。
+func (c *Config) HardCooldownFor(now time.Time) time.Duration {
+	base := c.HardCreditDur
+	if !c.DailyGrantEnabled {
+		return base
+	}
+	until := NextDailyGrant(now, c.DailyGrantAt, c.DailyGrantBufferDur)
+	d := until.Sub(now)
+	if d <= 0 || d > base {
+		return base
+	}
+	return d
+}
+
+// NextDailyGrant 返回 now 之后（严格晚于）最近一个「发奖时刻 + 缓冲」。
+// 已过当日窗口则顺延到次日；时刻按 UTC+8 墙钟解释，与上游发奖口径一致。
+func NextDailyGrant(now time.Time, at, buffer time.Duration) time.Time {
+	local := now.In(hardCooldownLoc)
+	day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, hardCooldownLoc)
+	next := day.Add(at + buffer)
+	if !next.After(now) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
 }

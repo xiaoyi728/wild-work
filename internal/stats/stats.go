@@ -20,6 +20,7 @@ package stats
 
 import (
 	"fmt"
+	"math"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -66,6 +67,8 @@ type Account struct {
 	ErrCount int `json:"err_count"`
 	// CreditsNA 匿名渠道无积分概念（面板显示「不适用」，不参与余额合计）。
 	CreditsNA bool `json:"credits_na"`
+	// CreditsUnit 计量单位：空 = 积分，"token" = Token 计数（不并入积分口径）。
+	CreditsUnit string `json:"credits_unit,omitempty"`
 }
 
 // Toast 里程碑通知事件（带稳定 ID，前端按 id 去重）。
@@ -100,15 +103,31 @@ type PlatformRow struct {
 // ExpiryRow 最近临期行。BurnForecast = -1 表示观测不足，无法预估。
 // 列表排序（expiryRowsLocked）：到期日升序 → 同日按额度降序 → 同日同额 uid 升序。
 type ExpiryRow struct {
-	UID          string `json:"uid"`
-	Nickname     string `json:"nickname"`
-	Group        string `json:"group"`
-	ExpireAt     string `json:"expire_at"` // 本地日 "2006-01-02"
-	DaysLeft     int    `json:"days_left"`
-	Amount       int64  `json:"amount"` // 该到期日各包剩余合计
-	TodayOut     int64  `json:"today_out"`
-	BurnForecast int64  `json:"burn_forecast"`
-	Risk         bool   `json:"risk"`
+	UID          string  `json:"uid"`
+	Nickname     string  `json:"nickname"`
+	Group        string  `json:"group"`
+	ExpireAt     string  `json:"expire_at"`  // 上游原始值（可含时刻）
+	HoursLeft    float64 `json:"hours_left"` // 精确剩余小时（一位小数）
+	DaysLeft     int     `json:"days_left"`  // 兼容字段（自然日差）
+	Amount       int64   `json:"amount"`     // 该到期日各包剩余合计
+	TodayOut     int64   `json:"today_out"`
+	BurnForecast int64   `json:"burn_forecast"`
+	Risk         bool    `json:"risk"`
+	// Urgency 按紧迫度分档（视觉维度：标什么颜色）：today / tomorrow / later。
+	Urgency string `json:"urgency"`
+}
+
+// 紧迫度分档（配色依据，与 platform 三列、临期阈值同一口径）。
+const (
+	UrgencyToday    = "today"
+	UrgencyTomorrow = "tomorrow"
+	UrgencyLater    = "later"
+)
+
+// ExpireItem 单条目到期快照（ApplyExpiry 喂入）。
+type ExpireItem struct {
+	At     string
+	Amount int64
 }
 
 // RotationRow 轮换视图行（使用中 / 接棒顺序）。
@@ -198,15 +217,18 @@ type acct struct {
 	cooling  bool
 	disabled bool
 	// 异常账号区块：冷却原因/解冻时刻/错误计数（纯内存，每轮喂入覆盖）。
-	coolReason string
-	coolUntil  string
-	errCount   int
-	creditsNA  bool
-	hasLast    bool      // 是否已确立差值基线（首轮只建基线不记差值）
-	creditOut  int64     // 今日差值花费（仅下降记，上涨不计）
-	expireAt   string    // 最早到期本地日（ApplyExpiry 喂入，纯内存）
-	expireAmt  int64     // 到期日各包剩余合计（纯内存）
-	burnSince  time.Time // 今日差值观测起点（持久化，跨天清零重设）
+	coolReason  string
+	coolUntil   string
+	errCount    int
+	creditsNA   bool
+	creditsUnit string // 空 = 积分；"token" = Token 计数（不进任何积分口径）
+	hasLast     bool   // 是否已确立差值基线（首轮只建基线不记差值）
+	creditOut   int64  // 今日差值花费（仅下降记，上涨不计）
+	// expires 本账号**逐条目**的到期快照（ApplyExpiry 喂入，纯内存、每轮整体替换）。
+	// 只含 Usable && Remain>0 && 有到期时刻的条目。逐条目才能按精确时刻分自然日桶，
+	// 且「7 日内到期」不会只算最早那一天（上游实测口径：1788 vs 4938）。
+	expires   []ExpireItem
+	burnSince time.Time // 今日差值观测起点（持久化，跨天清零重设）
 }
 
 // stickyInfo 平台粘性现状（ApplySticky 喂入，纯内存、每轮覆盖）。
@@ -370,7 +392,8 @@ func (s *Stats) ApplyPoll(list []Account, now time.Time) {
 		a.expiring, a.cooling, a.disabled = u.Expiring, u.Cooling, u.Disabled
 		a.coolReason, a.coolUntil, a.errCount = u.Reason, u.Until, u.ErrCount
 		a.creditsNA = u.CreditsNA
-		if a.hasLast && !a.creditsNA && u.Credits < a.credits {
+		a.creditsUnit = u.CreditsUnit
+		if a.hasLast && !a.creditsNA && a.creditsUnit == "" && u.Credits < a.credits {
 			a.creditOut += a.credits - u.Credits // 仅记消耗；余额上涨不是收入事件
 		}
 		if a.burnSince.IsZero() {
@@ -419,14 +442,13 @@ func (s *Stats) milestoneLocked(now time.Time) {
 	}
 }
 
-// ApplyExpiry 写入单账号临期数据（expireDay 为本地日 "2006-01-02"，amount 为该日
-// 各包剩余合计）。day=="" 时写入空值即清除旧数据——否则账号余额耗尽后面板会一直
-// 显示过期残留的临期行直到跨天。
-func (s *Stats) ApplyExpiry(uid, expireDay string, amount int64) {
+// ApplyExpiry 写入单账号**逐条目**到期快照（整体替换语义）。
+// 空切片即清除旧数据——否则账号余额耗尽后面板会一直显示过期残留的临期行。
+func (s *Stats) ApplyExpiry(uid string, items []ExpireItem) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if a, ok := s.accts[uid]; ok {
-		a.expireAt, a.expireAmt = expireDay, amount
+		a.expires = items
 	}
 }
 
@@ -498,61 +520,111 @@ func daysUntil(expDay, now time.Time) int {
 	return days
 }
 
-// burnForecastLocked 预计作废：按今日差值速率外推距到期时段的消耗。
+// earliestExpiryLocked 取该账号最早的到期时刻（按精确时刻比，不按日期串）。
+func (a *acct) earliestExpiryLocked() (at string, amount int64, inst time.Time, ok bool) {
+	for _, e := range a.expires {
+		t, valid := provider.ExpireInstant(e.At)
+		if !valid {
+			continue
+		}
+		if !ok || t.Before(inst) {
+			at, amount, inst, ok = e.At, e.Amount, t, true
+		}
+	}
+	return
+}
+
+// expireBucketsLocked 按自然日分桶累加（逐条目）。同一包只落一个桶。
+func (a *acct) expireBucketsLocked(now time.Time) (today, tomorrow, within7 int64) {
+	for _, e := range a.expires {
+		switch provider.ExpireBucketOf(e.At, now) {
+		case provider.BucketToday:
+			today += e.Amount
+		case provider.BucketTomorrow:
+			tomorrow += e.Amount
+		case provider.Bucket7d:
+			within7 += e.Amount
+		}
+	}
+	return
+}
+
+// burnForecastLocked 预计作废：按今日差值速率外推距最早到期时刻的消耗。
 // 返回 -1 = 观测不足/无消耗（宁可不预估也不误报）；已到期返回 0。
 func (s *Stats) burnForecastLocked(a *acct, now time.Time) int64 {
-	if a.expireAt == "" || a.burnSince.IsZero() || a.creditOut <= 0 {
+	_, amount, inst, ok := a.earliestExpiryLocked()
+	if !ok || amount <= 0 || a.burnSince.IsZero() || a.creditOut <= 0 {
 		return -1
 	}
 	hours := now.Sub(a.burnSince).Hours()
 	if hours < burnMinObserve {
 		return -1
 	}
-	expDay, err := time.ParseInLocation("2006-01-02", a.expireAt, time.Local)
-	if err != nil {
-		return -1
-	}
-	hoursTo := expDay.Add(24 * time.Hour).Sub(now).Hours() // 到期日全天结束
+	hoursTo := inst.Sub(now).Hours() // 精确时刻差，不再按「到期日 +24h」近似
 	if hoursTo <= 0 {
 		return 0
 	}
 	return int64(float64(a.creditOut) / hours * hoursTo)
 }
 
-// expiryRowsLocked 生成最近临期行（到期日升序、同日按额降序、同日同额 uid 升序
-// 稳定锚点，全量下发，前端限高滚动展示）。
+// urgencyOf 按自然日分档（配色依据）：今天红、明天黄、更远不上色。
+func urgencyOf(expireAt string, now time.Time) string {
+	switch provider.ExpireBucketOf(expireAt, now) {
+	case provider.BucketToday:
+		return UrgencyToday
+	case provider.BucketTomorrow:
+		return UrgencyTomorrow
+	}
+	return UrgencyLater
+}
+
+// expiryRowsLocked 生成最近临期行：每账号一行，取最早到期时刻那一批包，
+// 按剩余时长升序排列。
 func (s *Stats) expiryRowsLocked(now time.Time) []ExpiryRow {
 	rows := make([]ExpiryRow, 0, len(s.accts))
 	for _, a := range s.accts {
-		if a.expireAt == "" || a.expireAmt <= 0 {
+		at, amount, inst, ok := a.earliestExpiryLocked()
+		if !ok || amount <= 0 {
 			continue
 		}
-		expDay, err := time.ParseInLocation("2006-01-02", a.expireAt, time.Local)
-		if err != nil {
-			continue
+		hoursLeft := inst.Sub(now).Hours()
+		if hoursLeft <= 0 {
+			continue // 已失效：不再出现在「最近临期」
 		}
-		daysLeft := daysUntil(expDay, now)
+		day := provider.ExpireDate(at)
+		var dayAmount int64
+		for _, e := range a.expires {
+			if provider.ExpireDate(e.At) == day {
+				dayAmount += e.Amount
+			}
+		}
+		if dayAmount <= 0 {
+			dayAmount = amount
+		}
 		forecast := s.burnForecastLocked(a, now)
 		rows = append(rows, ExpiryRow{
 			UID:          a.uid,
 			Nickname:     a.nickname,
 			Group:        a.group,
-			ExpireAt:     a.expireAt,
-			DaysLeft:     daysLeft,
-			Amount:       a.expireAmt,
+			ExpireAt:     at,
+			HoursLeft:    math.Round(hoursLeft*10) / 10,
+			DaysLeft:     int(hoursLeft / 24),
+			Amount:       dayAmount,
 			TodayOut:     a.creditOut,
 			BurnForecast: forecast,
-			Risk:         daysLeft <= expiryRiskDays && forecast >= 0 && forecast < a.expireAmt,
+			Risk: provider.ExpireWithinDays(at, now, expiryRiskDays) &&
+				(forecast < 0 || forecast < dayAmount),
+			Urgency: urgencyOf(at, now),
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].ExpireAt != rows[j].ExpireAt {
-			return rows[i].ExpireAt < rows[j].ExpireAt // 到期日升序
+		if rows[i].HoursLeft != rows[j].HoursLeft {
+			return rows[i].HoursLeft < rows[j].HoursLeft
 		}
 		if rows[i].Amount != rows[j].Amount {
-			return rows[i].Amount > rows[j].Amount // 同日按额度降序
+			return rows[i].Amount > rows[j].Amount
 		}
-		return rows[i].UID < rows[j].UID // 同日同额：uid 升序稳定锚点（防刷新间跳动）
+		return rows[i].UID < rows[j].UID
 	})
 	return rows
 }
@@ -622,9 +694,6 @@ func noExpiryChannel(g string) bool { return g == string(provider.Oczen) }
 // 归并：TraeCode 与 TraeWork 共用同一批账号与积分池，模型流量按前缀归一到
 // traework 一行（账号侧本就没有 traecode 组，合并不产生重复计数）。
 func (s *Stats) platformRowsLocked(now time.Time) []PlatformRow {
-	deadline := now.AddDate(0, 0, 7).Format("2006-01-02")
-	today := now.Format("2006-01-02")
-	tomorrow := now.AddDate(0, 0, 1).Format("2006-01-02")
 	agg := make(map[string]*PlatformRow, 8)
 	rowOf := func(g string) *PlatformRow {
 		g = normalizePlatform(g)
@@ -644,18 +713,10 @@ func (s *Stats) platformRowsLocked(now time.Time) []PlatformRow {
 		row.Accounts++
 		row.Credits += a.creditVal()
 		row.CreditOut += a.creditOut
-		if a.expireAt == "" || a.expireAmt <= 0 {
-			continue
-		}
-		if a.expireAt <= deadline {
-			row.Expire7d += a.expireAmt
-		}
-		if a.expireAt == today {
-			row.ExpireToday += a.expireAmt
-		}
-		if a.expireAt == tomorrow {
-			row.ExpireTomorrow += a.expireAmt
-		}
+		todayAmt, tomorrowAmt, within7 := a.expireBucketsLocked(now)
+		row.ExpireToday += todayAmt
+		row.ExpireTomorrow += tomorrowAmt
+		row.Expire7d += todayAmt + tomorrowAmt + within7
 	}
 	// 今日收入：事件键 "uid|day"，按 uid 反查渠道。已删号的事件仅进全局合计，不归属平台。
 	for k, v := range s.events {
@@ -848,28 +909,20 @@ func (s *Stats) Snapshot(now time.Time) Snapshot {
 		totalCredits += a.creditVal()
 	}
 
-	// 今/明日到期与 7 日临期（全池口径，与平台各行之和必然相等）
-	deadline := now.AddDate(0, 0, 7).Format("2006-01-02")
-	today := now.Format("2006-01-02")
-	tomorrow := now.AddDate(0, 0, 1).Format("2006-01-02")
+	// 今/明日到期与 7 日临期（全池口径，与平台各行之和必然相等）。
+	// 逐条目按精确时刻分自然日桶，次日 00:00 失效算今日。
 	var expiring7d int64
 	var expiring7dAccts int
 	var expireToday int64
 	var expireTomorrow int64
 	for _, a := range s.accts {
-		if a.expireAt == "" || a.expireAmt <= 0 {
+		todayAmt, tomorrowAmt, within7 := a.expireBucketsLocked(now)
+		if todayAmt+tomorrowAmt+within7 <= 0 {
 			continue
 		}
-		if a.expireAt == today {
-			expireToday += a.expireAmt
-		}
-		if a.expireAt == tomorrow {
-			expireTomorrow += a.expireAmt
-		}
-		if a.expireAt > deadline {
-			continue
-		}
-		expiring7d += a.expireAmt
+		expireToday += todayAmt
+		expireTomorrow += tomorrowAmt
+		expiring7d += todayAmt + tomorrowAmt + within7
 		expiring7dAccts++
 	}
 

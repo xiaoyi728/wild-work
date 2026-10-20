@@ -379,6 +379,34 @@ func (a *App) creditsNAKind(group string) bool {
 	return a.isCustomChannel(group)
 }
 
+// manualCallbackKind 报告该渠道的授权回调是否**写死回环地址**，因而需要一条
+// 「粘贴回调地址」的人工兜底（浏览器与网关不同机时自动回调到不了网关）。
+// 单一来源：/api/login/start 的 manual_callback 与 /api/login/callback 的白名单都调它。
+func manualCallbackKind(kind provider.Kind) bool {
+	switch kind {
+	case provider.TraeWork, provider.TraeCode:
+		return true
+	}
+	return false
+}
+
+// untilTS 零值时间返回 0（否则 time.Time{}.Unix() 是负的巨大值，前端会算出荒谬时长）。
+func untilTS(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+// creditsUnitKind 该渠道额度计量单位（空 = 积分；"token" = Token 计数）。
+// MonkeyCode 的每日额度以 token 计量，不能与积分相加或合计。
+func (a *App) creditsUnitKind(group string) string {
+	if group == provider.MonkeyCode.String() {
+		return "token"
+	}
+	return ""
+}
+
 // isCustomChannel 报告该分组名是否是自定义渠道。先查运行时表（热更新后的权威态），
 // 再回退查配置（供应器未装配/已停用的渠道）。
 // 两把锁分开取：runtimesMu 只管运行时表，a.mu 只管 cfg——不可与外层已持 a.mu 的调用嵌套。
@@ -427,15 +455,14 @@ func (a *App) SetCustomChannelsSyncer(fn func(channels []custom.ChannelConfig)) 
 // QoderCN/QoderCOM 已实现 campaigns 签到，支持手动按钮（上游同一套机制）。
 // 智谱清言已实现 activity-api 每日签到，支持手动按钮。
 // 小浣熊已实现 setting_info 触发每日积分落账（见 internal/raccoon/checkin.go，R65），支持手动按钮。
-// MonkeyCode 一期也不提供手动签到：上游未提供额度或签到端点。
-// Loomy 一期也不提供手动签到：上游未提供额度或签到端点。
+// MonkeyCode / Loomy 已实现签到（钱包 checkin / 宠物打工奖励），支持手动按钮。
 // Cline 走官方 API Key：无签到活动、Key 不过期 ⇒ 既不需手动签到也不需保活。
 // OpenCodeZen 匿名通道无账号概念，既无签到也无积分。
 // noExplicitCheckin 不支持显式签到（手动按钮）的渠道。
 // 自定义渠道无签到活动（R66）；内建名单固定，故抽成无状态的包级函数（可脱离 App 断言），
 // 方法体仅补上「是否自定义渠道」这一动态判定。
 func noExplicitCheckin(k provider.Kind) bool {
-	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode || k == provider.Loomy || k == provider.Oczen || k == provider.Cline
+	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.Oczen || k == provider.Cline
 }
 
 func (a *App) noExplicitCheckinKind(k provider.Kind) bool {
@@ -505,13 +532,15 @@ func (a *App) SetRootHandler(h http.Handler) { a.httpRoot = h }
 
 // serveHandler 返回实际对外服务的 handler（优先外层组合，其次内层）。
 func (a *App) serveHandler() http.Handler {
+	// 最外层统一加 Host 校验（未启用管理密码时只接受环回 Host，防 DNS rebinding
+	// 读写面板）；挂在最外层而非只挂 /api/：面板静态页与 /v1/* 同样不该被跨站域名访问。
 	if a.httpRoot != nil {
-		return a.httpRoot
+		return a.hostGuard(a.httpRoot)
 	}
 	if a.handler == nil { // 避免 typed-nil 接口导致 http.Server 请求时 panic
 		return nil
 	}
-	return a.handler
+	return a.hostGuard(a.handler)
 }
 
 // StartServer 按当前配置启动 HTTP 服务。
@@ -1535,7 +1564,7 @@ func (a *App) creditSnapshot(rt *Runtime, au *auth.Auth) (remain int64, items []
 		return 0, nil, 0, 0, err
 	}
 	_, unusable = provider.Summarize(items)
-	expiring = provider.ExpiringWithin(items, a.cfg.ExpiringThresholdDur)
+	expiring = provider.ExpiringWithinDays(items, a.cfg.ExpiringThresholdDays(), time.Now())
 	// 差分记账：与上次快照对比产出 earn/spend/expire 流水（锦上添花，失败不干扰）
 	if a.ledger != nil {
 		a.ledger.DiffCredits(rt.Kind.String(), au.UID, remain, items)
@@ -1917,6 +1946,20 @@ func (a *App) SetLoopGuard(on bool) error {
 	}
 	loopguard.SetEnabled(on)
 	log.Printf("思考链死循环检测已%s", map[bool]string{true: "开启", false: "关闭"}[on])
+	return nil
+}
+
+// SetBodyLog 开关请求体构成摘要记录（诊断用：定位上下文为何膨胀）。
+func (a *App) SetBodyLog(on bool) error {
+	a.mu.Lock()
+	a.cfg.BodyLog = on
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	ledger.SetBodyTrace(on)
+	log.Printf("请求体摘要记录已%s", map[bool]string{true: "开启（写 data/ledger/body-trace-*.jsonl）", false: "关闭"}[on])
 	return nil
 }
 
@@ -2334,11 +2377,16 @@ type AccountView struct {
 	CreditsStale bool `json:"credits_stale,omitempty"`
 	// CreditsNA 积分概念不适用（如 OpenCodeZen 匿名通道），UI 显示「不适用」
 	// 而非 0，并隐藏刷新积分与明细入口。
-	CreditsNA bool   `json:"credits_na,omitempty"`
-	Cooling   bool   `json:"cooling"`
-	Until     string `json:"until"`
-	Reason    string `json:"reason"`
-	Disabled  bool   `json:"disabled"`
+	CreditsNA bool `json:"credits_na,omitempty"`
+	// CreditsUnit 计量单位：空 = 积分，"token" = Token 计数（不并入积分合计）。
+	CreditsUnit string `json:"credits_unit,omitempty"`
+	Cooling     bool   `json:"cooling"`
+	Until       string `json:"until"`
+	// UntilTS 解冻时刻的 unix 秒（0 = 无）。面板用它实时算「剩 X 时 X 分」，
+	// 消除跨零点时 24h 文案被误读成 12h 的歧义。
+	UntilTS  int64  `json:"until_ts,omitempty"`
+	Reason   string `json:"reason"`
+	Disabled bool   `json:"disabled"`
 	// ModelCooling 模型级冷却（model → 解冻时刻）；仅该账号该模型限流，账号整体仍可用
 	// （429/6004 上游按模型计）。面板据此区分「整号冷却」与「个别模型限流」。
 	ModelCooling   map[string]string `json:"model_cooling,omitempty"`
@@ -2346,6 +2394,9 @@ type AccountView struct {
 	LastCheckinOK  bool              `json:"last_checkin_ok"`
 	LastCheckinAt  string            `json:"last_checkin_at"`
 	LastCheckinMsg string            `json:"last_checkin_msg"`
+	// SessionDead 登录态失效（401/登录已失效）：面板显示「需重新登录」+ 重登入口（#134）。
+	SessionDead       bool   `json:"session_dead,omitempty"`
+	SessionDeadReason string `json:"session_dead_reason,omitempty"`
 }
 
 // State Web UI 初始数据。
@@ -2400,6 +2451,9 @@ type State struct {
 	// LoopGuard 思考链死循环检测（发癫拦截）是否开启（只读，保存走 POST /api/config/loop_guard）。
 	LoopGuard bool `json:"loop_guard"`
 
+	// BodyLog 请求体摘要诊断是否开启（只读，保存走 POST /api/config/body_log）。
+	BodyLog bool `json:"body_log"`
+
 	// ModelFallback 模型降级链（保存走 POST /api/config/model_fallback）。
 	ModelFallback []config.ModelFallbackRule `json:"model_fallback"`
 
@@ -2440,6 +2494,7 @@ func (a *App) GetState() State {
 		LanIP:          lanIP(),
 		ExpiringDays:   int(a.cfg.ExpiringThresholdDur / (24 * time.Hour)),
 		LoopGuard:      a.cfg.Features.LoopGuard,
+		BodyLog:        a.cfg.BodyLog,
 	}
 	st.ModelFallback = a.cfg.ModelFallback
 	st.ReasoningEfforts = a.cfg.ReasoningEfforts
@@ -2483,16 +2538,18 @@ func (a *App) accountViews() []AccountView {
 			UnusableCredits: s.UnusableCredits,
 			CreditsStale:    s.CreditsStale,
 			// 匿名与自定义渠道无积分：前端据此显示「不适用」
-			CreditsNA:      a.creditsNAKind(group),
-			Cooling:        s.Cooling,
-			Until:          fmtTime(s.Until),
-			Reason:         s.Reason,
-			Disabled:       s.Disabled,
-			ModelCooling:   fmtTimeMap(s.ModelCooling),
-			ErrCount:       s.ErrCount,
-			LastCheckinOK:  s.LastCheckinOK,
-			LastCheckinAt:  fmtTime(s.LastCheckinAt),
-			LastCheckinMsg: s.LastCheckinMsg,
+			CreditsNA:         a.creditsNAKind(group),
+			Cooling:           s.Cooling,
+			Until:             fmtTime(s.Until),
+			Reason:            s.Reason,
+			Disabled:          s.Disabled,
+			ModelCooling:      fmtTimeMap(s.ModelCooling),
+			ErrCount:          s.ErrCount,
+			LastCheckinOK:     s.LastCheckinOK,
+			LastCheckinAt:     fmtTime(s.LastCheckinAt),
+			LastCheckinMsg:    s.LastCheckinMsg,
+			SessionDead:       s.SessionDead,
+			SessionDeadReason: s.SessionDeadReason,
 		})
 	}
 	// 面板固定渠道序展示：OpenCodeZen → WorkBuddyCN → WorkBuddyAI → QoderCN → QoderCOM → TraeWork → 千问办公
@@ -2650,7 +2707,37 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"auth_url": url})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"auth_url":        url,
+			"manual_callback": manualCallbackKind(provider.Kind(req.Channel)),
+		})
+	})
+	// 人工回调通道（issue #98）：回调写死回环地址的渠道，浏览器与网关不同机时
+	// 自动回调到不了网关。用户把地址栏里那条打不开的 URL 粘回面板即可，
+	// 走与自动回调完全相同的兑换路径。
+	mux.HandleFunc("POST /api/login/callback", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Channel string `json:"channel"`
+			URL     string `json:"url"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		kind := provider.Kind(req.Channel)
+		if !manualCallbackKind(kind) {
+			apiError(w, http.StatusBadRequest, "该渠道不支持粘贴回调地址")
+			return
+		}
+		var err error
+		switch kind {
+		case provider.TraeWork, provider.TraeCode:
+			err = logintrae.SubmitCallbackURL(a.loginStateFP, req.URL)
+		default:
+			err = fmt.Errorf("该渠道暂不支持粘贴回调地址")
+		}
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("POST /api/login/cancel", func(w http.ResponseWriter, r *http.Request) {
 		if err := a.CancelLogin(); err != nil {
@@ -2815,6 +2902,17 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if err := a.SetExpiringDays(req.Days); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/config/body_log", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			On bool `json:"on"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetBodyLog(req.On); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}

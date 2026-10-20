@@ -45,8 +45,10 @@ func (u *rotatingUpstream) ChatStream(a *auth.Auth, _ []byte) (io.ReadCloser, in
 func (u *rotatingUpstream) FetchModels(*auth.Auth) ([]provider.ModelInfo, error) {
 	return []provider.ModelInfo{{ID: "m"}}, nil
 }
-func (u *rotatingUpstream) FetchModelPricing(*auth.Auth) ([]provider.ModelPricing, error) { return nil, nil }
-func (u *rotatingUpstream) UserResource(*auth.Auth) (int64, error)                        { return 0, nil }
+func (u *rotatingUpstream) FetchModelPricing(*auth.Auth) ([]provider.ModelPricing, error) {
+	return nil, nil
+}
+func (u *rotatingUpstream) UserResource(*auth.Auth) (int64, error) { return 0, nil }
 func (u *rotatingUpstream) UserResourceDetail(*auth.Auth) (int64, []provider.ResourceItem, error) {
 	return 0, nil, nil
 }
@@ -117,10 +119,10 @@ func TestMultiAccountRotatesOnAccountErrorInSameRequest(t *testing.T) {
 			rec1.Code, rec1.Body.String())
 	}
 
-	// A 必须被禁用（这是「下次会换号」的前提）
+	// A 必须被标记 SessionDead（这是「下次会换号且提示重登」的前提，不再永久停用）
 	st, _ := p.Status("A")
-	if !st.Disabled {
-		t.Fatalf("账号 A 应因 session_dead 被禁用，实际 Disabled=%v —— 否则下次仍会选到坏号", st.Disabled)
+	if !st.SessionDead {
+		t.Fatalf("账号 A 应因 session_dead 被标记，实际 SessionDead=%v —— 否则下次仍会选到坏号", st.SessionDead)
 	}
 
 	// --- 请求 2：A 已禁用 → 应选中 B 并成功 ---

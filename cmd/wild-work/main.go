@@ -344,6 +344,8 @@ func main() {
 	if lgerr != nil {
 		log.Printf("ledger init failed（统计功能不可用）: %v", lgerr)
 	}
+	// 请求体摘要诊断（默认关；配置开启时每个请求写一条摘要到 data/ledger/body-trace-*.jsonl）
+	ledger.SetBodyTrace(cfg.BodyLog)
 
 	wbSch := scheduler.New(scheduler.Config{Pool: wbPool, Upstream: wbUp, Name: "workbuddy", CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours, ExpiringThreshold: expiringThreshold, Ledger: lg})
 	trSch := scheduler.New(scheduler.Config{Pool: trPool, Upstream: trUp, Name: "traework", CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours, ExpiringThreshold: expiringThreshold, Ledger: lg})
@@ -370,11 +372,9 @@ func main() {
 	qcnSch := scheduler.New(scheduler.Config{Pool: qcnPool, Upstream: qcnUp, Name: "qodercn", CheckinMinutes: []int{qoderCheckinMinute}, CheckinRetryUntil: qoderCheckinRetryUntil, KeepaliveHours: cfg.Schedule.KeepaliveHours, ExpiringThreshold: expiringThreshold, Ledger: lg})
 	// QoderCOM：仅 campaigns 活动路径（无 daily-check-in）；其余同 QoderCN。
 	qcmSch := scheduler.New(scheduler.Config{Pool: qcmPool, Upstream: qcmUp, Name: "qodercom", CheckinMinutes: []int{qoderCheckinMinute}, CheckinRetryUntil: qoderCheckinRetryUntil, KeepaliveHours: cfg.Schedule.KeepaliveHours, ExpiringThreshold: expiringThreshold, Ledger: lg})
-	// MonkeyCode：无签到、无 refresh 端点，定时任务全关。
-	// 必须传**显式空切片**：传 nil 会被 scheduler.New 当作「未配置」补成默认
-	// 9:00/21:00 签到与 22:00 保活，每天产生两次必然失败的调用与失败日志。
+	// MonkeyCode：每日签到（钱包 checkin + Cap.js PoW 验证码）；无 refresh 端点，保活关闭。
 	mcSch := scheduler.New(scheduler.Config{Pool: mcPool, Upstream: mcUp, Name: "monkeycode",
-		CheckinMinutes: []int{}, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
 	// 小浣熊：签到走 setting_info（每日积分惰性落账的触发点，见 internal/raccoon/checkin.go）。
 	// access_token 实测仅 ≈2h，而 refresh_token ≈30 天，
 	// 故保活比其它渠道更密（每 4 小时一次）以减少「请求先 401 再刷新」的额外往返；
@@ -384,11 +384,10 @@ func main() {
 	// 故**不设 CheckinRetryUntil**（窗口重试是为「活动尚未创建」设计的，本渠道无此语义）。
 	rcSch := scheduler.New(scheduler.Config{Pool: rcPool, Upstream: rcUp, Name: "raccoon",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{1, 5, 9, 13, 17, 21}, ExpiringThreshold: expiringThreshold, Ledger: lg})
-	// Loomy：无签到，且**上游无 refresh 端点**（session 14 天，到期需重新导入）；
-	// 定时任务全部关闭（显式空切片）：refreshToken 为空，保活虽会按「无 refresh token」
-	// 跳过、不会误禁用账号，但每天仍空跑一次并记录失败，故直接关掉。
+	// Loomy：每日宠物打工奖励签到（按有效对话轮次结算）；上游无 refresh 端点（session 14 天），
+	// 保活关闭（显式空切片）。
 	lmSch := scheduler.New(scheduler.Config{Pool: lmPool, Upstream: lmUp, Name: "loomy",
-		CheckinMinutes: []int{}, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
 	// Cline：官方 API Key **不过期**、无签到活动、无 refresh token ⇒ 定时任务全部关闭。
 	// 必须传显式空切片 []int{}（R39）：传 nil 会被 scheduler.New 的零值兜底补上默认时间，
 	// 于是每天空跑一次必然失败的签到，并在面板渲染红色「签到失败」。
@@ -407,11 +406,9 @@ func main() {
 		ExpiringThreshold: expiringThreshold, Ledger: lg})
 
 	runtimes := map[provider.Kind]*server.Runtime{
-		provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, StaticModels: server.WorkBuddyStaticModels()},
-		provider.WorkBuddyAI: {Kind: provider.WorkBuddyAI, Pool: wbaPool, Upstream: wbaUp, StaticModels: workbuddyai.StaticModels(),
-			// 国际版网关实测间歇性 502/503/504，账号本身健康，不计入账号错误
-			NoCooldownOnServerError: true},
-		provider.TraeWork: {Kind: provider.TraeWork, Pool: trPool, Upstream: trUp, StaticModels: server.TraeWorkStaticModels()},
+		provider.WorkBuddy:   {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, StaticModels: server.WorkBuddyStaticModels()},
+		provider.WorkBuddyAI: {Kind: provider.WorkBuddyAI, Pool: wbaPool, Upstream: wbaUp, StaticModels: workbuddyai.StaticModels()},
+		provider.TraeWork:    {Kind: provider.TraeWork, Pool: trPool, Upstream: trUp, StaticModels: server.TraeWorkStaticModels()},
 		// TraeCode 与 TraeWork 共享 trPool（同一账号体系，避免 refresh token 轮换冲突），
 		// 仅上游客户端不同（function=solo_agent）。
 		provider.TraeCode:   {Kind: provider.TraeCode, Pool: trPool, Upstream: trCodeUp, StaticModels: server.TraeCodeStaticModels()},
@@ -433,10 +430,9 @@ func main() {
 		//
 		// 唯一真实约束是「refresh_token 轮换必须落盘」，已由 glm.RefreshToken 保证。
 		// oczen：整池只有一个匿名虚拟账号且不可重登——任何账号级惩罚（冷却/计数/禁用）
-		// 都等于整条渠道下线。SingleAccount 声明该约束，handler 对所有错误一律原文透传；
-		// NoCooldownOnServerError 保留（语义已被 SingleAccount 涵盖，留着不依赖顺序）。
+		// 都等于整条渠道下线。SingleAccount 声明该约束，handler 对所有错误一律原文透传。
 		provider.Oczen: {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, StaticModels: oczen.StaticModels(),
-			SingleAccount: true, NoCooldownOnServerError: true},
+			SingleAccount: true},
 	}
 	appRuntimes := map[provider.Kind]*app.Runtime{
 		provider.WorkBuddy:   {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, Scheduler: wbSch},
@@ -501,6 +497,7 @@ func main() {
 		Ledger:           appInst.Ledger(),
 		Stats:            appInst.Stats(), // 转发路径插桩 AddUsage/AddRequestRow（运行统计）
 		HardCooldown:     cfg.HardCreditDur,
+		HardCooldownFor:  cfg.HardCooldownFor,
 		SoftCooldown:     cfg.SoftRateDur,
 		ErrThreshold:     cfg.Cooldown.ErrThresh,
 		ErrCooldown:      cfg.ErrCooldownDur,
@@ -920,12 +917,11 @@ func buildCustomRuntimes(channels []custom.ChannelConfig, stateDir string) (map[
 		p.ClearPenalty(au.UID)
 
 		sRuntimes[k] = &server.Runtime{
-			Kind:                    k,
-			Pool:                    p,
-			Upstream:                client,
-			StaticModels:            client.StaticModels(),
-			SingleAccount:           true,
-			NoCooldownOnServerError: true,
+			Kind:          k,
+			Pool:          p,
+			Upstream:      client,
+			StaticModels:  client.StaticModels(),
+			SingleAccount: true,
 		}
 		aRuntimes[k] = &app.Runtime{
 			Kind:     k,

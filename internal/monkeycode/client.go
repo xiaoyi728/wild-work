@@ -375,6 +375,7 @@ func (c *Client) wallet(a *auth.Auth) (int64, []provider.ResourceItem, error) {
 			Remain:   w.Data.DailyTokenBalance,
 			Usable:   true,
 			InfoOnly: true,
+			Unit:     "token",
 			Key:      "daily_token",
 		})
 	}
@@ -563,10 +564,6 @@ func milliCredits(milli int64) int64 {
 }
 
 // DailyCheckin 本渠道无签到活动（渠道声明 noExplicitCheckin，调度器不会调用）。
-func (c *Client) DailyCheckin(_ *auth.Auth) error {
-	return fmt.Errorf("monkeycode 渠道无签到活动")
-}
-
 // Classify 上游错误分类。
 //
 // 关键：`403 {"error":"invalid ohmyagent request"}` 是**签名/协议错误**，

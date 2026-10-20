@@ -30,6 +30,12 @@ const (
 	// balance 单位是**毫积分**（console 前端 `balance/1e3`），daily_token_* 是 token 数。
 	epWallet = "/api/v1/users/wallet"
 
+	// 签到（2026-10-17 实测）：GET 查今日是否已签；POST 领取，必须带 captcha_token。
+	epWalletCheckin = "/api/v1/users/wallet/checkin"
+	// 无感人机验证（Cap.js SHA-256 PoW，公开端点、回包无 code 字段）。
+	epCaptchaChallenge = "/api/v1/public/captcha/challenge"
+	epCaptchaRedeem    = "/api/v1/public/captcha/redeem"
+
 	// epOAuthAuthorize 百智云 OAuth 授权端点（GET，需 baizhi 会话）。
 	// 带上它即等于用户在前端点了一次「同意授权」：302 到 redirect_uri 并附 `code`。
 	// 参数取值与官方前端跳转的 URL 完全一致（client_id / scope / response_type）。

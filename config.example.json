@@ -12,7 +12,9 @@
     "hard_credit": "12h",
     "soft_rate": "60s",
     "err_threshold": 5,
-    "err_cooldown": "10m"
+    "err_cooldown": "10m",
+    "daily_grant_at": "00:00",
+    "daily_grant_buffer": "30m"
   },
   "schedule": {
     "checkin_times": ["09:00", "21:00"],
@@ -34,6 +36,7 @@
   "reasoning_efforts": {},
   "model_fallback": [],
   "custom_channels": [],
+  "body_log": false,
   "features": {
     "loop_guard": true
   }

@@ -9,12 +9,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"wild-work/internal/auth"
@@ -22,6 +25,9 @@ import (
 )
 
 var ErrPending = errors.New("login pending")
+
+// submitMu 串行化 SubmitCallbackURL 对 state 文件的读-改-写（防连点/粘贴与轮询交错丢更新）。
+var submitMu sync.Mutex
 
 type Result struct {
 	AccessToken  string
@@ -45,6 +51,9 @@ type state struct {
 	CodeVerifier string `json:"codeVerifier,omitempty"` // 登录 URL 配对的 PKCE verifier（必须保存）
 	Host         string `json:"host,omitempty"`
 	Err          string `json:"err,omitempty"`
+	// CallbackPort 本次登录回调监听端口。traework 回调 URL 不带 state 参数，
+	// 端口是唯一的会话锚点——SubmitCallbackURL 用它拦截上一次登录的陈旧地址。
+	CallbackPort int `json:"callbackPort,omitempty"`
 }
 
 func NewClient() *http.Client { return &http.Client{Timeout: 30 * time.Second} }
@@ -73,7 +82,13 @@ func Start(client *http.Client, statePath string) (string, error) {
 	}
 	addr := ln.Addr().String()
 	callback := "http://" + addr + "/authorize"
-	st := state{MachineID: machineID, DeviceID: deviceID, CodeVerifier: codeVerifier}
+	callbackPort := 0
+	if _, p, perr := net.SplitHostPort(addr); perr == nil {
+		if n, aerr := strconv.Atoi(p); aerr == nil {
+			callbackPort = n
+		}
+	}
+	st := state{MachineID: machineID, DeviceID: deviceID, CodeVerifier: codeVerifier, CallbackPort: callbackPort}
 	if err := writeState(statePath, st); err != nil {
 		_ = ln.Close()
 		return "", err
@@ -379,4 +394,76 @@ func newUUID() string {
 	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
 	h := hex.EncodeToString(b)
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// SubmitCallbackURL 手动提交浏览器跳转后的回调地址（远程/局域网场景的兜底入口，issue #98）。
+//
+// 本渠道回调写死 http://127.0.0.1:<端口>/authorize，隐含「浏览器与网关同机」。
+// 从局域网另一台设备登录时回调打在用户自己机器上（连接被拒），5 分钟监听超时后也会错过。
+// 本函数把用户粘回的 URL 解析成凭证写进 pending state —— 与自动回调走同一条结论通道
+// （Poll 每 2s 读一次 state，兑换/取用户信息零分叉）。
+//
+// 端口是本次会话的唯一锚点：粘贴端口与 state.CallbackPort 不一致时拒绝（多半是上次登录的地址）。
+func SubmitCallbackURL(statePath, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return errors.New("回调地址为空：请复制登录完成后浏览器地址栏里的完整 URL")
+	}
+	var q url.Values
+	pastePort := 0
+	switch {
+	case strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://"):
+		u, err := url.Parse(raw)
+		if err != nil {
+			return fmt.Errorf("回调地址无法解析: %w", err)
+		}
+		q = u.Query()
+		pastePort, _ = strconv.Atoi(u.Port())
+	case strings.Contains(raw, "="):
+		qq, perr := url.ParseQuery(strings.TrimPrefix(raw, "?"))
+		if perr != nil && len(qq) == 0 {
+			return fmt.Errorf("回调地址无法解析: %w", perr)
+		}
+		q = qq
+	default:
+		return errors.New("无法识别的回调内容：请复制完整 URL（含 ? 之后的全部参数），不要只贴单个参数值")
+	}
+
+	submitMu.Lock()
+	defer submitMu.Unlock()
+	b, err := os.ReadFile(statePath)
+	if err != nil {
+		return errors.New("没有进行中的 TraeWork 登录流程（可能已完成或已超时），请重新发起登录")
+	}
+	var st state
+	if err := json.Unmarshal(b, &st); err != nil {
+		return fmt.Errorf("登录状态损坏: %w", err)
+	}
+	if st.RefreshToken != "" || st.AccessToken != "" || st.AuthCode != "" {
+		return errors.New("本次登录已收到凭证，无需再提交")
+	}
+	if pastePort != 0 && st.CallbackPort != 0 && pastePort != st.CallbackPort {
+		return fmt.Errorf("回调地址的端口 %d 与本次登录的回调口 %d 不一致——多半粘贴的是上一次登录的地址，请用本次登录后跳转的那条 URL",
+			pastePort, st.CallbackPort)
+	}
+	info := ParseCallback(raw)
+	if info.RefreshToken == "" && info.AccessToken == "" && info.AuthCode == "" {
+		st.Err = "粘贴的回调里没有可用的凭证参数（refreshToken / userJwt / authCodeInfo 均缺失）：请确认授权已完成，复制地址栏里含参数的整条 URL"
+		_ = writeState(statePath, st)
+		return errors.New(st.Err)
+	}
+	st.RefreshToken = info.RefreshToken
+	st.AccessToken = info.AccessToken
+	st.AuthCode = info.AuthCode
+	if h := q.Get("host"); h != "" {
+		st.Host = h
+	} else {
+		st.Host = traework.OAuthHost
+	}
+	st.Err = ""
+	if err := writeState(statePath, st); err != nil {
+		return err
+	}
+	log.Printf("traework 手动回调已提交（端口自检通过，等待兑换）")
+	return nil
 }

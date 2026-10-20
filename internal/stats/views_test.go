@@ -36,7 +36,7 @@ func TestBurnForecast(t *testing.T) {
 
 	// 首次喂入确立基线（burnSince=base）
 	s.ApplyPoll([]Account{{UID: "a", Nickname: "号1", Group: "traework", Credits: 200}}, base)
-	s.ApplyExpiry("a", expiry, 2000)
+	setExpiry(s, "a", expiry, 2000)
 	snap := s.Snapshot(base)
 	if len(snap.Expiry) != 1 || snap.Expiry[0].BurnForecast != -1 {
 		t.Fatalf("观测不足应返回 -1: %+v", snap.Expiry)
@@ -71,11 +71,11 @@ func TestExpiryFullList(t *testing.T) {
 		{UID: "e", Group: "traework", Credits: 100},
 	}
 	s.ApplyPoll(accts, base)
-	s.ApplyExpiry("a", base.AddDate(0, 0, 2).Format("2006-01-02"), 300)
-	s.ApplyExpiry("b", base.AddDate(0, 0, 2).Format("2006-01-02"), 500) // 同日按额降序在前
-	s.ApplyExpiry("c", base.AddDate(0, 0, 1).Format("2006-01-02"), 100) // 最早 → 第 1
-	s.ApplyExpiry("d", base.AddDate(0, 0, 5).Format("2006-01-02"), 700)
-	s.ApplyExpiry("e", "", 900) // 无到期日：不下发
+	setExpiry(s, "a", base.AddDate(0, 0, 2).Format("2006-01-02"), 300)
+	setExpiry(s, "b", base.AddDate(0, 0, 2).Format("2006-01-02"), 500) // 同日按额降序在前
+	setExpiry(s, "c", base.AddDate(0, 0, 1).Format("2006-01-02"), 100) // 最早 → 第 1
+	setExpiry(s, "d", base.AddDate(0, 0, 5).Format("2006-01-02"), 700)
+	setExpiry(s, "e", "", 900) // 无到期日：不下发
 
 	rows := s.Snapshot(base).Expiry
 	if len(rows) != 4 {
@@ -88,8 +88,8 @@ func TestExpiryFullList(t *testing.T) {
 	// 同日同额：uid 升序稳定锚点（f < g），多轮快照行序不跳动
 	s.ApplyPoll(append(accts, Account{UID: "f", Group: "traework", Credits: 100},
 		Account{UID: "g", Group: "traework", Credits: 100}), base)
-	s.ApplyExpiry("f", rows[0].ExpireAt, rows[0].Amount)
-	s.ApplyExpiry("g", rows[0].ExpireAt, rows[0].Amount)
+	setExpiry(s, "f", rows[0].ExpireAt, rows[0].Amount)
+	setExpiry(s, "g", rows[0].ExpireAt, rows[0].Amount)
 	r1 := s.Snapshot(base).Expiry
 	r2 := s.Snapshot(base).Expiry
 	for i := range r1 {
@@ -111,9 +111,9 @@ func TestExpireToday(t *testing.T) {
 		{UID: "w2", Group: "workbuddy", Credits: 500},
 		{UID: "t1", Group: "traework", Credits: 800},
 	}, base)
-	s.ApplyExpiry("w1", today, 664)    // 今日到期 → 计入
-	s.ApplyExpiry("w2", tomorrow, 100) // 明日到期 → 不计入今日
-	s.ApplyExpiry("t1", today, 50)     // 今日到期（另一平台）
+	setExpiry(s, "w1", today, 664)    // 今日到期 → 计入
+	setExpiry(s, "w2", tomorrow, 100) // 明日到期 → 不计入今日
+	setExpiry(s, "t1", today, 50)     // 今日到期（另一平台）
 
 	snap := s.Snapshot(base)
 	if snap.ExpireToday != 714 {
@@ -136,7 +136,7 @@ func TestExpireToday(t *testing.T) {
 	// 空行过滤：仅有今日到期的平台（无余额/收入/花费/Token）不被剔除
 	s2 := newTestStats(t)
 	s2.ApplyPoll([]Account{{UID: "q1", Group: "qodercn", Credits: 0}}, base)
-	s2.ApplyExpiry("q1", today, 30)
+	setExpiry(s2, "q1", today, 30)
 	rows := s2.Snapshot(base).Platforms
 	if len(rows) != 1 || rows[0].ExpireToday != 30 {
 		t.Fatalf("仅今日到期的平台行被误剔除: %+v", rows)
@@ -149,11 +149,11 @@ func TestApplyExpiryClears(t *testing.T) {
 	now := time.Now()
 	base := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, time.Local)
 	s.ApplyPoll([]Account{{UID: "a", Group: "workbuddy", Credits: 100}}, base)
-	s.ApplyExpiry("a", base.AddDate(0, 0, 2).Format("2006-01-02"), 300)
+	setExpiry(s, "a", base.AddDate(0, 0, 2).Format("2006-01-02"), 300)
 	if rows := s.Snapshot(base).Expiry; len(rows) != 1 {
 		t.Fatalf("前置失败：应有一行临期")
 	}
-	s.ApplyExpiry("a", "", 0) // 无到期包 → 清除
+	setExpiry(s, "a", "", 0) // 无到期包 → 清除
 	if rows := s.Snapshot(base).Expiry; len(rows) != 0 {
 		t.Fatalf("空值应清除临期行: %+v", rows)
 	}
@@ -336,4 +336,13 @@ func TestNoExpiryChannel(t *testing.T) {
 			t.Fatalf("%s 不应被判无到期概念", g)
 		}
 	}
+}
+
+// setExpiry 兼容旧用例的三参形态：空日期/零额 = 清除。
+func setExpiry(s *Stats, uid, day string, amount int64) {
+	var items []ExpireItem
+	if day != "" && amount > 0 {
+		items = []ExpireItem{{At: day, Amount: amount}}
+	}
+	s.ApplyExpiry(uid, items)
 }

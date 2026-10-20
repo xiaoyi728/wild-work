@@ -14,11 +14,14 @@ import (
 // 保留 token_days/req_days 历史；flush 一次后即转为新格式。
 func TestLoadLegacyStatsJSON(t *testing.T) {
 	dir := t.TempDir()
-	legacy := `{
-  "token_days": {"2026-09-20": 12345},
-  "req_days": {"2026-09-20": 7},
+	// 日期必须落在 30 日窗口内：写死 2026-09-20 会在 2026-10-20 起滑出窗口，
+	// 让本用例变成「每年必红一天」的日期炸弹（上游 master 仍是写死的）。
+	day := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	legacy := fmt.Sprintf(`{
+  "token_days": {%q: 12345},
+  "req_days": {%q: 7},
   "accts": {"370999939580348": "2026-09-21T22:06:12+08:00"}
-}`
+}`, day, day)
 	if err := os.WriteFile(filepath.Join(dir, "stats.json"), []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -50,11 +53,12 @@ func TestLoadBOMTolerance(t *testing.T) {
 	dir := t.TempDir()
 	today := time.Now().Format("2006-01-02")
 	now := time.Now().Format(time.RFC3339)
+	histDay := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
 	body := fmt.Sprintf(`{
-  "token_days": {"2026-09-20": 100},
+  "token_days": {%q: 100},
   "req_days": {},
   "accts": {"a1": {"day": %q, "burn_since": %q, "credit_out": 42}}
-}`, today, now)
+}`, histDay, today, now)
 	raw := append([]byte("\xef\xbb\xbf"), []byte(body)...)
 	if err := os.WriteFile(filepath.Join(dir, "stats.json"), raw, 0o644); err != nil {
 		t.Fatal(err)

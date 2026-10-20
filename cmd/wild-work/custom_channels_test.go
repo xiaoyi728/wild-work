@@ -35,7 +35,7 @@ func TestBuildCustomRuntimes(t *testing.T) {
 
 	k := provider.Kind("stepfun")
 	sRt := sRts[k]
-	if sRt == nil || sRt.Kind != k || !sRt.SingleAccount || !sRt.NoCooldownOnServerError {
+	if sRt == nil || sRt.Kind != k || !sRt.SingleAccount || sRt.CountServerErrorAsAccountFault {
 		t.Fatalf("server runtime attributes mismatch: %+v", sRt)
 	}
 	if len(sRt.Pool.List()) != 1 || sRt.Pool.List()[0].UID != "custom-stepfun" {

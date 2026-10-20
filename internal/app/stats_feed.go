@@ -110,35 +110,24 @@ func (a *App) feedLedgerExpire(now time.Time) {
 	a.stats.ApplyLedgerExpire(now.Format("2006-01-02"), byGroup)
 }
 
-// applyExpiryFromItems 把 UserResourceDetail 的资源条目喂引擎（账号维度的
-// 最近临期日 + 当日额度）。挂在 creditTotals（积分自动刷新已拉到 items，
-// 复用免二次调用）；无可喂条目时写空值清除残留。oczen 由调用方天然排除
-// （积分自动刷新的 kinds 不含它）。
+// applyExpiryFromItems 把 UserResourceDetail 的资源条目喂引擎（逐条目到期快照）。
+// 无可喂条目时写空切片清除残留。
 func (a *App) applyExpiryFromItems(uid string, items []provider.ResourceItem) {
 	if a.stats == nil {
 		return
 	}
-	day, amount := expiryDayAmount(items)
-	a.stats.ApplyExpiry(uid, day, amount)
+	a.stats.ApplyExpiry(uid, expiryItems(items))
 }
 
-// expiryDayAmount 取（最早到期日, 该日可用额度合计）：Usable 且 Remain>0 且
-// 带到期日的条目按日归组求和——sidecar fetchExpiry 同款口径。
-func expiryDayAmount(items []provider.ResourceItem) (day string, amount int64) {
-	byDay := map[string]int64{}
+// expiryItems 从资源条目里挑出「可消耗 + 有剩余 + 带到期时刻」的条目。
+// 保留原始 ExpireAt（不截成日期）：分桶按精确时刻算，次日 00:00 归今日。
+func expiryItems(items []provider.ResourceItem) []statsEngine.ExpireItem {
+	out := make([]statsEngine.ExpireItem, 0, len(items))
 	for _, it := range items {
-		if !it.Usable || it.Remain <= 0 || len(it.ExpireAt) < 10 {
+		if !it.Usable || it.InfoOnly || it.Remain <= 0 || it.ExpireAt == "" {
 			continue
 		}
-		byDay[it.ExpireAt[:10]] += it.Remain
+		out = append(out, statsEngine.ExpireItem{At: it.ExpireAt, Amount: it.Remain})
 	}
-	for d := range byDay {
-		if day == "" || d < day {
-			day = d
-		}
-	}
-	if day == "" {
-		return "", 0
-	}
-	return day, byDay[day]
+	return out
 }

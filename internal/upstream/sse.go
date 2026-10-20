@@ -27,6 +27,20 @@ var errEmptyStream = errors.New("upstream stream contained no valid data events"
 // upstream_parse 同语义），与客户端断连类错误区分。
 func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
 
+// sseDataPayload 判断一行 SSE 是否数据帧，并返回载荷。
+//
+// 入站帧的 `data:` 之后可能有空格、也可能没有——WHATWG SSE 规范只要求 `data:`
+// 前缀，冒号后的空格可选。本文件曾只认 `data: `，无空格帧会掉进「其他行」分支
+// 但不计入有效帧，触发「空流」兜底并给正常回答追加错误帧（上游 2026-10-18 实测）。
+// 新增解析点请一律调它，不要自己写 HasPrefix。
+func sseDataPayload(line string) (payload string, ok bool) {
+	const prefix = "data:"
+	if !strings.HasPrefix(line, prefix) {
+		return "", false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(line, prefix)), true
+}
+
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
 // tool_calls 以流式 delta 到达（按 index 合并：首片带 id/type/name，后续只带 arguments 片段）。
@@ -148,8 +162,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 			return nil, err
 		}
 		line = strings.TrimRight(line, "\r\n")
-		if strings.HasPrefix(line, "data: ") {
-			payload := strings.TrimPrefix(line, "data: ")
+		if payload, isData := sseDataPayload(line); isData {
 			if payload == "[DONE]" {
 				// 上游显式结束：停止读取，DONE 之后的任何数据一律忽略。
 				sawDone = true
@@ -682,13 +695,15 @@ readLoop:
 	for {
 		line, err := br.ReadString('\n')
 		trimmed := strings.TrimRight(line, "\r\n")
+		// 用 sseDataPayload 统一认帧：`data: {...}` 与 `data:{...}` 都算数据帧。
+		payload, isData := sseDataPayload(trimmed)
 		switch {
-		case strings.HasPrefix(trimmed, "data: [DONE]"):
+		case isData && payload == "[DONE]":
 			// 上游显式结束：停止读取，DONE 之后的任何数据（含垃圾帧）一律不再透传。
 			// [DONE] 统一在循环结束后写出，保证恰好一个。
 			break readLoop
-		case strings.HasPrefix(trimmed, "data: "):
-			n, werr := writeFrame(strings.TrimPrefix(trimmed, "data: "))
+		case isData:
+			n, werr := writeFrame(payload)
 			// EOF 处未以换行收尾且该帧不是合法 JSON → 这行本身是半个帧（被砍断），
 			// 已按原样写出的是残缺数据，必须按截断处理（不补 DONE）。
 			if err == io.EOF && n == 0 && strings.TrimSpace(line) != "" {

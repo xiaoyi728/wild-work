@@ -43,7 +43,7 @@ Wild-Work 是 WorkBuddy（国内版+国际版）/TraeWork/Qoder 多渠道账号�
 | R15 | **Responses 的 `function_call` 必须是独立 output item**（带 `call_id`），Anthropic 的 tool_use 参数必须走 `input_json_delta` | 参考实现 `tokligence-gateway` 两处写法不合规范（塞进 `message.content`、start 里一次性给完整 input），Codex/Claude Code 会解析失败 |
 | R16 | **无账号渠道（oczen）不建 auth 文件、不进 `reloadAccounts`、不参与禁用/冷却惩罚** | 匿名凭证是常量 `public`；`SyncToDir` 会剔除磁盘上不存在的虚拟账号，故只在装配时注入一次。单账号 + 不可重登 ⇒ 任何账号级惩罚都等于整渠道下线，故 4xx 一律走 `ErrPassthrough`（原文透传、不计错不冷却）。**2026-09-24 修订：429 也不再冷却**——原「429 短冷却是唯一需要的背压」经实测证伪：单账号无号可轮换，冷却后后续请求在挑号阶段被挡成 `503 no_healthy_account`，反而不如透传 429 让客户端按 `Retry-After` 自行退避；同理**传输层错误也不再累计 `errCount`**（默认 3 次网络抖动即冷却唯一账号）。两者由新增的 `server.Runtime.SingleAccount` 统一豁免（结构属性，不硬编码渠道名），启动时另调 `Pool.ClearPenalty` 自愈旧版遗留的冷却。详见 `docs/opencodezen渠道接入备忘.md` |
 | R17 | **用量/积分双流水分口径统计，不强关联、不折算** | `internal/ledger` 双 JSONL（usage 按渠道×模型 / credit 按账号 earn·spend·expire）；写入仅 append 缓冲句柄（30s AutoFlush），读取仅在 UI 请求 `/api/usage` 时按月分段扫描聚合，常驻内存 ≈0。`Upstream.Stream` 返回末帧 usage（R14 同款显式传参哲学）。首见账号只记一条「存量额度」baseline，不逐条展开。**同 key 重复条目（WorkBuddy 伪键一对多）先聚合求和再差分**，每 key 每次刷新最多一条事件；升级首启将旧错误流水一次性归档为 `old-credit-*.jsonl` 并删快照重建 baseline（issue #38）。**2026-10-08 补丁（issue #67）**：WorkBuddy 签到包落在「明日到期」key 上且提前一天以 r=0 建档，「发放即消耗」场景同 key 差分 delta=0 → 当日 earn 被抵消为 0（面板今日收入恒 0）。两层修复：① 差分补丁——快照增加 `used` 字段，delta=0 且 used 上涨时按 `发放额=usedDelta` 补记 earn（数学依据 remain=total-used；used 恒 0 的渠道零影响）；② 权威入账——新增 `provider.CheckinGranter` 可选接口（对齐 CheckinReporter 模式），WorkBuddy 实现 `DailyCheckinGrant`，调度器以它为唯一签到执行路径并用回执 `credit/today_credit` 直接记 earn（回执缺失/为 0 静默降级回差分）。详见 `docs/用量积分流水记账备忘.md` |
-| R18 | **临期阈值可配（默认 24h，下限 24h）** | `config.schedule.expiring_threshold_hours`，normalize 钳下限（日期粒度到期判定低于一天无意义）；scheduler 与 app.creditTotals 同源取 `cfg.ExpiringThresholdDur` |
+| R18 | ~~**临期阈值可配（默认 24h，下限 24h）**~~ **已被上游 R112 取代（2026-10-21，L20）**：选号改「最早到期时刻」，配置项与端点删除 | `config.schedule.expiring_threshold_hours`，normalize 钳下限（日期粒度到期判定低于一天无意义）；scheduler 与 app.creditTotals 同源取 `cfg.ExpiringThresholdDur` |
 | R19 | **TraeWork 专用池判据仅 `available_endpoint==1`**（2026-09-26 修订，issue #44 撤回 pid==209） | 演进：09-18 专用池下发 ep=1 → 09-23（f6f41a4）上游不再下发 ep=1，改判 `pid==209` → **09-26 实锤证伪**：pid=209「200 档每日签到」已升级为通用积分。本仓日志铁证：09-23 15:20–16:10 连发 99 次对话期间 remain（208/221 池）恒为 3086，而「不可用」小计 2200→1846（-354=99 次对话消耗量），即**扣费实际发生在被判为不可用的池上**；继续排除会让 pool 按虚低余额选号、面板误标「不可用」。故判据回退为 `ep==1`。pid=208/209/221 均可消耗 |
 | R20 | **千问办公推理 body 必须携带 `business` 段**（`{product:"qoder_work",type:"agent",version:"1",feature_switches:{}}`） | 2026-09-24 上游 1.0.4 起网关按 `body.business.{product,type}` 解析模型目录，缺失 → 对话恒 HTTP 200 + envelope 503 `Model catalog unavailable`（模型列表/余额/费率不受影响）。**仅补 `Cosy-Business-*` 静态头不能替代**。已实测四组对照隔离变量：body 缺 business 时「本项目透传 body」与「上游原生重构造 body」均 503，补上后均 200 ⇒ 原生 body 结构、官方 `Encode=1` WASM 组包、机器指纹（machineId/Token）**均非必要条件**，故本项目只补字段、不引入 wasmtime 级依赖。参考 Buddy2api PR #84（v2.1.15） |
 | R21 | **千问办公 `expires_in` 单位是秒**，且 `expiresAt` 可被 access token 的 JWT `exp` 校正 | 回归：早期按毫秒处理（`*time.Millisecond`），把 7 天压成 604.8 秒 → 落盘 `expiresAt` 比真实寿命少 ~7 天 → `NeedsRefresh(10min)` 几乎恒为真 → **每次请求都刷 token**，与千问办公 App 高频互踩，直至 refresh token 被作废、账号被禁用。证据链：上游 `expires_in=604800` 按秒算 = access token JWT 的 `iat→exp`（整 7 天，吻合）；按毫秒算 = 文件里的值（吻合）。且同仓 workbuddy/trae/workbuddyai 的 auth 文件 `expiresAt` 与 JWT `exp` 逐秒一致，**仅 qwenwork 偏离 6.99 天**。修复：①refresh 按秒解释，优先取绝对字段 `expires_at`，两字段都缺失时回退 84h（JWT 实测 7 天的一半）；②`LoadQwenWorkDir` 调 `Auth.AdoptJWTExpiry()`，用上游签名的 JWT `exp` 原地校正历史脏值（仅内存、只增不减、非 JWT 不动）。**注意：同族 dt-/drt- 渠道（qoder/qodercn/qodercom）token 为不透明串、无 JWT 可交叉验证，其 `// ms` 标注未被本次改动触及**（无证据不做改动） |
@@ -94,6 +94,9 @@ Wild-Work 是 WorkBuddy（国内版+国际版）/TraeWork/Qoder 多渠道账号�
 | R64 | **面板「测试」类探针必须与真实请求同源取用备用通道，并如实回传实际出口**（2026-10-15，issue #117） | **现场**：用户配了备用代理，面板 OC Zen「测试」仍 403，代理日志零访问记录，上游看到真实地区；日志 `kind=passthrough（单账号渠道不罚账号）`。**逐条核实：用户观察全部属实，但根因不是 backuplink 失效，而是测试路径从未经过编排** —— ① `oczen.TestKey` 直接用 `c.HTTP` 直连（`fetchModelIDs` 同理）⇒ 配了代理也不改道，用户看到 403 无从判断「代理没生效」还是「上游本来就不给这个出口用」；② 那行日志写死「不罚账号」，对 403 `FreeTierError` 这种**与账号无关**的错误照印，把真实原因（免费档形态校验/地域）掩盖成「工具的分类问题」。**修法**：① `backuplink.Replay` 新增可选 `Note(viaBackup bool)` 钩子——`Do()` 有 8 处 return，逐处手工标记「这次答复来自哪个出口」必漏（**R52 教训**），故只在两处「交出备用答复」处置 true，由 `defer` 统一上报；② `TestKey` 改走同一份 `Replay`（含 `Routes` 学习路由），签名加 `viaBackup` 出参 → `App.TestOczenKey` → `/api/config/oczen_test` 的 `via_backup` → 面板 toast 标明「直连 / 经备用通道」，403 且走直连时给可行动提示；③ 单账号分支日志补 `body=`（上游原文），文案改为说明**为何**不冷却（无号可轮换），不再断言「所以这不是账号问题」。**通用教训（已升格为规则）**：凡「面板探针/测试按钮」这类只读入口，**要么走与真实请求同一条链路，要么在 UI 上明写它测的是哪条链路**——否则用户会把探针结果当成真实链路的结论（同 R34/R41 家族的「声明了却没接线」，此处是「接线了但不是同一条」）。**边界**：不改 `fetchModelIDs`（模型目录拉取失败本就有静态兜底，且 `/v1/models` 是只读目录非“服务可用性”声明）。**回归**：`TestOczenTestKeyUsesBackupOnRegionBlock`（地区拒→备用 200 且 `via=true`）、`TestOczenTestKeyWithoutBackupReportsDirect`（未配→直连 403 且 `via=false`）、`scripts/ui-static-check.mjs` 面板出口文案断言；既有 8 例 backuplink 用例全绿（编排语义零变更）。 |
 | R65 | **小浣熊「每日积分」是惰性落账，签到 = 调一次 `setting_info`（非独立领取端点）；状态判据用 `point_grant_popups` 而非余额差分**（2026-10-15，用户实测驱动） | **背景**：用户提出「小浣熊调用一次就能获取积分，做成签到」。初版结论「无签到活动」**不完整**——上游确实没有领取端点，但每日 300 积分的发放是**惰性**的：名义记账 `grant_at` 是当天 00:00，实际落账 `created_at` 是账号当天第一次访问**工作台业务接口**的时刻（网页端文案原文：「每日积分每天 00:00 发放，默认当日 24:00 清零，**当天登录后**有效期延长至 7 天」）。**接口矩阵（逐项实测，三账号对照）**：`GET /api/web/office/v3/setting_info` ✅ 触发（各入账 300，`point_grant_popups` 非空）；`POST /api/web/llm/v2/chat/completions`（对话）❌ 只扣「桌面端 LLM 对话消耗 -2」；`GET points/v1/balance|bills`（只读）❌；`GET /api/web/auth/v1/user_info` ❌；`POST /api/web/auth/v1/iam/confirm` ❌（HTTP 200 但无发放）；猜测的领取端点（`daily_grant`/`checkin`/`claim`/`login_reward`）**全 404**。⇒ 只有 **office/v3（工作台业务域）**的访问才算「当天登录」，auth/v1 只是身份校验、llm/v2 与 points/v1 无此副作用。**幂等已实测**：同一账号当天重复调用不再发放（第二次 `popups` 为空数组）⇒ **非空 popups ⇔ 本次调用刚触发新发放**，可直接作签到结果判据。**为什么不用余额差分**：同期可能有对话扣费（实测 -2）抵消，差值不可靠；popups 是本次发放的**直接回执**。**实现**：`internal/raccoon/checkin.go` —— `FetchSettingInfo` + `DailyCheckinReport`（`CheckinReporter` 结构化上报）：popups 含 `points>0` → `CheckinClaimed`（`Amount` 为求和）、空 → `CheckinAlready`（**不是** `no_campaign`：本渠道空即代表已完成，判成可重试会导致整天重试）、401 → 类型化 `ErrSessionDead`（供调度器 refresh 自愈，不变量 19）、其它 → `CheckinError`。**接线**：`main.go` 的 `rcSch` 从 `CheckinMinutes: []int{}` 改为全局 `checkinMinutes` + 补 `SetCheckinObserver`/`SetRefreshObserver`（此前**从未设置**——签到接入后不设观察器则面板与 stats 都读不到结果）；`app.go` 的 `noExplicitCheckin` 移除 Raccoon（开放手动按钮）+ `completeRaccoonLogin`/`importRaccoon` 补首次签到；`web/app.js` 的 `NO_EXPLICIT_CHECKIN` 移除 `"raccoon"`。**刻意不设 `CheckinRetryUntil`**：窗口重试是为 Qoder「活动 10:00 后才创建」设计的，本渠道无此语义（发放恒在，只是惰性）。**与网页端同构**：`setting_info` 是网页端每次打开工作台首页都自动调用的接口，故本实现 ≈ 替用户「打开一次网页」，不是跨端伪装（同 R31 的判据）。**回归**：`internal/raccoon/checkin_test.go`（8 例：claimed/已领/字段缺失/401 类型化/5xx 可重试/多 popups 求和/旧通道包装/走 AuthBase 前缀）。 |
 | R66 | **支持自定义 OpenAI 兼容渠道接入（`custom_channels`）：统一用量流水、运行统计与模型路由**（2026-10-15，用户驱动） | **背景**：用户已有第三方 OpenAI 兼容 API（如官方 StepFun、本地 CLIProxy、DeepSeek、SiliconFlow 等），希望在 WildWork 统一聚合调度，通过 `渠道标识/模型名` 统一访问，并在面板集中查看用量流水（ledger）与运行统计（stats，含 TTFB、吞吐、请求日志）。**设计**：新增 `internal/custom` 包，实现 `provider.Upstream` 接口（`New(ChannelConfig)`），流式与非流式分别走 `StreamHTTP` 与 `HTTP`（对齐 R35），流式末帧捕获 usage 记账，SSE 逐帧重写 model 名回填客户端请求名。**单账号属性**：置 `SingleAccount: true` 与 `NoCooldownOnServerError: true`（对齐 R16/R24），错误原文透传不拖垮整条渠道。**配置面**：`config.json` 顶层 `custom_channels[]`（`name` / `base_url` / `api_key` / `models` / `enabled`）；设置弹层支持可视化增删改、连通性测试（`POST /api/config/custom_channel_test` 探测 `/models`）；保存走 `POST /api/config/custom_channels` 并热生效（`SetCustomChannelsSyncer` 同步热更新 `server.Handler`、`app.Runtime`、`gateway.Compat` 路由白名单与 `stats.RegisterChannelKind`，无需重启）。**合并期修复的五条缺陷（均有代码证据、非推断）**：① **`a.runtimes` 并发读写会在保存时打死进程**——`UpdateCustomRuntimes` 是本仓**首个 post-init 写**（此前该表只在 init 赋值一次），而 9 处读点（含 30s ticker 的 `allStatuses` 与 `/api/state`）全程不加锁 ⇒ 面板保存与后台喂入重叠即 Go 的 `fatal error: concurrent map read and map write`（不可 recover）。修法：新增 `runtimesMu` + `runtimesSnapshot()`，全部读点经其取浅拷贝遍历。回归 `TestRuntimeTableConcurrentAccess`（反向验证：去掉锁 5/5 崩溃）。② **compat syncer 捕获启动快照会丢新渠道**——`SetCompatSyncer` 闭包写死 `initialChannels`，于是「先加自定义渠道、之后单独改模型映射并保存」会把白名单重置回启动态，`/v1/responses` 与 `/v1/messages` 报 unknown channel（R61 同族的「只实现一条通道」）。修法：抽出可变共享态 `channelList`（`cmd/wild-work/main.go`），两条 syncer 共读 `snapshot()`。回归 `TestChannelListSharedAcrossSyncers`。③ **自定义渠道名可与内建同名**——`channelNameRegex` 放行 `workbuddy`/`cline`/`oczen` 等，而 server 侧 `getRuntime` 内建优先、app 侧 `UpdateCustomRuntimes` 无条件覆盖 ⇒ 两层指向不同 Runtime（面板操作打到自定义池、对话走内建渠道，静默出错）。修法：`provider.BuiltinKinds()`（含 `ModelNamespaces` 键）+ `ChannelConfig.Validate` 拒绝。回归 `TestChannelConfigValidateRejectsBuiltinNames`。④ **「费率表全线展示自定义渠道」是假承诺**——`FeesInfo` 只遍历静态 `feeChannelOrder`，自定义 kind 永不出现（与 `/v1/models`/ledger/stats 的可见性不一致）。修法：`feeChannelOrderWithDynamic` 把 `modelsByKind` 中未登记的渠道按名排序追加到末尾。回归 `TestFeesOrderIncludesDynamicChannels`。⑤ **`/api/state` 明文回传上游 api_key**——`st.CustomChannels = a.cfg.CustomChannels` 直出配置，而 oczen key 是脱敏回显。修法：`maskCustomChannels` 脱敏（保留 `…` 供识别「未改动」）+ `SetCustomChannels` 按渠道名找回真实密钥（否则脱敏值落盘会把密钥换成废值，下次请求全 401）。回归 `TestCustomChannelKeyMaskedRoundTrip`；且 `/api/config/custom_channel_test` 收到含 `…` 的 key 时按 `name` 找回真实密钥（否则未改动过的渠道点「测试」恒 401，同 R64 的探针不同源），回归 `TestCustomChannelTestEndpointResolvesMaskedKey`。**合并 #120 后的两轮收尾**：⑥ **设置弹层打不开**——#120 旧 head 的 `openSettings` 悬空引用已废弃的 `inCustomModels` 节点（`$()` 返回 null，取 `.value` 抛 `TypeError`），且 index.html 从无该节点；已删引用并补**通用悬空 DOM 引用静态检查**（扫 app.js 全部 `$("id")` 与 index.html 的 id 集比对，动态创建的 `creditTip` 白名单），双向验证过。⑦ **#121 的三条**（R66 延续，merge 9767a78）：字符串形态模型 `SupportsTools` 落 false（字符串分支提前 return 跳过缺省赋值 ⇒ `/v1/models` 静默不带 supports_tools）、显式 `supports_tools:false` 落盘即丢（bool+omitempty 会省掉 false，读回变 true ⇒ 改 `*bool` + `ToolsEnabled()`）、单位串解析错误被吞（`"1OO"` 静默落 0 ⇒ 改为上抛，配置层报出渠道与字段）；另 `style.css` 被整文件改成 LF 造成 1090 行伪 diff（仓库无 .gitattributes、其余 Web 文件均 CRLF），合并时恢复 CRLF。**回归**：`internal/custom/custom_test.go`（配置校验/流式/非流式/模型发现/测试连接/内建同名拒绝）、`internal/server/custom_channel_test.go`（路由/模型列表/热更新）、`internal/app/custom_channel_test.go`（API/设置保存/视图/密钥脱敏回环/费率表含动态渠道/运行时表并发）、`cmd/wild-work/custom_channels_test.go`（装配/共享渠道清单）、`scripts/ui-static-check.mjs`。 |
+| R67 | **对外显示名改为 `cy-work`、面板 logo 换为仓鼠图；只动前端界面层，后端标识一律不改**（2026-10-20，所有者裁定） | **口径**：本次只改 **React 面板显示的名字与 logo**。Go 模块名 `wild-work`、`cmd/wild-work/` 目录、二进制 `dist/wild-work*.exe|linux`、`WILDWORK_*` 环境变量、macOS 数据目录 `~/Library/Application Support/WildWork`、Windows 自启动注册表值、systemd 单元 `wild-work.service`、GitHub 仓库与仓库目录**全部保持原样**——它们被生产部署、既有 `dist/config.json`、客户端脚本与上游融合流程依赖，改动的收益仅是文案，代价却是停机与断链。**改动点（5 处显示 + 1 处注释 + 1 张图）**：`webui/index.html` 的 `<title>`、`App.jsx` 顶栏标题与两处页脚、`Misc.jsx` 关于弹层标题、`style.css` 首行注释（不显示）；`webui/public/logo64.png` 换成 `build/clawd-theme/incoming/reference-character.png`（320×320 透明底）派生版——按 `cmd/genicon` 同款去留白算法（alpha>60 的 bbox + 4% 边距）裁成 64×64，vite 构建时拷进 `web-app/`，两处 `<img>` 引用（顶栏 26px / 弹层 64px）走 `BASE_URL`，代码零改动。**唯一的后端改动**：默认 API Key `WildWorkAPI` → `CyWorkAPI`（`config.Default()`，所有者确认）——现有 `dist/config.json` 显式写的是旧值 ⇒ **生产与既有客户端不受影响**；`config_test.go` 断言与 `config.example.json` 同步，README 6 处示例同步（否则新装用户照文档配会 401）。**刻意不改**：托盘图标 / exe 图标 / 根 `icon.png` / `build/*`（非前端界面，故托盘仍是旧 logo）、登录回调页文案（`internal/login_*/callback_page.go`）、托盘提示与启动通知（`main.go`）、冻结的 `cmd/wild-work/web/` 与各 `web_*` 备份目录、README/DEVELOPMENT 里的项目名与全部 `rockswang/wild-work` 上游链接、`RELEASES.md` 与 `data/app.log` 的历史记录。**已知痕迹**：`scripts/probe-dump.sh` 的 `${WILDWORK_API_KEY:-WildWorkAPI}` 兜底值保持旧值——它探的是正在运行的生产实例，而生产 `config.json` 未改。**验证**：`npm run build` + `npm run check`（9 场景）、`go build/vet/test ./...`；沙箱 `127.0.0.1:28763` 实测标签标题/顶栏/页脚/关于弹层与 logo（无 404）；重建 `dist/wild-work.exe`。**生产生效**需重建 `dist/wild-work-linux` 并重启 `wild-work.service`（二进制在跑会 ETXTBSY，须先 stop）。 |
+| R68 | **面板组件层重构：shadcn/ui（源码内置）+ `@xiaojiaenen/liquid-glass`，按「行为 + 表面」分层，paper 继续去玻璃**（2026-10-20，所有者裁定） | **依赖**：运行时新增 `@xiaojiaenen/liquid-glass` 0.1.5、`@radix-ui/react-{slot,dialog,tabs,tooltip,select,switch,label}`、`class-variance-authority`、`clsx`、`tailwind-merge`、`lucide-react`；dev 新增 `tailwindcss-animate`。npm 包 0.1.5 的 `exports` 指向不存在的 `dist/index.js` / `dist/index.css`（实际产物是 `dist/lib/index.js` 与 `dist/style.css`），故 `vite.config.js` 用正则 alias 修正入口并固定版本；**不要**直接 `import '@xiaojiaenen/liquid-glass'` 而不经过 alias。**Tailwind 纪律**：`preflight`/`container` 仍为 `false`（`.container` 撞车与既有视觉层 reset 的真实教训不变）；但 `index.css` 必须保留 `@tailwind base`——没有它，`--tw-rotate/skew/scale` 等默认值缺失，`-translate-x-1/2` 的 `transform` 整条非法（实测弹层偏到屏幕右下）。shadcn 需要的 `border-style/width` 由 `.ww-ui` 作用域补齐，不全局重置。**表面分层**：大表面（顶栏、账号卡、费率/设置/登录弹层、Help/About）走 LiquidGlass（Chromium 真 SVG 折射，Safari/Firefox 自动降级毛玻璃）；小控件与长列表用 `soft`（仅 backdrop blur）；**paper 主题下 GlassSurface 渲染普通不透明纸面，不生成任何滤镜 DOM**。**必须保留**：全部 vanilla DOM id（`TestDOMIdParity`）、`acct-card` / `btnToggleFees` / `btnRefreshAll` 指纹、`/api/*` 引用与三主题 token；`internal/oczen/**` 与桌宠文件本轮零改动。**闸门调整（均为修正判据而非放宽）**：`render-check.mjs` 改为加载真实 `vite.config.js`（此前 `configFile:false` 会让 alias 漂移时假绿）、补 Radix Dialog 所需的 `getComputedStyle` SSR 桩、卡片切块从字面 `<div class="acct-card` 改为「class 含 acct-card」；`check-props.mjs` 正确剥离 `= 默认值` 并识别 `...rest` 透传组件。**实测**：bundle 710,585 → 872,021 B（+22.7%），CSS 48,372 → 69,473 B；`dist/wild-work.exe` 16,614,912 B；headless 60 卡 = 60 套滤镜、JS 堆 38 MB、DCL 123 ms / load 208 ms（合成数据，非生产上游）。**已知限制**：每实例一套 SVG 滤镜与位移贴图，卡片数极大时仍有内存/首帧成本；`liquid-glass` 只有 light/dark 两态；未迁移 TS（组件代码仍为 JSX 源码内置）。**生产生效**需重建 `dist/wild-work-linux` 并重启 `wild-work.service`（运行中会 ETXTBSY）。 |
+| R69 | **R68 的前端重构已整体回退：移除 `@xiaojiaenen/liquid-glass` 与 shadcn/Radix 组件层，恢复到重构前的 Apple 毛玻璃面板**（2026-10-20，所有者反馈「液态玻璃还不如之前」） | **回退范围**：`package.json`/`package-lock.json` 移除 liquid-glass、Radix、cva/clsx/tailwind-merge/lucide-react、tailwindcss-animate（`npm prune` 清掉 54 个包）；删除 `GlassSurface.jsx`、`src/glass.js`、`src/lib/utils.js`、`src/components/ui/`、`src/styles/ui.css`、`jsconfig.json`；`App.jsx`/`Accounts.jsx`/`Fees.jsx`/`LoginFlow.jsx`/`Misc.jsx`/`Settings.jsx`/`index.css`/`main.jsx`/`tailwind.config.js`/`vite.config.js`/`tools/{check-props,render-check}.mjs` 全部 `git checkout HEAD --` 回退，**仅重新施加 R67 的显示名改动**（App.jsx 3 处 `wild-work`→`cy-work`、Misc.jsx About 标题），`index.html`/`style.css`/`public/logo64.png` 的 R67 未提交改动原样保留。**恢复结果（实测）**：bundle 710,585 B / CSS 48,372 B（与重构前逐字节同尺寸），render-check 控件数回到 25/13/35/23/48/7/7/7/48，`go test ./...` 全绿；生产 17:29:09 重启（PID 2930565），首页回到 `assets/index-Cq5h8w_w.js` 且服务端 bundle 哈希与磁盘一致，`liquid-glass`/`ui-dialog`/`gs-soft` 命中均为 0；`dist/wild-work.exe` 重建为 16,432,640 B。**实验留档**：`/home/incam/Software/_pre-revert-r68-20261020-172833`（完整 src/tools/配置）。**教训**：所有者要的是「视觉不变地换实现」还是「换视觉」，下次必须先用最小样张确认；shadcn 的语义色桥接与 Radix 行为本身可用，但**不得再改动既有 `.topbar`/`.acct-card`/`.modal` 的观感**。 |
 
 ## 2. 架构选型（依据）
 
@@ -163,7 +166,6 @@ POST /api/config/admin_password    # {password}（空 = 关闭面板鉴权，仅
 POST /api/config/api_key           # {key}
 POST /api/config/autostart         # {on:bool}
 POST /api/config/compat            # 模型路由（默认渠道 / 封顶 tokens / 映射表）
-POST /api/config/expiring_days     # {days} 临期阈值
 POST /api/config/loop_guard        # {on:bool} 思考链防癫热切换（R50，atomic 全局、无需重启；GET /api/state 回读 loop_guard）
 POST /api/config/body_log          # {on:bool} 请求体摘要诊断开关（L18，默认关；写 data/ledger/body-trace-*.jsonl）
 POST /api/config/proxy             # {proxy,oczen_api_key?} 全局备用上游通道（R57；空串 = 关闭）
@@ -1313,3 +1315,116 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   login_trae/login_raccoon/loomy/monkeycode/glm/imgutil 回归）；`npm run build` + `npm run check`
   9 场景绿；`scripts` 无改动。`dist/wild-work.exe` 已重建；版本仍 **2.7.3**（未 bump、未发版）。
   生产 daemon 未重启、`dist/wild-work-linux` 未重建。
+
+### L19 2026-10-20 面板重构落地记录：shadcn/ui + LiquidGlass（R68 的实现细节；**同日整体回退，见 R69**）
+
+- **范围**：按所有者裁定的「分阶段 / paper 保留并降级 / 行为+表面分层」执行。已完成阶段 0–5：
+  基线与依赖、主题桥接与作用域 reset、外壳（顶栏/主 tab/AdminLogin/Confirm/Rename/Help/About/toast）、
+  账号卡与积分明细浮层、费率/设置/登录流程弹层、设置内 Select/Switch。
+  **未做**：Usage/Stats 的 KPI 卡保持既有 CSS 毛玻璃（`.ucard` 本来就带 `backdrop-filter`，
+  长列表不叠加 SVG 滤镜）；未迁移 TypeScript；未改动 `cmd/wild-work/web/`（冻结基准）、
+  `internal/oczen/**`、桌宠文件、三主题 token 值。
+- **新增/修改的桥接文件**：`src/components/GlassSurface.jsx`（按 `paper/soft/refraction` 三态决定
+  真实 LiquidGlass 或不透明表面）、`src/glass.js`（三主题 → light/dark/paper 的模式读取）、
+  `src/components/ui/{button,input,label,tabs,tooltip,switch,select,dialog,glass-dialog}.jsx`
+  （shadcn 源码内置，去掉 `dark:` 变体与 `var()` 不支持的 alpha 修饰符）、`src/styles/ui.css`
+  （`.ww-ui` 作用域 reset、语义色桥接、`.gs-*` 表面、paper 去玻璃）。`vite.config.js` 的 alias 是
+  `@xiaojiaenen/liquid-glass` 能工作的前提（见 R68）。
+- **两个实测踩到的坑（已修，别再犯）**：
+  ① `@tailwind base` 被删掉后 `-translate-x-1/2` 的 `transform` 非法（`--tw-rotate` 等默认值缺失），
+  弹层位置从居中变成「左上角在屏幕中心」；
+  ② 主题切换事件必须在写 `data-theme` **之后**派发，否则 GlassSurface 读到旧值，
+  出现「弹层已 paper、顶栏仍玻璃」。`useGlassMode` 另加 `setTimeout(sync,0)` 兜底。
+- **闸门变化**：`render-check` 改用真实 vite 配置并补 Radix SSR 桩；`check-props` 修掉默认值解析
+  与 rest 透传；`TestDOMIdParity` 要求的 5 个 overlay id 改为 `GlassDialog id="..."`（不再用
+  `overlayId` 自定义 prop，否则静态扫描认不出）。`Settings` 可见控件数 48 → 55（Radix Select/Switch
+  的内部元素），属预期变化，不是功能新增。
+- **验证**：`npm run build` + `npm run check` 9 场景全绿；`go build/vet/test ./...` 全绿；
+  headless CDP 实测顶栏 `backdrop-filter: url("#lg-…")`、滤镜 SVG 尺寸与位移贴图均已生成；
+  60 卡压力测试 60 套滤镜、JS 堆 38 MB、DCL 123 ms / load 208 ms（合成 state，非生产上游）。
+- **2026-10-20 17:29 整体回退**：所有者反馈液态玻璃不如原面板，已按 R69 移除 liquid-glass + shadcn/Radix
+  并恢复到重构前源码（保留 R67 显示名）。生产再次重启（PID 2930565），资源回到 `index-Cq5h8w_w.js`。
+  本节以下内容只作为那次实验的记录，**不要再当作当前实现**。
+- **生产已部署（2026-10-20 17:21:30）**：按 L7 流程备份 → `systemctl --user stop wild-work.service`
+  → 重建 `dist/wild-work-linux`（19,153,820 B）→ start。新进程 **PID 2883219**，
+  `/proc/exe` 指向活路径；首页引用 `assets/index-DJ5JCj9-.js`，服务端取回的 bundle 与磁盘产物
+  **sha256 完全一致**（872,021 B）；`/api/state` = 401、`/api/auth/state` = 200、
+  `/v1/models` = 193 个模型；浏览器 DOM 冒烟确认登录弹层（Radix Dialog + 玻璃表面）、
+  `adminLoginPass` / `btnAdminLogin` 与顶栏 `liquid-glass` 均在场，控制台仅有桌宠/状态轮询的
+  预期 401（L2 设计行为）。重启后新增 app.log 6,223 B 内 `panic|fatal|error` 命中 0
+  （同一谓词全文件命中 221，证明判据能变红）；6 个 JSONL 流水均为备份的严格前缀，
+  `credit-snapshot.json` 键集 10→10（6 条因启动自动刷新而变化，属预期），`config.json` 逐字节相同。
+  备份目录 `/home/incam/Software/_pre-restart-20261020-172124`。
+  `dist/wild-work.exe` 已重建（16,614,912 B）。
+
+### L20 2026-10-21 对齐上游 v2.9.4（按需摘取，不做新渠道）
+
+- **范围（所有者裁定「以上全修复」）**：只补在用渠道/网关/面板的稳定性与协议差异，**
+  不做**上游 14→20 的新渠道（officeace/kilo/minimax/lobsterai/gemini/codearts/zcode），
+  也不做 macOS 自启。`internal/oczen/**` 的免费档闸门判据仍以本地为准（L15.1）。
+- **R115 出站脱敏补 DSH 身份句**：`internal/sanitize` 与 `internal/upstream` 两份表各加一条
+  `You are an AI agent powered by DeepSeek Harness` → 插入冠词 `the`。上游按 system 开头逐字
+  前缀匹配即回 11128，插一个虚词即绕过（实测 200）。**这正是 10-21 生产两条 11128 的最可能元凶**
+  （请求来自 /v1/responses 的 deepseek 系客户端）。
+- **R113 工具结果图片走 vision**：`internal/gateway/util.go` 新增 `toolContentValue`/`imagePartURL`，
+  `/v1/responses` 的 `function_call_output`、`role:tool` 与 Anthropic `tool_result` 三处统一。
+  旧实现把 1.6MB 截图 base64 当文本 ⇒ 约 146 万 token ⇒ `prompt is too long`。
+- **R114 请求体 128MiB + 图片降采样**：`server.MaxRequestBody` 由常量改变量（默认 128MiB）、
+  新增 `server.IsBodyTooLarge`、`config.server.max_request_body_mb`（8~1024 钳制）、
+  `gateway.maxInnerBody` 改函数（避免包初始化快照）、新增 `internal/gateway/imageslim.go`
+  （data URL 长边 ≤1568、不透明转 JPEG q85、带 alpha 保 PNG、sha256 缓存 256 条）。
+- **R108 Qoder 三区信封错误**：qoder/qodercn/qodercom 的 `sse.go` 整文件采纳上游——信封
+  `statusCodeValue>=400` 立即返回 `*sseError`（实现 StreamErrorClassifier）、零字节排队帧识别、
+  110/112 归账号级额度耗尽、`RESOURCE_LIMIT` 归软限流；新增 `provider.Queued` / `Classified`
+  / `AsClassified` / `ErrQueued`。handler 补排队路径：**一字节未写时可换号**（冷却「号×模型」）、
+  出口 `model_queued` 错误体、全号排队 `Retry-After: 30`。三份 `stream_nested_error_test.go` 采纳。
+- **thinking_config 档位**：qodercn/qodercom 解析 `thinking_config.enabled.efforts` →
+  `ReasoningEfforts`/`DefaultReasoningEffort`（低→高排序），body 写 `parameters.reasoning_effort`，
+  `none` 档同时 `max_thinking_tokens=0` + `is_reasoning=false`。（qoder 包本就有该透传，上游未改。）
+- **R107 小浣熊逐笔到期**：`UserResourceDetail` 额外拉 `points/v1/bills`，把聚合「每日额度」
+  按到期升序先进先出拆成逐笔条目（同 Name、不设 Key，ledger 聚合仍同键），余额之和恒等于
+  `daily_points`；bills 失败降级为无到期口径。修复「到期清零被记成今日消耗」与到期三列恒「—」。
+- **oczen 出口 IP 封禁**：`regionBlockedMarkers` 增 `abusive traffic` / `available from your current
+  network`，并显式排除 `can only be used from within OpenCode`（与 IP 无关，换出口无效）。
+- **R110 custom 超时**：等响应头 180s（≥ `upstream.timeout_seconds`），流中空闲仍 90s；
+  `main.go` 把 `upstream.timeout_seconds` 注入自定义渠道（此前该配置对它们无效）。
+- **R111 换号分层**：删除 `server.Config.MaxRotate`，尝试上限 = 渠道账号数；传输层错误统一
+  **不换号、不计错、直接 502**（同 host 换号必撞同一面墙，原逻辑最长白等 6 分钟）。
+- **R112 选号改最早到期**：`provider.EarliestExpire` + `ExpiringDays=1`；pool 的 `entry` 增
+  `earliestExpire`（持久化 `earliest_expire` unix 秒，**不 bump stateVersion**），`entryBetter`
+  改为「最早到期升序 → uid → 无到期信息按余额降序」，已过期快照回落到无到期组；
+  `CooldownModel` 整号升级阈值 2→3；积分自动刷新 30min→10min。
+  **删除** `config.schedule.expiring_threshold_hours`、`Config.ExpiringThreshold*`、
+  `POST /api/config/expiring_days`、`/api/state` 的 `expiring_days` 与面板「临期阈值」下拉
+  （`selExpiring` 进 `domIdIntentionallyRemoved` 豁免表，理由写明）。
+- **LICENSE**：采纳上游 MIT 许可证。
+- **验证**：`go build/vet/test ./...` 全绿（34 包 0 FAIL）；`npm run build` + `npm run check`
+  10 场景绿（Settings 可见控件 48→47，少的是被删的临期阈值下拉）；`dist/wild-work.exe` 已重建
+  （16,530,944 B），内嵌标记 `DeepSeek Harness`×2 / `abusive traffic`×1 / `model_queued`×1 /
+  `max_request_body_mb`×2 / `earliest_expire`×1 / `RESOURCE_LIMIT`×1，`expiring_threshold_hours`×0。
+- **沙箱面板实测（2026-10-21，`/tmp/ww-sbx-check` + `127.0.0.1:28764`，生产 daemon 2930565 全程未动）**：
+  顺带修掉两个既有面板缺陷——
+  ① **仅无积分概念账号时「展开」按钮不可达**：`btnToggleNA` 挂在 `cs-bar` 内，而该条以
+  `rows.length`（有积分的渠道行）为渲染条件 ⇒ 全新安装只有 oczen 匿名时提示文案指向一个
+  不存在的按钮、卡片永远看不到。改为 `rows.length || naAcc.length` 渲染，并新增 render-check
+  场景 10「仅不适用账号可展开」（负向验证：装回旧条件即点名失败）。
+  ② **登录后分支的两个主 tab 丢了 id**：`mtabBtnAccounts`/`mtabBtnUsage` 只在未登录外壳里写了
+  `id`，登录后是动态 class 且无 id ⇒ `TestDOMIdParity` 因源码里存在而**假绿**。已补回。
+  实测：页面零 console 报错、23 个 XHR 全 200；`POST /api/config/expiring_days` = **404**、
+  `proxy`/`model_fallback` = 200 且 `/api/state` 无 `expiring_days`；
+  `server.max_request_body_mb=8` 时 9MiB 请求体回 `413 request_too_large ... (8 MiB)`，
+  恢复默认后同一请求体通过读入闸并直达上游（400 上下文超限）⇒ R114 端到端成立。
+- **生产已重启（2026-10-21 14:06:49，所有者点头，systemd user 单元 `wild-work.service`）**：
+  备份 `/home/incam/Software/_pre-restart-20261021-1406` → stop → 重建 `dist/wild-work-linux`
+  （19,067,311 B，内嵌标记与 exe 同口径）→ start。新进程 **PID 948382**、`SID==PID`、TTY `?`、
+  `/proc/948382/exe` 指向活路径（非 `(deleted)`）；首页引用 `assets/index-C026RDWs.js`
+  （与磁盘产物同名）；无会话 `/api/state`=401、`/api/auth/state`=200；`/v1/models`=190 个模型 /
+  6 个渠道。重启后新增 app.log 6,222 B 内 `panic|fatal|level=error| upstream |failed` 命中 0
+  （同一谓词全文件分别 0/0/0/349/1850 ⇒ 能变红）；6 个流水文件均以备份为严格前缀，
+  `config.json` 逐字节相同，`credit-snapshot.json` 因启动自动刷新而更新（JSON 可解析、10 个账号键）。
+  **新字段已落盘**：`state-workbuddy*.json` / `state-traework.json` 出现 `earliest_expire`
+  （workbuddy 两号 2026-10-22 09:00 / 09:17，workbuddyai 10-31，traework 10-26 / 11-15），
+  qodercn/oczen 无该字段（渠道不下发到期，按设计垫底按余额）。**注意**：这些账号 `expiring=0`
+  是新口径的正常结果——R112 起临期固定为「今日到期」，10-22 的包不再算临期；路由仍按
+  最早到期优先。
+- **未做**：版本常量仍 **2.9.3**（未 bump、未发版）。

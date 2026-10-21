@@ -61,19 +61,48 @@ function CreditTip({ data, uid, anchorRect, onClose }) {
   const rawItems = (data && data.items) || [];
   if (!rawItems.length) return null;
 
-  // 排序：临期（可消耗、有剩余、窗口内到期）→ 可用 → 已用完/不可用/仅展示垫底；组内按到期日升序。
-  // 临期判定与后端 ExpiringWithinDays 同口径：北京时间墙钟 now + provider.ExpiringDays（固定 1 天），
-  // 到期日当天零点前即临期。判据必须与后端一致，否则「卡片标了临期、明细里却不红」会自相矛盾。
-  const expDays = 1;
-  const bjNow = Date.now() + new Date().getTimezoneOffset() * 60000 + 8 * 3600 * 1000;
-  const expDeadline = bjNow + expDays * 24 * 3600 * 1000;
-  const expUtcOf = (it) => {
-    if (!it.expire_at) return Infinity;
-    const [ey, em, ed] = it.expire_at.split('-').map(Number);
-    return ey && em && ed ? Date.UTC(ey, em - 1, ed) : Infinity;
+  // 排序：临期（可消耗、有剩余、窗口内到期）→ 可用 → 已用完/不可用/仅展示垫底；组内按到期时刻升序。
+  //
+  // 到期字段有两种形态（R105）：纯日期 `YYYY-MM-DD`（该日全天可用 ⇒ 次日 00:00 失效）
+  // 与 RFC3339 精确时刻（workbuddy/traework/qwenwork 现用）。**必须分别解析**：
+  // 旧实现直接按 `-` 切分，遇到 RFC3339 会得到 NaN，分组与排序双双失效（表现为
+  // 有效期列原样吐出 `2026-10-22T09:00:00+08:00`、撑破浮窗且红字/临期标错位）。
+  const DAY_MS = 86400000;
+  const BJ_OFFSET = 8 * 3600 * 1000;
+  const expInstant = (raw) => {
+    const s = String(raw || '').trim();
+    if (!s) return Infinity;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      const [y, m, d] = s.split('-').map(Number);
+      // 纯日期：该日 23:59:59（北京）失效 ⇒ 取次日 00:00 +08 作为绝对时刻。
+      return Date.UTC(y, m - 1, d + 1) - BJ_OFFSET;
+    }
+    const t = Date.parse(s);
+    return Number.isFinite(t) ? t : Infinity;
   };
-  const groupOf = (it) => (it.usable && it.remain > 0) ? (expUtcOf(it) < expDeadline ? 0 : 1) : 2;
-  const items = rawItems.slice().sort((a, b) => groupOf(a) - groupOf(b) || expUtcOf(a) - expUtcOf(b));
+  // 与后端 ExpireWithinDays 同口径：北京自然日 <= 今天 ⇒ 今日到期（R112 起窗口固定 1 天）。
+  const bjDayIndex = (ms) => Math.floor((ms + BJ_OFFSET) / DAY_MS);
+  const todayDayIndex = bjDayIndex(Date.now());
+  const isExpiring = (it) => {
+    if (!(it.usable && it.remain > 0) || !it.expire_at) return false;
+    const ms = expInstant(it.expire_at);
+    return Number.isFinite(ms) && bjDayIndex(ms) <= todayDayIndex;
+  };
+  const groupOf = (it) => (it.usable && it.remain > 0) ? (isExpiring(it) ? 0 : 1) : 2;
+  const items = rawItems.slice().sort((a, b) => groupOf(a) - groupOf(b) || expInstant(a.expire_at) - expInstant(b.expire_at));
+
+  // 有效期显示：纯日期 → `MM-DD`；RFC3339 → `MM-DD HH:MM`（北京墙钟）。
+  // 完整原文放 title，列宽固定后不再撑破浮窗（2026-10-21 实测：RFC3339 原样渲染溢出面板）。
+  const fmtExpire = (raw) => {
+    const s = String(raw || '').trim();
+    if (!s) return '-';
+    const ms = expInstant(s);
+    if (!Number.isFinite(ms)) return s;
+    const d = new Date(ms + BJ_OFFSET); // 以 UTC getter 读北京墙钟
+    const pad = (n) => String(n).padStart(2, '0');
+    const md = `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+    return /^\d{4}-\d{2}-\d{2}$/.test(s) ? md : `${md} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+  };
 
   const pages = Math.max(1, Math.ceil(items.length / DETAIL_PAGE_SIZE));
   const cur = Math.min(Math.max(0, page), pages - 1);
@@ -127,13 +156,21 @@ function CreditTip({ data, uid, anchorRect, onClose }) {
         <span className="detail-title">积分明细</span>
       </div>
       <table className="detail-table">
+        {/* 固定列宽：自动布局下 RFC3339 到期串会把整表撑出浮窗，且各列与表头错位。 */}
+        <colgroup>
+          <col />
+          <col style={{ width: 52 }} />
+          <col style={{ width: 52 }} />
+          <col style={{ width: 56 }} />
+          {hasExpiry ? <col style={{ width: 104 }} /> : null}
+        </colgroup>
         <thead>
           <tr><th>套餐</th><th>总额</th><th>已用</th><th>剩余</th>{hasExpiry ? <th>有效期</th> : null}</tr>
         </thead>
         <tbody>
           {slice.map((it, i) => {
-            // 临期行：可消耗、有剩余、且到期日在阈值窗口内（判据与上方排序同一函数，不另立一套）。
-            const isExp = it.usable && it.remain > 0 && it.expire_at && expUtcOf(it) < expDeadline;
+            // 临期行：可消耗、有剩余、且到期日在窗口内（判据与上方排序同一函数，不另立一套）。
+            const isExp = isExpiring(it);
             const rowCls = isExp ? 'detail-exp-row' : (it.usable ? '' : 'detail-unusable');
             return (
               <tr key={i} className={rowCls}>
@@ -149,9 +186,9 @@ function CreditTip({ data, uid, anchorRect, onClose }) {
                 </td>
                 <td>{it.total}</td><td>{it.used}</td><td>{it.remain}</td>
                 {hasExpiry ? (
-                  <td className={isExp ? 'detail-exp' : ''}>
-                    {it.expire_at || '-'}
-                    {isExp ? <span className="detail-exp-tag" title={`${expDays} 天内到期，优先消耗`}>临期</span> : null}
+                  <td className={isExp ? 'detail-exp' : ''} title={it.expire_at || ''}>
+                    {fmtExpire(it.expire_at)}
+                    {isExp ? <span className="detail-exp-tag" title="今日到期，选号时优先消耗">临期</span> : null}
                   </td>
                 ) : null}
               </tr>

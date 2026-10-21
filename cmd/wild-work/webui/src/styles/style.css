@@ -475,7 +475,7 @@ body {
   background: var(--bg); border: 1px solid var(--card-hairline);
   border-radius: 18px; padding: 14px 16px;
   box-shadow: var(--shadow-modal); font-size: 13px;
-  width: 380px; /* 固定宽度：翻页时浮窗不再变形/宽度跳动 */
+  width: 440px; /* 固定宽度：翻页时浮窗不再变形/宽度跳动；RFC3339 到期时刻需要更宽的列 */
   box-sizing: border-box;
 }
 .detail-head {
@@ -494,12 +494,12 @@ body {
 .detail-pg.off { opacity: .35; cursor: default; }
 .detail-pg.off:hover { background: transparent; }
 .detail-pg-info { color: var(--muted); font-size: 11px; }
-.detail-table { width: 100%; border-collapse: collapse; }
-.detail-table th, .detail-table td { text-align: left; padding: 5px 9px; border-bottom: 1px solid var(--hairline);
+.detail-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.detail-table th, .detail-table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--hairline);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
 .detail-table th { color: var(--muted); font-weight: 500; font-size: 11px; }
 .detail-table td:nth-child(2), .detail-table td:nth-child(3), .detail-table td:nth-child(4) { text-align: right; }
-.detail-table td:last-child { font-weight: 600; }
+.detail-table td:nth-child(4) { font-weight: 600; }
 /* 不可用额度整行淡显 + 角标 */
 .detail-table tr.detail-unusable { color: var(--muted); }
 .detail-tag {
@@ -765,11 +765,15 @@ html[data-theme="paper"] .shiny {
    与后端 ExpiringWithin 同口径判定，视觉与卡片/汇总条的「临期」同色系（都是 --danger）。
    行底用 --chip-bg 而非上游的 #fef2f2：后者是硬编码浅红，暗色/Paper 主题下会糊成一块。
    醒目度由「到期日红字 + 临期红章」承担，行底只做分组。 */
-.detail-table td:last-child { min-width: 112px; }
+/* 列宽由 colgroup 固定（table-layout: fixed）；此处不得再设 min-width，否则整表会被撑出浮窗。 */
 .detail-table tr.detail-exp-row { background: var(--chip-bg); }
 .detail-table td.detail-exp { color: var(--danger); }
+/* 临期标签换到第二行：列宽固定 104px，时间串已占 ~72px，同行放不下会截断成「临」。
+   只有临期行会因此变两行，其余行高不变。 */
+.detail-table td.detail-exp { white-space: normal; }
 .detail-exp-tag {
-  font-size: 10px; padding: 1px 5px; margin-left: 5px; border-radius: 8px;
+  display: block; width: fit-content;
+  font-size: 10px; padding: 1px 5px; margin: 2px 0 0; border-radius: 8px;
   color: var(--danger); border: 1px solid var(--danger); white-space: nowrap;
 }
 

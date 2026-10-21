@@ -541,3 +541,9 @@ func asLoopGuardErr(err error, target **loopguard.Error) bool {
 	}
 	return ok
 }
+
+// parsePointsBalanceOnly 只取条目（忽略余额），测试可读性辅助。
+func parsePointsBalanceOnly(d pointsBalanceData) []provider.ResourceItem {
+	_, items := parsePointsBalance(d)
+	return items
+}

@@ -88,7 +88,7 @@ const ACCOUNTS = [
 const STATE = {
   version: '2.5.4', api_base: 'http://127.0.0.1:7863', api_key: 'k', admin_enabled: false,
   auth_required: false, auth_session: true, listen_host: '127.0.0.1', listen_port: 7863,
-  autostart: false, checkin_times: ['09:00'], next_checkin: '', expiring_days: 1,
+  autostart: false, checkin_times: ['09:00'], next_checkin: '',
   oczen_api_key: '', channels: ['workbuddy', 'traework'], accounts: ACCOUNTS,
   compat: { default_channel: 'workbuddy', max_tokens_cap: 32000, model_map: {} },
   // 思考强度注入（R63）与自定义渠道（R66）的编辑副本源数据。
@@ -189,6 +189,25 @@ try {
   results.push({ name: '自定义渠道无积分入口', visible: visibleControls(customHtml).length, missing: v2b });
   if (v2b.length) console.error(`✗ 自定义渠道无积分入口：${v2b.join('；')}`);
   else console.log('✓ 自定义渠道隐藏签到/刷新积分、保留停用/删除，普通渠道入口未受影响');
+
+  // 2c) 仅「无积分概念」账号（全新安装只有 oczen 匿名）：
+  //     汇总条里没有任何计分行，但「不适用 N 号 · 展开」必须仍可达——
+  //     否则 acctAllNAHidden 指向的按钮根本不存在，匿名账号卡片永远打不开
+  //     （2026-10-21 沙箱实测：rows 为空时整个 cs-bar 不渲染，提示文案悬空）。
+  globalThis.localStorage = { getItem: () => '0', setItem: () => {}, removeItem: () => {} };
+  const naOnlyHtml = renderToStaticMarkup(
+    React.createElement(Accounts, {
+      state: { ...STATE, accounts: ACCOUNTS.filter((a) => a.credits_na) },
+      actions: { ...stubActions, busy }, knownUids: new Set(),
+    }));
+  delete globalThis.localStorage;
+  const v2c = [];
+  if (!/id="btnToggleNA"/.test(naOnlyHtml)) v2c.push('仅无积分账号时「不适用 N 号 · 展开」按钮缺失（提示文案指向不存在的按钮）');
+  if (!/id="acctAllNAHidden"/.test(naOnlyHtml)) v2c.push('仅无积分账号时应显示「已收起」说明');
+  if (/id="acct-card/.test(naOnlyHtml)) v2c.push('默认收起状态下不应直接渲染卡片');
+  results.push({ name: '仅不适用账号可展开', visible: visibleControls(naOnlyHtml).length, missing: v2c });
+  if (v2c.length) console.error(`✗ 仅不适用账号可展开：${v2c.join('；')}`);
+  else console.log('✓ 仅无积分概念账号时展开开关仍可达（汇总条不渲染也不丢入口）');
 
   // 3) 设置弹层：chkPet 必须在场（L6.3 第 8 条那个受控改动没把控件弄丢）
   check('Settings 弹层', renderToStaticMarkup(

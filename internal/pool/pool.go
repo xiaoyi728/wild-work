@@ -1,5 +1,6 @@
 // Package pool 账号池：内存索引 + 冷却/禁用状态机 + state.json 持久化。
-// 挑选策略：healthy 账号中剩余积分最多者。
+// 挑选策略：`healthy` 账号中**最早到期时刻**最先者（R112；同到期时刻按 uid 升序，
+// 无到期信息的垫底按余额降序）。
 package pool
 
 import (
@@ -79,8 +80,13 @@ type Status struct {
 type entry struct {
 	a        *auth.Auth
 	credits  int64
-	expiring int64 // 临期（快到期）的可消耗积分，Pick() 第一排序键
+	expiring int64 // 临期（快到期）的可消耗积分，仅面板展示（R112 起不参与路由）
 	unusable int64
+	// earliestExpire 该账号**仍有效**的最早到期时刻，Pick() 的第一排序键（R112）。
+	// 零值 = 无到期信息（渠道不下发 expire_at，如 Qoder）或所有包已失效。
+	// 存的是绝对时刻而非「剩余多少」，所以 10/30 分钟的刷新间隔不会让它越放越错；
+	// 但过期后必须能被识别（见 expireOK）——否则旧时间戳恒为最小，会一直排第一。
+	earliestExpire time.Time
 	// creditsStale 余额口径不可信（旧版 state 或从未成功刷新过）。
 	// 仅影响面板展示，不参与 Pick() 路由。
 	creditsStale bool
@@ -136,10 +142,14 @@ type stateFile struct {
 const stateVersion = 3
 
 type accountState struct {
-	Credits           int64                `json:"credits"`
-	Expiring          int64                `json:"expiring,omitempty"`
-	Unusable          int64                `json:"unusable,omitempty"`
-	Disabled          bool                 `json:"disabled"`
+	Credits  int64 `json:"credits"`
+	Expiring int64 `json:"expiring,omitempty"`
+	Unusable int64 `json:"unusable,omitempty"`
+	// EarliestExpireUnix 最早有效到期时刻（unix 秒，0 = 无到期信息）。R112 的路由键。
+	// 不 bump stateVersion：老文件缺该字段只会读成「无到期信息」⇒ 退回按余额排序，
+	// 与升级前行为等价，首刷（10 分钟内）自动补上；bump 反而会让全部账号白闪一次「待刷新」。
+	EarliestExpireUnix int64                `json:"earliest_expire,omitempty"`
+	Disabled           bool                 `json:"disabled"`
 	Reason            string               `json:"reason,omitempty"`
 	Until             time.Time            `json:"until,omitempty"`
 	ModelCool         map[string]time.Time `json:"model_cooling,omitempty"`
@@ -225,17 +235,15 @@ func (p *Pool) clearReloggedLocked(auths []*auth.Auth) {
 	}
 }
 
-// Pick 返回 healthy 中积分最高的账号；无可用返回 nil。
-// 排序两级：先按临期额度（消耗快过期的），同组内再按总可用余额。
-// 临期与总可用均为 0 视为无额度，排序仍正确。
+// Pick 返回 healthy 中排在最前的账号（最早到期优先）；无可用返回 nil。
+// 排序三级：最早到期时刻升序 → 同到期时刻 uid 升序 → 无到期信息者按总可用余额降序。
+// 零余额账号不会被排除：余额是 stale 数据，上游会用 402 告诉我们真实情况。
 func (p *Pool) Pick() *auth.Auth {
 	return p.PickExcluding(nil)
 }
 
 // PickExcluding 同上，但跳过 tried 中的 uid（请求级轮换）。
-// 比较键：expiring 降序 → credits 降序。临期>0 的账号恒排在临期=0 之前，
-// 即使后者总余额更高——目的是优先烧掉快过期的积分，避免浪费。
-// expiring 仅统计可消耗额度，且 expiring ≤ credits，不会出现虚高。
+// 比较键：earliestExpire 升序 → uid(ASCII) 升序 → credits 降序（仅无到期信息时）。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 	return p.PickExcludingForModel(tried, "")
 }
@@ -260,7 +268,7 @@ func (p *Pool) PickExcludingForModel(tried map[string]bool, model string) *auth.
 		if !e.healthyForModel(now, model) {
 			continue
 		}
-		if best == nil || entryBetter(e, best) {
+		if best == nil || entryBetter(e, best, now) {
 			best = e
 		}
 	}
@@ -270,24 +278,68 @@ func (p *Pool) PickExcludingForModel(tried map[string]bool, model string) *auth.
 	return best.a
 }
 
-// entryBetter e 是否应排在 b 之前（路由优先级更高）：临期降序 → 总可用降序。
-func entryBetter(e, b *entry) bool {
-	if e.expiring != b.expiring {
-		return e.expiring > b.expiring
+// entryBetter e 是否应排在 b 之前（路由优先级更高）。
+//
+// 排序规则（R112，用户口径：「总是选积分最快过期的那条记录对应的账号」）：
+//  1. **最早到期时刻升序**——快过期的先烧；
+//  2. 同一到期时刻 → uid 的 ASCII 升序（稳定、可预期，不再看余额）；
+//  3. 无有效到期信息的（渠道不下发 expire_at，或快照里的到期时刻已过）垫底，
+//     彼此按总可用余额降序——Qoder 这类池子因此仍能正常轮换而不被钉死在一个号上。
+//
+// 为什么不再用「临期额度降序」：那是**体量**，两个账号体量相同时它无法分辨谁更急。
+func entryBetter(e, b *entry, now time.Time) bool {
+	ee, be := e.expireOK(now), b.expireOK(now)
+	if ee != be {
+		return ee // 有有效到期时刻的恒排前面
 	}
-	return e.credits > b.credits
+	if ee {
+		if !e.earliestExpire.Equal(b.earliestExpire) {
+			return e.earliestExpire.Before(b.earliestExpire)
+		}
+		return e.a.UID < b.a.UID
+	}
+	if e.credits != b.credits {
+		return e.credits > b.credits
+	}
+	return e.a.UID < b.a.UID // 同级也比 uid：byUID 是 map，迭代序随机，无 tie-break 则选号不可复现
 }
 
-// SetCreditDetail 更新账号积分：usable 为可消耗余额，expiring 为其中临期部分，
-// unusable 为账号名下有但本工具用不了的额度（如 TraeWork 的 ep=1 专用池），仅面板展示。
-// usable+expiring 是 Pick() 的排序依据。写入即视为余额口径可信，清除 creditsStale。
-func (p *Pool) SetCreditDetail(uid string, usable, expiring, unusable int64) {
+// expireOK 该账号是否有**仍然有效**的最早到期时刻。
+//
+// 已过期的旧快照不能算：否则那个时间戳恒为最小值，该账号永远排第一，
+// 每次请求都白打一次「余额不足」（硬冷却）——它自己不会变好，只能等刷新。
+func (e *entry) expireOK(now time.Time) bool {
+	return !e.earliestExpire.IsZero() && e.earliestExpire.After(now)
+}
+
+// unixOrZero 把持久化的 unix 秒还原成时刻（0 = 无到期信息）。
+func unixOrZero(sec int64) time.Time {
+	if sec <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0)
+}
+
+// unixOrZeroOut 把时刻压成 unix 秒（零值 → 0，落盘时被 omitempty 跳过）。
+func unixOrZeroOut(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+// SetCreditDetail 更新账号积分：usable 为可消耗余额，expiring 为其中临期部分（仅展示），
+// unusable 为账号名下有但本工具用不了的额度（如 TraeWork 的 ep=1 专用池，仅面板展示）。
+// earliest 为该账号仍有效的最早到期时刻（零值 = 无到期信息），是 Pick() 的第一排序键。
+// 写入即视为余额口径可信，清除 creditsStale。
+func (p *Pool) SetCreditDetail(uid string, usable, expiring, unusable int64, earliest time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.credits = usable
 		e.expiring = expiring
 		e.unusable = unusable
+		e.earliestExpire = earliest
 		e.creditsStale = false
 	}
 	p.saveLocked()
@@ -327,7 +379,7 @@ func (p *Pool) ClearPenalty(uid string) {
 // CooldownModel 模型级冷却：只把 uid 账号的指定模型冻到 now+d，账号对其他模型仍可用。
 // 上游 429/6004 实测按模型限额（「您也可以切换其他模型继续使用」），账号级冷却粒度
 // 过粗会把同号健康模型一起拖死。
-// 升级兜底：若该账号已有 ≥1 个模型仍处于冷却中，本次视为「短时间内第二次撞墙」——
+// 升级兜底：若该账号已有 ≥2 个模型仍处于冷却中，本次视为「短时间内第三次撞墙」——
 // 上游可能实际按账号计时（多模型同时 6004），直接升级为整号冷却到最晚重置点，
 // 防止逐模型把每个模型都撞一遍 429 才发现是整号被限。返回是否发生了升级。
 func (p *Pool) CooldownModel(uid, model string, d time.Duration, reason string) bool {
@@ -355,7 +407,11 @@ func (p *Pool) CooldownModel(uid, model string, d time.Duration, reason string) 
 		}
 	}
 	escalated := false
-	if active >= 2 {
+	// ⚠️ 阈值 2→3（2026-10-20）：排队的引入让「模型级冷却」变成高频事件
+	// （qodercn deepseek-flash 一次排队就给「号×模型」打 30s 冷却），阈值 2 会让
+	// 「两个模型排队」= 整号冻结 60s，3 个号很快全冻 = 整条渠道下线，与用户目标相反。
+	// 真正的账号级限流仍能触发：上游按账号计时时 3 个模型会一起撞墙。
+	if active >= 3 {
 		e.until = latest
 		e.reason = reason + "（多模型接连限流，升级整号冷却）"
 		e.errCount = 0
@@ -393,14 +449,16 @@ func (p *Pool) SetDisabled(uid string, d bool) {
 }
 
 // ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号处于冷却（非禁用）时恢复。
-// expiring 为临期额度小计，unusable 为不可消耗额度小计（仅面板展示）。写入即视为余额口径可信。
-func (p *Pool) ReenableIfCredits(uid string, remain, expiring, unusable int64) {
+// expiring 为临期额度小计（仅展示），unusable 为不可消耗额度小计（仅面板展示）。
+// earliest 为最早有效到期时刻（Pick 的排序键）。写入即视为余额口径可信。
+func (p *Pool) ReenableIfCredits(uid string, remain, expiring, unusable int64, earliest time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.credits = remain
 		e.expiring = expiring
 		e.unusable = unusable
+		e.earliestExpire = earliest
 		e.creditsStale = false
 		if remain > 0 && !e.disabled {
 			e.until = time.Time{}
@@ -613,6 +671,7 @@ func (p *Pool) load() {
 			credits:           s.Credits,
 			expiring:          s.Expiring,
 			unusable:          s.Unusable,
+			earliestExpire:    unixOrZero(s.EarliestExpireUnix),
 			creditsStale:      stale,
 			disabled:          s.Disabled,
 			reason:            s.Reason,
@@ -645,10 +704,11 @@ func (p *Pool) saveLocked() {
 			}
 		}
 		sf.Accounts[uid] = accountState{
-			Credits:           e.credits,
-			Expiring:          e.expiring,
-			Unusable:          e.unusable,
-			Disabled:          e.disabled,
+			Credits:            e.credits,
+			Expiring:           e.expiring,
+			Unusable:           e.unusable,
+			EarliestExpireUnix: unixOrZeroOut(e.earliestExpire),
+			Disabled:           e.disabled,
 			Reason:            e.reason,
 			Until:             e.until,
 			ModelCool:         mc,

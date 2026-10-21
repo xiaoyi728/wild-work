@@ -11,7 +11,7 @@ func TestDefault(t *testing.T) {
 	if c.Listen.Addr() != "127.0.0.1:7863" {
 		t.Errorf("listen=%s", c.Listen.Addr())
 	}
-	if c.APIKey != "WildWorkAPI" {
+	if c.APIKey != "CyWorkAPI" {
 		t.Errorf("api_key=%q", c.APIKey)
 	}
 	if err := c.normalize(); err != nil {

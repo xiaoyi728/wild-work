@@ -399,7 +399,14 @@ var regionBlockedMarkers = []string{
 	"region-restricted",
 	"geo-block",
 	"geoblock",
+	// 出口 IP 级风控（2026-10-19 上游新增）：403 FreeTierError "...aren't available
+	// from your current network because we've detected abusive traffic from this IP
+	// address"。实测同一份实现换干净美国出口立刻 200 ⇒ 纯出口 IP 属性，与伪装头/TLS
+	// 指纹无关，正是备用通道能救的形态。
+	"abusive traffic",
+	"available from your current network",
 }
+
 
 // IsRegionBlocked 报告响应是否属于「地域限制」（可尝试经备用通道重试）。
 // 状态码限 403/451：其余状态一律不认（保守，避免把限流/风控误发到第三方出口）。
@@ -408,6 +415,11 @@ func IsRegionBlocked(status int, body string) bool {
 		return false
 	}
 	low := strings.ToLower(body)
+	// 与 IP 无关的免费档拒绝：会话/客户端伪装不全（"can only be used from within
+	// OpenCode"），换出口无效，不得触发经第三方出口的重放。
+	if strings.Contains(low, "can only be used from within opencode") {
+		return false
+	}
 	for _, m := range regionBlockedMarkers {
 		if strings.Contains(low, m) {
 			return true

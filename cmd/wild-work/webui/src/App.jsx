@@ -71,7 +71,7 @@ function NavShell({ state, theme, toggleTheme, onSettings, onHelp, onAbout, onCo
         <div className="brand">
           <img className="logo" src={import.meta.env.BASE_URL + "logo64.png"} alt="logo" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
           <div className="brand-text">
-            <div className="title">wild-work <span className="ver" id="ver">{state ? `v${state.version}` : ''}</span></div>
+            <div className="title">cy-work <span className="ver" id="ver">{state ? `v${state.version}` : ''}</span></div>
             <div className="sub" id="serverLine">{state ? (state.running ? '服务运行中' : '服务未启动') : ''}</div>
           </div>
         </div>
@@ -542,7 +542,7 @@ export default function App() {
             </div>
             <div className="mtab-body hidden" id="mtabUsage" />
             <div className="mtab-body hidden" id="mtabStats" />
-            <div className="footer">wild-work — 多渠道账号聚合 · 仅供个人学习 · 右键托盘图标退出</div>
+            <div className="footer">cy-work — 多渠道账号聚合 · 仅供个人学习 · 右键托盘图标退出</div>
           </section>
         </div>
         {showFees ? <Fees fees={fees} state={state} refreshBusy={busy.refreshFees} onRefresh={refreshFees}
@@ -563,8 +563,10 @@ export default function App() {
         <section className="section" id="secAccounts" ref={sectionRef}>
           <div className="section-head">
             <div className="main-tabs">
-              <button className={`mtab${mainTab === 'accounts' ? ' active' : ''}`} onClick={() => setMainTab('accounts')}>账号管理</button>
-              <button className={`mtab${mainTab === 'usage' ? ' active' : ''}`} onClick={() => setMainTab('usage')}>
+              <button className={`mtab${mainTab === 'accounts' ? ' active' : ''}`} id="mtabBtnAccounts"
+                      onClick={() => setMainTab('accounts')}>账号管理</button>
+              <button className={`mtab${mainTab === 'usage' ? ' active' : ''}`} id="mtabBtnUsage"
+                      onClick={() => setMainTab('usage')}>
                 用量与流水 <span className="ver" id="usageSince">{sinceText}</span>
               </button>
               <button className={`mtab${mainTab === 'stats' ? ' active' : ''}`} id="mtabBtnStats"
@@ -588,7 +590,7 @@ export default function App() {
           </div>
         </section>
 
-        <div className="footer">wild-work — 多渠道账号聚合 · 仅供个人学习 · 右键托盘图标退出</div>
+        <div className="footer">cy-work — 多渠道账号聚合 · 仅供个人学习 · 右键托盘图标退出</div>
       </div>
 
       {showFees ? <Fees fees={fees} state={state} refreshBusy={busy.refreshFees} onRefresh={refreshFees}

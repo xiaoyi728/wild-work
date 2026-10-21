@@ -28,7 +28,7 @@ func TestBuildCustomRuntimes(t *testing.T) {
 		},
 	}
 
-	sRts, aRts, names := buildCustomRuntimes(channels, stateDir)
+	sRts, aRts, names := buildCustomRuntimes(channels, stateDir, 0)
 	if len(sRts) != 1 || len(aRts) != 1 || len(names) != 1 {
 		t.Fatalf("expected 1 enabled custom runtime, got s=%d, a=%d, names=%v", len(sRts), len(aRts), names)
 	}

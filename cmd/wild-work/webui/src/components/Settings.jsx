@@ -110,7 +110,6 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
   const [autostart, setAutostart] = useState(!!state.autostart);
   // 思考链防癫：后端缺省（旧 config.json 无 features 段）按开启显示，与 config.Default() 一致。
   const [loopGuard, setLoopGuard] = useState(state.loop_guard !== false);
-  const [expiring, setExpiring] = useState(String(state.expiring_days || 1));
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
   // 桌宠开关只存本浏览器 localStorage，后端不参与，故初值在弹层挂载时现读一次。
@@ -436,14 +435,6 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
         });
       } catch (e) { onToast(e.message); return; }
 
-      // 4) 临期阈值（1/2/3 天，独立端点即时生效）
-      const expDays = parseInt(expiring, 10) || 1;
-      if (expDays !== (state.expiring_days || 1)) {
-        try {
-          await api('/api/config/expiring_days', { days: expDays });
-        } catch (e) { onToast(e.message); return; }
-      }
-
       // 4.5) 思考链防癫开关（独立端点，atomic 全局开关即时生效，无需重启）
       if (loopGuard !== (state.loop_guard !== false)) {
         try {
@@ -616,16 +607,6 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
               <button className="icon-btn" id="btnAddTime" title="增加一个签到时间" onClick={addTime}>＋</button>
             </div>
             <div className="hint">保活 22:00 自动 · 下次 <span id="nextCheckin">{state.next_checkin || '-'}</span></div>
-            <div className="row" style={{ marginTop: 8 }}>
-              <label className="lbl wide" title="到期日在此范围内的积分视为临期，调度器优先消耗，减少到期作废">临期阈值</label>
-              <select id="selExpiring" className="input" style={{ width: 100 }}
-                      value={expiring} onChange={(e) => setExpiring(e.target.value)}>
-                <option value="1">1 天</option>
-                <option value="2">2 天</option>
-                <option value="3">3 天</option>
-              </select>
-              <span className="hint" style={{ marginLeft: 8 }}>该范围内到期的积分优先消耗</span>
-            </div>
             <div className="row" style={{ marginTop: 8 }}>
               <label className="lbl wide">开机自启</label>
               <label className="switch">

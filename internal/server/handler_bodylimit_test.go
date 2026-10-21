@@ -12,12 +12,12 @@ import (
 )
 
 // oversizedBody 构造 n 字节的可解析 JSON 请求体（用大量填充消息撑体积）。
-func oversizedBody(n int) []byte {
+func oversizedBody(n int64) []byte {
 	// {"model":"workbuddy/m","messages":[{"role":"user","content":"<pad>"}]}
 	// padding 放进 content 字符串里，保证整体仍是合法 JSON
 	head := `{"model":"workbuddy/test-model","messages":[{"role":"user","content":"`
 	tail := `"}]}`
-	pad := bytes.Repeat([]byte("a"), n-len(head)-len(tail))
+	pad := bytes.Repeat([]byte("a"), int(n)-len(head)-len(tail))
 	if pad == nil {
 		pad = []byte{}
 	}

@@ -276,6 +276,9 @@ var domIdIntentionallyRemoved = map[string]string{
 	// （`backupProxyInput` + `backupProxyState`）。代理列表本身已不存在，故本 id 无对应物——
 	// 注意冻结的 vanilla 基准仍留着旧 DOM（它按 L11/L12 不再与上游同步）。
 	"proxyList": "渠道上游代理按 R57 下线，改单一备用上游通道",
+	// R112：临期阈值不再是路由参数（选号改「最早到期时刻」，面板临期额度固定 1 天），
+	// 设置项整块下线——上游 v2.9.4 同样删除。
+	"selExpiring": "R112 取消临期阈值配置，选号改最早到期时刻",
 }
 
 func TestDOMIdParity(t *testing.T) {

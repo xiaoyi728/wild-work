@@ -83,7 +83,7 @@ var uiWantsState = []string{
 	"version", "running", "listen_host", "listen_port", "lan_ip", "api_key",
 	"accounts", "checkin_times", "next_checkin", "login_busy",
 	"admin_pass_set", "auth_enabled", "auth_session", "auth_required",
-	"autostart", "expiring_days", "backup_proxy", "backup_proxy_active",
+	"autostart", "backup_proxy", "backup_proxy_active",
 	"model_fallback", "oczen_api_key",
 	// loop_guard 自 R50 起被 Settings.jsx 的「思考链防癫」开关读取。它必须进这张表：
 	// 面板用的是 `state.loop_guard !== false`，Go 侧哪天漏发这个字段，读出来是 undefined，

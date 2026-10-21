@@ -292,6 +292,11 @@ func main() {
 	// 长回答会在超时点被掐断且无终止帧（实测 2026-09-27 触发 5 次）。
 	glmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 
+	// 自定义渠道（R110）：与内建渠道同一口径——`upstream.timeout_seconds` 决定非流式
+	// 总超时，同时把它当作「等响应头」上限的下限（大 prompt 首字节天然慢，不能用
+	// 内建渠道那套紧值）。此处只算一次，下面两处 buildCustomRuntimes 共用。
+	upstreamTimeout := time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+
 	// 开发期调试开关：把各渠道出站对话请求的**上游原始响应**落盘（仅 -tags devdump
 	// 构建有效，见 internal/devdump）。这里只做一次启动期读取与提示；真正的接线在
 	// 下方 wrapDumps（R57 起这是唯一统一改 Transport 的地方，且只在启动时做一次）。
@@ -335,9 +340,6 @@ func main() {
 		qoderCheckinRetryUntil = 12 * 60 // 12:00（上游同款兑底截止）
 	)
 
-	// 临期阈值（全渠道共用，scheduler/App 两侧同源，默认 24h，下限 24h）
-	expiringThreshold := cfg.ExpiringThresholdDur
-
 	// 积分流水记账器：在 scheduler 之前创建（签到后差分记账用）；
 	// App 内部不重建，main 装配时统一注入。失败仅降级为无统计。
 	lg, lgerr := ledger.New(filepath.Join(stateDir, "ledger"))
@@ -347,34 +349,34 @@ func main() {
 	// 请求体摘要诊断（默认关；配置开启时每个请求写一条摘要到 data/ledger/body-trace-*.jsonl）
 	ledger.SetBodyTrace(cfg.BodyLog)
 
-	wbSch := scheduler.New(scheduler.Config{Pool: wbPool, Upstream: wbUp, Name: "workbuddy", CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours, ExpiringThreshold: expiringThreshold, Ledger: lg})
-	trSch := scheduler.New(scheduler.Config{Pool: trPool, Upstream: trUp, Name: "traework", CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours, ExpiringThreshold: expiringThreshold, Ledger: lg})
+	wbSch := scheduler.New(scheduler.Config{Pool: wbPool, Upstream: wbUp, Name: "workbuddy", CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours, Ledger: lg})
+	trSch := scheduler.New(scheduler.Config{Pool: trPool, Upstream: trUp, Name: "traework", CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours, Ledger: lg})
 	// Qoder 无签到活动：调度器只做 token keepalive（每日 refresh 保活）。
 	// CheckinMinutes 用显式空切片关闭（传 nil 会被 scheduler.New 补成默认 9:00/21:00）。
-	qdSch := scheduler.New(scheduler.Config{Pool: qdPool, Upstream: qdUp, Name: "qoder", CheckinMinutes: []int{}, KeepaliveHours: cfg.Schedule.KeepaliveHours, ExpiringThreshold: expiringThreshold, Ledger: lg})
+	qdSch := scheduler.New(scheduler.Config{Pool: qdPool, Upstream: qdUp, Name: "qoder", CheckinMinutes: []int{}, KeepaliveHours: cfg.Schedule.KeepaliveHours, Ledger: lg})
 	// WorkBuddy 国际版：无显式签到（ActivitiesOnly 模式）。
 	// 定时仍对每个账号调用 DailyCheckin，其实现为「免费模型对话保活 + 签到探测」；
 	// 不记录/上报签到状态，保持对用户透明。
 	// Keepalive 关闭（token 有效期 365 天，无需每日刷新），用显式空切片关闭
 	// （传 nil 会被 scheduler.New 补成默认 22:00）。
 	wbaSch := scheduler.New(scheduler.Config{Pool: wbaPool, Upstream: wbaUp, Name: "workbuddyai",
-		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, ActivitiesOnly: true, ExpiringThreshold: expiringThreshold, Ledger: lg})
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, ActivitiesOnly: true, Ledger: lg})
 	// 千问办公：无签到活动（每日积分服务端被动发放，无需保活/领取）；
 	// CheckinMinutes + KeepaliveHours 均为显式空切片，本渠道没有任何定时任务
 	// （token 由 deviceToken/refresh 按需轮换，定时保活反而会与千问办公 App
 	// 互踩 —— 见备忘 §7.5 风险 1）。
 	// 余额/费率靠 StartCreditAutoRefresh 循环拉取。
 	qwSch := scheduler.New(scheduler.Config{Pool: qwPool, Upstream: qwUp, Name: "qwenwork",
-		CheckinMinutes: []int{}, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
+		CheckinMinutes: []int{}, KeepaliveHours: []int{}, Ledger: lg})
 	// QoderCN：仅 campaigns 活动路径（legacy daily-check-in 已 DISABLED，其 claim 恒返回
 	// 409 会造成「假成功」，故不再使用）。签到窗口对齐上游 qoder2api：10:00 开放，
 	// 活动可能在整点后才创建，故 10:00–12:00 之间每分钟重试，直到真正领到或超时。
-	qcnSch := scheduler.New(scheduler.Config{Pool: qcnPool, Upstream: qcnUp, Name: "qodercn", CheckinMinutes: []int{qoderCheckinMinute}, CheckinRetryUntil: qoderCheckinRetryUntil, KeepaliveHours: cfg.Schedule.KeepaliveHours, ExpiringThreshold: expiringThreshold, Ledger: lg})
+	qcnSch := scheduler.New(scheduler.Config{Pool: qcnPool, Upstream: qcnUp, Name: "qodercn", CheckinMinutes: []int{qoderCheckinMinute}, CheckinRetryUntil: qoderCheckinRetryUntil, KeepaliveHours: cfg.Schedule.KeepaliveHours, Ledger: lg})
 	// QoderCOM：仅 campaigns 活动路径（无 daily-check-in）；其余同 QoderCN。
-	qcmSch := scheduler.New(scheduler.Config{Pool: qcmPool, Upstream: qcmUp, Name: "qodercom", CheckinMinutes: []int{qoderCheckinMinute}, CheckinRetryUntil: qoderCheckinRetryUntil, KeepaliveHours: cfg.Schedule.KeepaliveHours, ExpiringThreshold: expiringThreshold, Ledger: lg})
+	qcmSch := scheduler.New(scheduler.Config{Pool: qcmPool, Upstream: qcmUp, Name: "qodercom", CheckinMinutes: []int{qoderCheckinMinute}, CheckinRetryUntil: qoderCheckinRetryUntil, KeepaliveHours: cfg.Schedule.KeepaliveHours, Ledger: lg})
 	// MonkeyCode：每日签到（钱包 checkin + Cap.js PoW 验证码）；无 refresh 端点，保活关闭。
 	mcSch := scheduler.New(scheduler.Config{Pool: mcPool, Upstream: mcUp, Name: "monkeycode",
-		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
 	// 小浣熊：签到走 setting_info（每日积分惰性落账的触发点，见 internal/raccoon/checkin.go）。
 	// access_token 实测仅 ≈2h，而 refresh_token ≈30 天，
 	// 故保活比其它渠道更密（每 4 小时一次）以减少「请求先 401 再刷新」的额外往返；
@@ -383,16 +385,16 @@ func main() {
 	// 签到时间用全局配置（checkinMinutes）：上游按天去重、无活动上线延迟问题，
 	// 故**不设 CheckinRetryUntil**（窗口重试是为「活动尚未创建」设计的，本渠道无此语义）。
 	rcSch := scheduler.New(scheduler.Config{Pool: rcPool, Upstream: rcUp, Name: "raccoon",
-		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{1, 5, 9, 13, 17, 21}, ExpiringThreshold: expiringThreshold, Ledger: lg})
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{1, 5, 9, 13, 17, 21}, Ledger: lg})
 	// Loomy：每日宠物打工奖励签到（按有效对话轮次结算）；上游无 refresh 端点（session 14 天），
 	// 保活关闭（显式空切片）。
 	lmSch := scheduler.New(scheduler.Config{Pool: lmPool, Upstream: lmUp, Name: "loomy",
-		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
 	// Cline：官方 API Key **不过期**、无签到活动、无 refresh token ⇒ 定时任务全部关闭。
 	// 必须传显式空切片 []int{}（R39）：传 nil 会被 scheduler.New 的零值兜底补上默认时间，
 	// 于是每天空跑一次必然失败的签到，并在面板渲染红色「签到失败」。
 	clSch := scheduler.New(scheduler.Config{Pool: clPool, Upstream: clUp, Name: "cline",
-		CheckinMinutes: []int{}, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
+		CheckinMinutes: []int{}, KeepaliveHours: []int{}, Ledger: lg})
 	// OpenCodeZen 匿名：无账号、无签到、无 token 可保活（凭证是常量 public）。
 	// CheckinMinutes/KeepaliveHours 均为显式空切片 → 调度器不发生任何上游调用。
 	ocSch := scheduler.New(scheduler.Config{Pool: ocPool, Upstream: ocUp, Name: "oczen",
@@ -403,7 +405,7 @@ func main() {
 	// KeepaliveHours 也用同一时段（保活=签到，不必额外一次）。
 	glmSch := scheduler.New(scheduler.Config{Pool: glmPool, Upstream: glmUp, Name: "glm",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
-		ExpiringThreshold: expiringThreshold, Ledger: lg})
+		Ledger: lg})
 
 	runtimes := map[provider.Kind]*server.Runtime{
 		provider.WorkBuddy:   {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, StaticModels: server.WorkBuddyStaticModels()},
@@ -451,7 +453,7 @@ func main() {
 		provider.Oczen:       {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, Scheduler: ocSch},
 	}
 
-	initCustomServerRts, initCustomAppRts, customNames := buildCustomRuntimes(cfg.CustomChannels, stateDir)
+	initCustomServerRts, initCustomAppRts, customNames := buildCustomRuntimes(cfg.CustomChannels, stateDir, upstreamTimeout)
 	for k, rt := range initCustomAppRts {
 		appRuntimes[k] = rt
 	}
@@ -503,6 +505,7 @@ func main() {
 		ErrCooldown:      cfg.ErrCooldownDur,
 		ModelFallbacks:   cfg.ModelFallback,    // 启动时载入降级链（此前仅面板保存后热更新，重启即丢）
 		ReasoningEfforts: cfg.ReasoningEfforts, // 启动时载入思考强度映射（同上）
+		MaxRequestBody:   int64(cfg.Server.MaxRequestBodyMB) << 20, // 0 = server 默认 128MiB
 		WebUI:            sub,
 		AttachAPI:        appInst.HandleAPI,
 	})
@@ -549,7 +552,7 @@ func main() {
 	})
 	// 面板保存自定义渠道时热更新内层 handler、app 运行时与兼容层路由表（R66）
 	appInst.SetCustomChannelsSyncer(func(customChannels []custom.ChannelConfig) {
-		newServerRts, newAppRts, newNames := buildCustomRuntimes(customChannels, stateDir)
+		newServerRts, newAppRts, newNames := buildCustomRuntimes(customChannels, stateDir, upstreamTimeout)
 		inner.SetCustomRuntimes(newServerRts)
 		appInst.UpdateCustomRuntimes(newAppRts)
 
@@ -894,7 +897,9 @@ func migrateStateFiles(oldStateFile, stateDir string) {
 }
 
 // buildCustomRuntimes 将配置中的自定义渠道列表装配为 server 与 app 运行时（R66）。
-func buildCustomRuntimes(channels []custom.ChannelConfig, stateDir string) (map[provider.Kind]*server.Runtime, map[provider.Kind]*app.Runtime, []string) {
+// upstreamTimeout 是 `config.upstream.timeout_seconds`（0 = 渠道默认值）。内建渠道在
+// main 里逐个注入 `xxxUp.HTTP.Timeout`，自定义渠道原先漏了这条接线（R110）。
+func buildCustomRuntimes(channels []custom.ChannelConfig, stateDir string, upstreamTimeout time.Duration) (map[provider.Kind]*server.Runtime, map[provider.Kind]*app.Runtime, []string) {
 	sRuntimes := map[provider.Kind]*server.Runtime{}
 	aRuntimes := map[provider.Kind]*app.Runtime{}
 	var names []string
@@ -904,7 +909,7 @@ func buildCustomRuntimes(channels []custom.ChannelConfig, stateDir string) (map[
 			continue
 		}
 		k := provider.Kind(cc.Name)
-		client := custom.New(cc)
+		client := custom.NewWithTimeout(cc, upstreamTimeout)
 		p := pool.New(filepath.Join(stateDir, "state-custom-"+cc.Name+".json"))
 		au := &auth.Auth{
 			Kind:      cc.Name,

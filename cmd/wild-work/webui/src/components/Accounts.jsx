@@ -55,16 +55,16 @@ function CreditValue({ a, shownRef }) {
 
 // hover 积分区弹出的明细浮窗。条数可能很多（TraeWork 每个签到奖励都是独立条目，常见 30+），
 // 故分页；翻页不重新请求（detailCache 已缓存该账号的完整响应）。
-function CreditTip({ data, uid, anchorRect, expiringDays, onClose }) {
+function CreditTip({ data, uid, anchorRect, onClose }) {
   const [page, setPage] = useState(0);
   const tipRef = useRef(null);
   const rawItems = (data && data.items) || [];
   if (!rawItems.length) return null;
 
   // 排序：临期（可消耗、有剩余、窗口内到期）→ 可用 → 已用完/不可用/仅展示垫底；组内按到期日升序。
-  // 临期判定与后端 ExpiringWithin 同口径：北京时间墙钟 now + 阈值天数，到期日当天零点前即临期。
-  // 判据必须与后端一致，否则「卡片标了临期、明细里却不红」这种自相矛盾又会回来。
-  const expDays = expiringDays || 1;
+  // 临期判定与后端 ExpiringWithinDays 同口径：北京时间墙钟 now + provider.ExpiringDays（固定 1 天），
+  // 到期日当天零点前即临期。判据必须与后端一致，否则「卡片标了临期、明细里却不红」会自相矛盾。
+  const expDays = 1;
   const bjNow = Date.now() + new Date().getTimezoneOffset() * 60000 + 8 * 3600 * 1000;
   const expDeadline = bjNow + expDays * 24 * 3600 * 1000;
   const expUtcOf = (it) => {
@@ -399,11 +399,13 @@ export default function Accounts({ state, actions, knownUids, active }) {
           </div>
         </div>
       </div>
-      {rows.length ? (
+      {rows.length || naAcc.length ? (
         <div className="cs-bar" id="creditSummaryBar">
           <span className="cs-title">积分汇总</span>
-          <button className={`cs-chip${filter === null ? ' active' : ''}`} id="csAll"
-                  onClick={() => setFilter(null)}>全部{` · ${totals.n} 个 · ${totals.num} 分`}</button>
+          {rows.length ? (
+            <button className={`cs-chip${filter === null ? ' active' : ''}`} id="csAll"
+                    onClick={() => setFilter(null)}>全部{` · ${totals.n} 个 · ${totals.num} 分`}</button>
+          ) : null}
           {rows.map((s) => (
             <button key={s.group}
                     className={`cs-chip clickable ${chClass(s.group)}${filter === s.group ? ' active' : ''}`}
@@ -424,7 +426,7 @@ export default function Accounts({ state, actions, knownUids, active }) {
                     title="无积分概念渠道（OpenCodeZen / Cline / 自定义）：不参与合计，仅作诊断入口"
                     onClick={toggleNA}>{showNA ? '收起不适用' : `不适用 ${naAcc.length} 号 · 展开`}</button>
           ) : null}
-          <span className="cs-total">{`合计 ${totals.num} 分`}</span>
+          {rows.length ? <span className="cs-total">{`合计 ${totals.num} 分`}</span> : null}
         </div>
       ) : null}
       <div id="acctList" className="acct-grid">
@@ -444,7 +446,7 @@ export default function Accounts({ state, actions, knownUids, active }) {
         <div className="empty" id="acctAllNAHidden">当前仅有无积分概念账号（已收起）——点上方「不适用 N 号 · 展开」查看</div>
       ) : null}
       {tipState ? <CreditTip data={tipState.data} uid={tipState.uid} anchorRect={tipState.rect}
-                             expiringDays={state && state.expiring_days} onClose={hide} /> : null}
+                             onClose={hide} /> : null}
     </>
   );
 }

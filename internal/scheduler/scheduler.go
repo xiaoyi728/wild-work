@@ -45,10 +45,6 @@ type Config struct {
 	// WorkBuddy 国际版使用该模式。
 	ActivitiesOnly bool
 
-	// ExpiringThreshold 临期阈值（config.schedule.expiring_threshold_hours）。
-	// 0 = 24h 兜底。用于签到后计算临期额度（Pick() 的第一排序键）。
-	ExpiringThreshold time.Duration
-
 	// Ledger 积分流水记账器（非 nil 时签到后余额刷新触发差分记账）。
 	Ledger *ledger.Ledger
 }
@@ -96,9 +92,6 @@ func New(cfg Config) *Scheduler {
 	}
 	if cfg.KeepaliveHours == nil {
 		cfg.KeepaliveHours = []int{22}
-	}
-	if cfg.ExpiringThreshold <= 0 {
-		cfg.ExpiringThreshold = 24 * time.Hour
 	}
 	return &Scheduler{cfg: cfg, wake: make(chan struct{}, 1), checkinDone: map[string]bool{}}
 }
@@ -558,10 +551,13 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 		}
 	} else {
 		_, unusable := provider.Summarize(items)
-		expiring := provider.ExpiringWithinDays(items, s.cfg.expiringDays(), time.Now())
+		// 阈值固定 provider.ExpiringDays，R112 起不再可配；选号键是同响应里的最早到期时刻。
+		now := time.Now()
+		expiring := provider.ExpiringWithinDays(items, provider.ExpiringDays, now)
+		earliest, _ := provider.EarliestExpire(items, now)
 		r.Remain, r.HasRemain = usable, true
-		log.Printf("checkin credits platform=%s uid=%s remain=%d expiring=%d unusable=%d", name, uid, usable, expiring, unusable)
-		s.cfg.Pool.ReenableIfCredits(uid, usable, expiring, unusable)
+		log.Printf("checkin credits platform=%s uid=%s remain=%d expiring=%d unusable=%d earliest=%v", name, uid, usable, expiring, unusable, earliest)
+		s.cfg.Pool.ReenableIfCredits(uid, usable, expiring, unusable, earliest)
 		// 差分记账：与上次快照对比产出 earn/spend/expire 流水
 		if s.cfg.Ledger != nil {
 			s.cfg.Ledger.DiffCredits(name, uid, usable, items)
@@ -616,22 +612,6 @@ func (s *Scheduler) dailyCheckin(a *auth.Auth, r *CheckinResult) (structured boo
 	return true, err
 }
 
-// expiringDays 把时长阈值换算成自然日数（非整日向上取整）。
-// 自 R105 起临期判据是自然日，不能再直接拿时长与 ExpireAt 比较。
-func (c Config) expiringDays() int {
-	h := int(c.ExpiringThreshold / time.Hour)
-	if h <= 0 {
-		h = 24
-	}
-	days := h / 24
-	if h%24 != 0 {
-		days++
-	}
-	if days < 1 {
-		days = 1
-	}
-	return days
-}
 
 // isAlready 只匹配明确的“今日已签到”，不能因错误文本包含 checkin 就判成功。
 func isAlready(err error) bool {

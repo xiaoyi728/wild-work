@@ -129,14 +129,22 @@ type Config struct {
 		CheckinHours   []int    `json:"checkin_hours,omitempty"` // 旧格式：[9,21]
 		CheckinTimes   []string `json:"checkin_times,omitempty"` // 新格式：["09:00","21:30"]
 		KeepaliveHours []int    `json:"keepalive_hours"`         // [22]
-		// ExpiringThresholdHours 临期阈值（小时）：到期日在此范围内的积分视为「临期」,
-		// Pick() 临期优先消耗。默认 24，下限 24（低于 24 会被钳到 24）。
-		ExpiringThresholdHours int `json:"expiring_threshold_hours,omitempty"`
+		// 临期阈值自 R112 起取消：选号改用「最早到期时刻」，面板临期额度固定按
+		// provider.ExpiringDays 算。旧配置里的 expiring_threshold_hours 会被静默忽略。
 	} `json:"schedule"`
 
 	Upstream struct {
 		TimeoutSeconds int `json:"timeout_seconds"` // 默认 120
 	} `json:"upstream"`
+
+	// Server 入站 HTTP 服务参数。
+	Server struct {
+		// MaxRequestBodyMB 入站请求体上限（MiB）。0 = 默认 128。
+		// 为什么要给到这么高：无状态客户端（Codex）每轮把整段历史原样重放，
+		// 多张截图的 base64 会线性累积；gateway 转发前会把图缩到 1568px/JPEG，
+		// 所以这个上限只需容纳**客户端原始体**，不代表上游会收到这么大的包（issue #176）。
+		MaxRequestBodyMB int `json:"max_request_body_mb,omitempty"`
+	} `json:"server"`
 
 	// Compat 三接口兼容层（OpenAI Responses / Anthropic Messages）配置。
 	// 零值即关闭模型名映射，仅接受 "channel/model" 形式。
@@ -209,8 +217,6 @@ type Config struct {
 	DailyGrantEnabled bool `json:"-"`
 	// DailyGrantBufferDur 发奖窗口缓冲（默认 30m）。
 	DailyGrantBufferDur time.Duration `json:"-"`
-	// ExpiringThresholdDur 临期阈值解析结果（normalize 里钳到 >= 24h）。
-	ExpiringThresholdDur time.Duration `json:"-"`
 }
 
 // ModelFallbackRule 单条模型降级规则：From（"channel/model" 全路径）在其渠道内
@@ -225,7 +231,7 @@ type ModelFallbackRule struct {
 func Default() *Config {
 	c := &Config{
 		Listen:    Listen{Host: "127.0.0.1", Port: 7863},
-		APIKey:    "WildWorkAPI",
+		APIKey:    "CyWorkAPI",
 		AuthDir:   "./auths",
 		StateFile: "./data/state.json",
 		Region:    "cn",
@@ -239,7 +245,6 @@ func Default() *Config {
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.CheckinTimes = []string{"09:00", "21:00"}
 	c.Schedule.KeepaliveHours = []int{22}
-	c.Schedule.ExpiringThresholdHours = 24
 	c.Upstream.TimeoutSeconds = 120
 	c.Compat.DefaultChannel = "workbuddy"
 	c.Compat.MaxTokensCap = 32000
@@ -469,14 +474,18 @@ func (c *Config) normalize() error {
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120
 	}
+	// 入站请求体上限：0 = 默认；负数/过大一律钳到合理区间（下限 8MiB 沿用历史最低值，
+	// 上限 1024MiB 防手滑写成天文数字把内存撑爆）。
+	if c.Server.MaxRequestBodyMB < 0 {
+		c.Server.MaxRequestBodyMB = 0
+	}
+	if c.Server.MaxRequestBodyMB > 0 && c.Server.MaxRequestBodyMB < 8 {
+		c.Server.MaxRequestBodyMB = 8
+	}
+	if c.Server.MaxRequestBodyMB > 1024 {
+		c.Server.MaxRequestBodyMB = 1024
+	}
 	// 临期阈值：默认 24h，下限 24h（日期粒度的到期判定低于一天没有意义）。
-	if c.Schedule.ExpiringThresholdHours <= 0 {
-		c.Schedule.ExpiringThresholdHours = 24
-	}
-	if c.Schedule.ExpiringThresholdHours < 24 {
-		c.Schedule.ExpiringThresholdHours = 24
-	}
-	c.ExpiringThresholdDur = time.Duration(c.Schedule.ExpiringThresholdHours) * time.Hour
 	if c.Compat.MaxTokensCap < 0 {
 		c.Compat.MaxTokensCap = 0 // 负数视为「不限制」，避免误用导致 max_tokens 被置 0
 	}
@@ -541,22 +550,6 @@ func (c *Config) normalize() error {
 	return nil
 }
 
-// ExpiringThresholdDays 临期阈值（自然日数）：由 ExpiringThresholdHours 换算，
-// 非整日向上取整（保守，宁可提前预警）。
-func (c *Config) ExpiringThresholdDays() int {
-	h := c.Schedule.ExpiringThresholdHours
-	if h <= 0 {
-		h = 24
-	}
-	days := h / 24
-	if h%24 != 0 {
-		days++
-	}
-	if days < 1 {
-		days = 1
-	}
-	return days
-}
 
 // parseClockHM 把 "HH:MM" 解析为当天分钟数（time.Duration）。
 func parseClockHM(v string) (time.Duration, error) {

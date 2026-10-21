@@ -328,6 +328,7 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 		"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 		"11128",                                           // 上游反探测：裸数字错误码
+		"You are an AI agent powered by DeepSeek Harness", // DSH 身份句：上游按 system 开头逐字锚定（2026-10-21 实测）
 	}
 	if len(sanitizeFeatures) != len(features) {
 		t.Fatalf("sanitizeFeatures 项数=%d want %d（快照与实现不同步，见测试头注释的验证步骤）", len(sanitizeFeatures), len(features))
@@ -359,6 +360,11 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 			"11128",
 			"11-128",
 		},
+		{
+			// DSH 身份句：只插冠词 the，保留 powered by 原措辞，语义扰动最小
+			"You are an AI agent powered by DeepSeek Harness",
+			"You are an AI agent powered by the DeepSeek Harness",
+		},
 	}
 	if len(sanitizeRewrites) != len(rewrites) {
 		t.Fatalf("sanitizeRewrites 对数=%d want %d（快照与实现不同步，见测试头注释的验证步骤）", len(sanitizeRewrites), len(rewrites))
@@ -387,6 +393,53 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		}
 		if got != want {
 			t.Errorf("%s=%q want %q（逐字节不一致，改动前先走快照验证流程）", name, got, want)
+		}
+	}
+}
+
+// DSH 身份句必须被改写：只插冠词 the，其余措辞原样保留（语义扰动最小）。
+func TestDSHIdentityRewritten(t *testing.T) {
+	const dsh = "You are an AI agent powered by DeepSeek Harness"
+	out := sanitizeText(dsh + " You own the repository.")
+	if strings.Contains(out, dsh) {
+		t.Errorf("DSH identity still present: %q", out)
+	}
+	if !strings.Contains(out, "powered by the DeepSeek Harness") {
+		t.Errorf("DSH rewrite missing: %q", out)
+	}
+	if !strings.Contains(out, " You own the repository.") {
+		t.Errorf("suffix lost: %q", out)
+	}
+}
+
+// DSH 身份句必须经 PrepareBody 落进 system content（真实调用链）。
+func TestPrepareBodySanitizesDSHSystem(t *testing.T) {
+	const dsh = "You are an AI agent powered by DeepSeek Harness"
+	body := []byte(`{"model":"glm-5.2","messages":[` +
+		`{"role":"system","content":"` + dsh + `"},` +
+		`{"role":"user","content":"hi"}]}`)
+	var obj map[string]any
+	if err := json.Unmarshal(PrepareBody(body), &obj); err != nil {
+		t.Fatal(err)
+	}
+	sys, _ := obj["messages"].([]any)[0].(map[string]any)["content"].(string)
+	if strings.Contains(sys, dsh) {
+		t.Errorf("DSH fingerprint remains: %q", sys)
+	}
+	if !strings.Contains(sys, "powered by the DeepSeek Harness") {
+		t.Errorf("DSH rewrite missing: %q", sys)
+	}
+}
+
+// 反向护栏：措辞相近但非逐字形态不得被改写（防误伤）。
+func TestDSHVariantNotTouched(t *testing.T) {
+	for _, in := range []string{
+		"You are an AI agent powered by DeepSeek.",
+		"You are an AI agent powered by the DeepSeek Harness",
+		"an AI agent powered by DeepSeek Harness",
+	} {
+		if out := sanitizeText(in); out != in {
+			t.Errorf("变体被误改: %q → %q", in, out)
 		}
 	}
 }

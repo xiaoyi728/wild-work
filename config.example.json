@@ -3,7 +3,7 @@
     "host": "127.0.0.1",
     "port": 7863
   },
-  "api_key": "WildWorkAPI",
+  "api_key": "CyWorkAPI",
   "admin_password": "",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
@@ -18,11 +18,13 @@
   },
   "schedule": {
     "checkin_times": ["09:00", "21:00"],
-    "keepalive_hours": [22],
-    "expiring_threshold_hours": 24
+    "keepalive_hours": [22]
   },
   "upstream": {
     "timeout_seconds": 120
+  },
+  "server": {
+    "max_request_body_mb": 128
   },
   "compat": {
     "default_channel": "workbuddy",

@@ -136,7 +136,7 @@ internal/
 `/v1/models` 返回当前所有可用模型：
 
 ```bash
-curl -s -H "Authorization: Bearer WildWorkAPI" http://127.0.0.1:7863/v1/models
+curl -s -H "Authorization: Bearer CyWorkAPI" http://127.0.0.1:7863/v1/models
 ```
 
 模型 ID 需带渠道前缀：`workbuddy/<model>`、`workbuddyai/<model>`、`traework/<model>`、`traecode/<model>`、`qodercn/<model>`、`qodercom/<model>`、`qwenwork/<model>`、`glm/<model>`、`cline/<model>`、`monkeycode/<model>`、`raccoon/<model>`、`loomy/<model>`、`oczen/<model>`（旧 `qoder/<model>` 仍可用，已从界面下线）。
@@ -147,7 +147,7 @@ curl -s -H "Authorization: Bearer WildWorkAPI" http://127.0.0.1:7863/v1/models
 
 ```
 Base URL: http://127.0.0.1:7863/v1
-API Key:  WildWorkAPI
+API Key:  CyWorkAPI
 ```
 
 ### 3. 不支持自动拉取模型列表的客户端（Pi）
@@ -161,7 +161,7 @@ Pi 需要手动编辑 `~/.pi/agent/models.json`（Windows：`C:\Users\<用户名
       "name": "wild-work",
       "api": "openai-completions",
       "baseUrl": "http://127.0.0.1:7863/v1",
-      "apiKey": "WildWorkAPI",
+      "apiKey": "CyWorkAPI",
       "models": [
         {
           "id": "workbuddy/auto",
@@ -240,7 +240,7 @@ env_key = "WILDWORK_KEY"
 
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:7863"
-export ANTHROPIC_AUTH_TOKEN="WildWorkAPI"
+export ANTHROPIC_AUTH_TOKEN="CyWorkAPI"
 export ANTHROPIC_MODEL="traework/glm-5.2"
 ```
 
@@ -253,7 +253,7 @@ OpenCode Zen 上还有一个免费的结构化决策模型 **Jev（`jev-1.13-fre
 
 ```bash
 curl -X POST "http://127.0.0.1:7863/v1/systemone" \
-  -H "Authorization: Bearer WildWorkAPI" \
+  -H "Authorization: Bearer CyWorkAPI" \
   -H "Content-Type: application/json" \
   -d '{
     "state": "用户反馈：我被重复扣费了，订单号 A-104，要求今天退款。",
@@ -281,7 +281,7 @@ curl -X POST "http://127.0.0.1:7863/v1/systemone" \
 
 ```bash
 curl http://127.0.0.1:7863/v1/chat/completions \
-  -H "Authorization: Bearer WildWorkAPI" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer CyWorkAPI" -H "Content-Type: application/json" \
   -d '{"model":"oczen/mimo-v2.6-flash-free","messages":[{"role":"user","content":"你好"}]}'
 ```
 

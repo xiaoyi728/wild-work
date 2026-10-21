@@ -140,7 +140,7 @@ export function About({ open, version, onClose }) {
     <div className="overlay" id="aboutOverlay" onClick={(e) => { if (e.target.id === 'aboutOverlay') onClose(); }}>
       <div className="modal" style={{ textAlign: 'center' }}>
         <img className="logo" src={import.meta.env.BASE_URL + "logo64.png"} alt="logo" style={{ width: 64, height: 64, borderRadius: 14, marginBottom: 14 }} />
-        <div className="modal-title">wild-work</div>
+        <div className="modal-title">cy-work</div>
         <div className="modal-body" style={{ color: 'var(--muted)' }}>
           <p>版本 <span id="aboutVer">{version}</span></p>
           <p>多渠道账号聚合工具</p>

@@ -36,6 +36,13 @@ docs/*
 !docs/upstream-reverse-engineering.md
 !docs/桌宠功能实施计划.md
 !docs/桌宠动画重构计划.md
+# 上游更新监测（scripts/upstream-watch.sh）：报告与基线状态入库，锁文件与运行日志不入库
+#（run.log 已被上面的 *.log 覆盖）。
+!docs/upstream-watch/
+!docs/upstream-watch/**
+# 反选会盖掉上面的 *.log，运行日志必须单独忽略
+docs/upstream-watch/run.log
+docs/upstream-watch/.lock
 
 # 临时文件
 temp/

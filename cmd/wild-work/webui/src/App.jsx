@@ -546,7 +546,8 @@ export default function App() {
           </section>
         </div>
         {showFees ? <Fees fees={fees} state={state} refreshBusy={busy.refreshFees} onRefresh={refreshFees}
-            onCopy={(t) => copyText(t, '模型标识', toast)}
+            onCopy={(t, label) => copyText(t, label || '模型标识', toast)}
+            onToast={toast}
             onClose={() => setShowFees(false)} /> : null}
         <AdminLogin open msg={loginMsg} onSubmit={(pass) => submitLogin(pass)} />
       </>
@@ -594,7 +595,8 @@ export default function App() {
       </div>
 
       {showFees ? <Fees fees={fees} state={state} refreshBusy={busy.refreshFees} onRefresh={refreshFees}
-            onCopy={(t) => copyText(t, '模型标识', toast)}
+            onCopy={(t, label) => copyText(t, label || '模型标识', toast)}
+            onToast={toast}
             onClose={() => setShowFees(false)} /> : null}
       {showSettings ? (
         <Settings key={JSON.stringify(state.compat) + state.listen_port}

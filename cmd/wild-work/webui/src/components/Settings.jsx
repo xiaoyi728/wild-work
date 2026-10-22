@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
-import { CHANNEL_PRESETS, MASK_SENTINEL, RESERVED_CHANNEL_NAMES } from '../constants.js';
+import { CHANNEL_PRESETS, RESERVED_CHANNEL_NAMES } from '../constants.js';
 import { isLoopbackHost, isWildcardHost, parseTokens, formatTokenCount } from '../format.js';
 
 // 现状：监听下拉只有三个语义位。空/`::` 等通配写法按「全部网卡」看待，
@@ -23,6 +23,76 @@ function validateBackupProxy(raw) {
   }
   if (!u.hostname) return [null, `备用代理缺少主机名：${v}`];
   return [v, ''];
+}
+
+// stripQuotes 去掉首尾成对引号/反引号：从 markdown 代码块或 curl 示例里粘地址常见。
+function stripQuotes(s) {
+  s = (s || '').trim();
+  const q = '\'"`';
+  if (s.length > 1 && q.includes(s[0]) && s[s.length - 1] === s[0]) return s.slice(1, -1).trim();
+  return s;
+}
+
+// isMaskedKey 认后端下发的脱敏形态（**** / … / ••）。它不是用户真填的密钥，
+// 提交时要原样送回，后端按渠道名找回真实值（与 Go 侧 isMaskedKey 同一口径，
+// 两边必须同步改：R121）。
+function isMaskedKey(k) {
+  return !!k && (k.includes('****') || k.includes('…') || k.includes('••'));
+}
+
+// looksLikeEndpoint 放宽录入：允许漏协议头（后端按内/外网补 http/https）、允许带
+// /chat/completions 尾巴（后端会剥）。只拦真正的误粘：含空白、或连 host 形状都不是。
+function looksLikeEndpoint(u) {
+  if (/\s/.test(u)) return false;
+  if (/^https?:\/\//i.test(u)) return true;
+  return /^[a-z0-9.\-]+(:\d+)?(\/|$)/i.test(u);
+}
+
+// capSourceText 能力来源四态（R119）：与后端 cap_source 同源，缺省按「未探测」。
+// 不把「不知道」写成任何具体数字，也不把实测/手填冒充成上游声明。
+const CAP_SRC_TEXT = {
+  api: '上游',
+  measured: '实测',
+  user: '手填',
+  unknown: '未探测',
+};
+const CAP_SRC_TIP = {
+  api: '能力/上下文来自上游 /models 声明',
+  measured: '能力/上下文为本工具实测值（非上游声明）',
+  user: '能力/上下文由您在面板手填，本工具不核实',
+  unknown: '未拿到能力信息：可点「导入」拉一次上游 /models；本工具不编造默认值',
+};
+function CapSourceTag({ src, style }) {
+  const s = CAP_SRC_TEXT[src] ? src : 'unknown';
+  return <span className={`cm-meta cap-${s}`} style={style} title={CAP_SRC_TIP[s]}>{CAP_SRC_TEXT[s]}</span>;
+}
+
+// capToModelConfig 把探测到的能力写成 ModelConfig（只搬真实拿到的，拉不到就是零值）。
+// 来源标记原样带过去：未探测的条目落盘后会被后端归成 unknown（R119）。
+function capToModelConfig(c) {
+  const rec = { id: c.id, cap_source: c.cap_source || 'unknown' };
+  if (c.context_window) rec.context_window = c.context_window;
+  if (c.max_tokens) rec.max_tokens = c.max_tokens;
+  if (c.supports_images) rec.supports_images = true;
+  if (c.supports_reasoning) rec.supports_reasoning = true;
+  if (c.supports_tools === true || c.supports_tools === false) rec.supports_tools = c.supports_tools;
+  if (c.reasoning_efforts && c.reasoning_efforts.length) rec.reasoning_efforts = c.reasoning_efforts.slice();
+  if (c.default_reasoning_effort) rec.default_reasoning_effort = c.default_reasoning_effort;
+  return rec;
+}
+
+// capSummary 探测行的能力摘要：拉到什么写什么，拉不到就空（调用方显示「未探测」）。
+function capSummary(c) {
+  if (!c) return [];
+  const bits = [];
+  if (c.display_name) bits.push(c.display_name);
+  if (c.context_window) bits.push(`上下文 ${formatTokenCount(c.context_window)}`);
+  if (c.max_tokens) bits.push(`输出 ${formatTokenCount(c.max_tokens)}`);
+  if (c.supports_images) bits.push('识图');
+  if (c.supports_reasoning) bits.push('思考');
+  if (c.supports_tools === false) bits.push('无工具');
+  if (c.reasoning_efforts && c.reasoning_efforts.length) bits.push(`档位 ${c.reasoning_efforts.join('/')}`);
+  return bits;
 }
 
 // parseModelList 解析降级链的备胎输入：逗号/空格分隔多个 channel/model，本地形态校验。
@@ -105,6 +175,12 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
   const [customErr, setCustomErr] = useState('');
   const [customOk, setCustomOk] = useState('');
   const [customTesting, setCustomTesting] = useState(false);
+  // 模型导入弹层（R119）：探测一次上游 /models，把 id + 尽力解析出的能力列出来勾选。
+  // null = 关闭；打开后由后端 Discover 填 rows，拉不到能力就标「未探测」。
+  const [imp, setImp] = useState(null);
+  // 签到时间就地编辑器（R119 后续 UX）：点＋展开原生 time 输入，选好再确定。
+  const [timeOpen, setTimeOpen] = useState(false);
+  const [timeDraft, setTimeDraft] = useState('');
   // 每个渠道的「新增模型」输入草稿，按渠道下标存（下标即渲染顺序，增删后整表重渲染）。
   const [modelDraft, setModelDraft] = useState({});
   const [autostart, setAutostart] = useState(!!state.autostart);
@@ -158,7 +234,7 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
     setProxyErr('');
     try {
       let k = oczenKey.trim();
-      if (k.includes(MASK_SENTINEL)) k = ''; // 脱敏形态 = 未改动，用当前配置值测
+      if (isMaskedKey(k)) k = ''; // 脱敏形态 = 未改动，用当前配置值测
       const r = await api('/api/config/oczen_test', { api_key: k });
       // 与真实对话同源（issue #117）：直连被地区拒时后端会自动改走备用通道，
       // via_backup 标出答复来自哪个出口——否则配了代理点测试仍看到 403 会误以为功能没生效。
@@ -280,45 +356,171 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
     } catch (e) { setEffErr(e.message); }
   }
 
-  // ---------- 自定义渠道（R66） ----------
-  // 新建渠道：标识非空、不与内建同名、URL 非空、标识唯一（后端同样会拒，这里是即时反馈）。
+  // ---------- 自定义渠道（R66 / R119 / R121） ----------
+  // 新建渠道：标识非空、不与内建同名、地址像端点、标识唯一（后端同样会拒，这里是即时反馈）。
+  // 地址放宽到「可漏协议头 / 可带 /chat/completions 尾巴」——后端 NormalizeBaseURL 会规整。
   function addCustomChannel() {
     const name = newChName.trim();
-    const base = newChURL.trim();
+    const base = stripQuotes(newChURL);
     if (!name) { setCustomErr('请填渠道标识（如 stepfun）'); return; }
     if (RESERVED_CHANNEL_NAMES.has(name.toLowerCase())) {
       setCustomErr(`渠道标识 ${name} 与内建渠道同名，会与内建运行时冲突，请换一个`); return;
     }
     if (!/^[A-Za-z0-9_-]+$/.test(name)) { setCustomErr('渠道标识只能用字母/数字/下划线/连字符'); return; }
     if (customCh.some((c) => c.name === name)) { setCustomErr(`渠道标识 ${name} 已存在`); return; }
-    if (!/^https?:\/\//i.test(base)) { setCustomErr('Base URL 需以 http:// 或 https:// 开头'); return; }
-    setCustomCh((cs) => cs.concat([{ name, base_url: base, api_key: newChKey.trim(), models: [], enabled: true }]));
-    setNewChName(''); setNewChURL(''); setNewChKey(''); setCustomErr(''); setCustomOk('');
+    if (!looksLikeEndpoint(base)) { setCustomErr('Base URL 不像合法地址（形如 api.example.com/v1 或 https://…）'); return; }
+    const added = { name, base_url: base, api_key: newChKey.trim(), models: [], enabled: true };
+    setCustomCh((cs) => cs.concat([added]));
+    setNewChName(''); setNewChURL(''); setNewChKey(''); setCustomErr('');
+    setCustomOk('已添加，正在规范化并确认端点、拉取模型列表…');
+    // 填完就自动拉一次 /models 并弹勾选列表（拉失败也不拦保存，只提示）。
+    openModelImport(added);
+  }
+
+  // probeCustomChannel 发一次探测：后端做规范化 + 候选根嗅探 + 能力解析（R121）。
+  // 脱敏态的 api_key 原样发出，由后端 resolveCustomKey 按渠道名换成真值。
+  function probeCustomChannel(ch) {
+    return api('/api/config/custom_channel_test', {
+      name: ch.name, base_url: stripQuotes(ch.base_url), api_key: ch.api_key,
+    });
+  }
+
+  // applyProbeResult 把探测结论写回 target.base_url，并给一行可行动的说明。
+  // 失败时必须把试过的地址逐条列出来：只说「连接失败」用户无从判断是 key 错还是路径错。
+  function applyProbeResult(res, target) {
+    if (!res) return { ok: false, msg: '探测没有返回结果' };
+    if (res.base_url) target.base_url = res.base_url;
+    const bits = [res.models_ok ? `模型目录 ${(res.models || []).length} 个` : '模型目录不可用',
+      res.chat_ok ? '对话端点存在' : '对话端点未确认'];
+    const tail = res.note ? `；${res.note}` : '';
+    if (res.ok) return { ok: true, msg: `✓ ${target.base_url} ｜ ${bits.join(' ｜ ')}${tail}` };
+    const tried = (res.tries || []).map((t) => `${t.url} → ${t.status || t.err || '?'}`).join('； ');
+    return {
+      ok: false,
+      msg: `✗ ${res.error || '没能确认端点'}（${bits.join(' ｜ ')}）${tail}${tried ? ` ｜ 试过：${tried}` : ''}`,
+    };
   }
 
   async function testCustomChannel(name, baseURL, key) {
     setCustomTesting(true); setCustomErr(''); setCustomOk('');
+    const probe = { name, base_url: stripQuotes(baseURL), api_key: key };
     try {
       // name + base_url + api_key 一起发：回显态可能是脱敏值，后端按 name 找回真实密钥，
       // 否则未改动过的渠道点测试会恒报 401（同 issue #117 的「探针没走同一条链路」）。
-      const res = await api('/api/config/custom_channel_test', { name, base_url: baseURL, api_key: key });
-      if (res.ok) {
-        const models = res.models || [];
-        onToast(`[${name}] 连接成功！拉取到 ${models.length} 个模型`);
-        setCustomOk(`[${name}] 连接成功，模型: ${models.slice(0, 6).join(', ')}${models.length > 6 ? '…' : ''}`);
+      const res = await probeCustomChannel(probe);
+      const r = applyProbeResult(res, probe);
+      if (r.ok) {
+        const n = (res.models || []).length;
+        onToast(`[${name}] 连接成功！确认到 ${n} 个模型`);
+        setCustomOk(`[${name}] ${r.msg}`);
+        setCustomCh((cs) => cs.map((c) => (c.name === name ? { ...c, base_url: probe.base_url } : c)));
       } else {
-        setCustomErr(`[${name}] 测试失败：${res.error}`);
+        setCustomErr(`[${name}] ${r.msg}`);
       }
     } catch (e) {
       setCustomErr(`[${name}] 测试失败：${e.message}`);
     } finally { setCustomTesting(false); }
   }
 
-  // 某个渠道的「新增模型」草稿。默认上下文 1M / 输出 64k / 三项能力全开
-  // （与 vanilla 的输入框默认值一致）；工具能力缺省 = 支持（后端 supports_tools 缺省 true）。
-  const modelDraftOf = (i) => modelDraft[i] || { id: '', ctx: '1M', out: '64k', eff: '', img: true, rsn: true, tools: true };
+  // copyCustomKey 复制某个自定义渠道的**完整** api-key（R119）：面板平时只拿到脱敏串，
+  // 复制要的是可用凭据 ⇒ 只在用户点下去时才请求一次明文。明文只进剪贴板，不进 DOM。
+  async function copyCustomKey(name) {
+    try {
+      const res = await api('/api/config/custom_channel_key', { name });
+      if (!res || !res.api_key) { onToast(`${name} 未配置 api-key`); return; }
+      await navigator.clipboard.writeText(res.api_key);
+      onToast(`已复制 ${name} 的完整 api-key`);
+    } catch (e) { onToast(`取 api-key 失败：${e.message}`); }
+  }
+
+  // openModelImport 探测一次上游并打开勾选列表。确认后的根就地回写（R121）：
+  // 用户粘的可能是漏协议头或带 /chat/completions 尾巴的地址。
+  async function openModelImport(ch) {
+    if (!ch) return;
+    const probe = { name: ch.name, base_url: stripQuotes(ch.base_url), api_key: ch.api_key };
+    setImp({ open: true, chName: ch.name, rows: [], err: '', busy: true, hint: '正在规范化并确认端点、拉取模型列表…' });
+    try {
+      const res = await probeCustomChannel(probe);
+      const r = applyProbeResult(res, probe);
+      if (res.base_url) {
+        setCustomCh((cs) => cs.map((c) => (c.name === ch.name ? { ...c, base_url: probe.base_url } : c)));
+      }
+      if (!res.ok && !(res.models && res.models.length)) {
+        const tried = (res.tries || []).map((t) => `${t.url} → ${t.status || t.err || '?'}`).join('； ');
+        setImp({
+          open: true, chName: ch.name, rows: [], busy: false,
+          err: `拉取失败：${res.error || '上游未返回模型列表'}${tried ? `（试过：${tried}）` : ''}`,
+          hint: r.msg,
+        });
+        return;
+      }
+      const have = new Set((ch.models || []).map((m) => (typeof m === 'string' ? m : m.id)));
+      const caps = res.caps && res.caps.length ? res.caps : null;
+      const list = caps || (res.models || []).filter(Boolean).map((id) => ({ id }));
+      const rows = list.filter((c) => c && c.id).map((c) => ({
+        id: c.id,
+        cap: caps ? c : null,
+        exists: have.has(c.id),
+        checked: !have.has(c.id),
+      }));
+      const noCap = rows.filter((x) => !x.cap).length;
+      const fresh = rows.filter((x) => !x.exists).length;
+      setImp({
+        open: true, chName: ch.name, rows, err: '', busy: false,
+        hint: `接入点 ${probe.base_url}${res.chat_ok ? '（对话端点已确认）' : ''}｜上游共 ${rows.length} 个模型，其中 ${fresh} 个未添加。`
+          + (noCap ? `有 ${noCap} 个上游没声明能力，导入后会标「未探测」，需要的话请手动补填。` : '')
+          + '勾选后点「导入选中」，再点「保存全部配置」生效。',
+      });
+    } catch (e) {
+      setImp((st) => (st ? { ...st, busy: false, err: `拉取失败：${e.message}` } : st));
+    }
+  }
+
+  function toggleImportRow(i) {
+    setImp((st) => (st ? { ...st, rows: st.rows.map((r, k) => (k === i ? { ...r, checked: !r.checked } : r)) } : st));
+  }
+
+  // applyImportedCaps 导入勾选的模型：已存在的跳过（不覆盖用户改动），
+  // 能力的来源标记原样带过去（未探测就是 unknown，不拿默认值冒充上游声明）。
+  function applyImportedCaps() {
+    if (!imp) return;
+    const picked = imp.rows.filter((r) => r.checked);
+    if (!picked.length) { setCustomErr('请先勾选要导入的模型'); return; }
+    setCustomCh((cs) => cs.map((c) => {
+      if (c.name !== imp.chName) return c;
+      const models = (c.models || []).slice();
+      for (const r of picked) {
+        if (models.some((m) => (typeof m === 'string' ? m : m.id) === r.id)) continue;
+        models.push(r.cap ? capToModelConfig(r.cap) : { id: r.id, cap_source: 'unknown' });
+      }
+      return { ...c, models };
+    }));
+    setImp(null);
+    setCustomOk(`已导入 ${picked.length} 个模型，点「保存全部配置」生效`);
+  }
+
+  // updateImportedCap 对「已存在」的模型只覆写能力字段（保留 ID 与用户其他改动）：
+  // 旧版导入曾把 1M/64k 之类猜测值写进配置，必须能就地把它们洗成上游真值。
+  function updateImportedCap(i) {
+    if (!imp) return;
+    const row = imp.rows[i];
+    if (!row || !row.cap) return;
+    setCustomCh((cs) => cs.map((c) => {
+      if (c.name !== imp.chName) return c;
+      return {
+        ...c,
+        models: (c.models || []).map((m) => ((typeof m === 'string' ? m : m.id) === row.id ? capToModelConfig(row.cap) : m)),
+      };
+    }));
+    setCustomOk(`已用上游能力覆写 ${row.id}，点「保存全部配置」生效`);
+  }
+
+  // 某个渠道的「新增模型」草稿。默认值一律留空/不勾（R119，推翻旧版预填 1M/64k/全能力）：
+  // 保存即会把猜测值写成「上游声明」，而 R49 禁止编造。拉不到就空着，由「导入」或用户自己填。
+  const emptyDraft = { id: '', ctx: '', out: '', eff: '', img: false, rsn: false, tools: true };
+  const modelDraftOf = (i) => modelDraft[i] || emptyDraft;
   function setModelDraftAt(i, patch) {
-    setModelDraft((d) => ({ ...d, [i]: { ...(d[i] || { id: '', ctx: '1M', out: '64k', eff: '', img: true, rsn: true, tools: true }), ...patch } }));
+    setModelDraft((d) => ({ ...d, [i]: { ...(d[i] || emptyDraft), ...patch } }));
   }
 
   // 追加模型：ID 必填且同渠道内唯一；容量走 parseTokens（k/M）；能力按勾选写入。
@@ -341,8 +543,10 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
     if (d.img) m.supports_images = true;
     if (d.rsn) m.supports_reasoning = true;
     if (!d.tools) m.supports_tools = false; // 缺省 = 支持，故只在显式关闭时落字段
+    // 面板手填 ⇒ 来源标 "user"（与「上游声明」区分，面板与费率表据此标注）。
+    m.cap_source = 'user';
     setCustomCh((cs) => cs.map((c, k) => (k === i ? { ...c, models: (c.models || []).concat([m]) } : c)));
-    setModelDraft((dd) => ({ ...dd, [i]: { id: '', ctx: '1M', out: '64k', eff: '', img: true, rsn: true, tools: true } }));
+    setModelDraft((dd) => ({ ...dd, [i]: emptyDraft }));
     setCustomErr('');
   }
 
@@ -369,8 +573,8 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
       if (name && !customCh.some((c) => c.name === name)) {
         if (RESERVED_CHANNEL_NAMES.has(name.toLowerCase())) { setCustomErr('渠道标识与内建渠道同名，请换一个'); return; }
         if (!/^[A-Za-z0-9_-]+$/.test(name)) { setCustomErr('渠道标识只能用字母/数字/下划线/连字符'); return; }
-        if (!/^https?:\/\//i.test(newChURL.trim())) { setCustomErr('Base URL 需以 http:// 或 https:// 开头'); return; }
-        list = customCh.concat([{ name, base_url: newChURL.trim(), api_key: newChKey.trim(), models: [], enabled: true }]);
+        if (!looksLikeEndpoint(stripQuotes(newChURL))) { setCustomErr('Base URL 不像合法地址（形如 api.example.com/v1 或 https://…）'); return; }
+        list = customCh.concat([{ name, base_url: stripQuotes(newChURL), api_key: newChKey.trim(), models: [], enabled: true }]);
         setCustomCh(list);
         setNewChName(''); setNewChURL(''); setNewChKey('');
       }
@@ -413,8 +617,8 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
       const body = { proxy };
       if (oczenTouched.current) {
         let k = oczenKey.trim();
-        // 值仍是脱敏形态（含 …）则视为未修改，保持服务端现值
-        if (k && k.includes(MASK_SENTINEL)) k = undefined;
+        // 值仍是脱敏形态（**** / … / ••）则视为未修改，保持服务端现值
+        if (k && isMaskedKey(k)) k = undefined;
         if (k !== undefined) body.oczen_api_key = k; // 不携带字段 = 不改动；空串 = 清除回匿名
       }
       try {
@@ -482,12 +686,23 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
     onEnsureSession();
   }
 
-  // 新增时段取「此刻」的时分，去重后升序保存（与现状一致）。
+  // 新增时段：点＋不再**直接**塞当前时刻（旧行为：想加 21:30 只能先加「现在」再删，
+  // 用户 2026-10-21 报「签到时间添加没法手动选」）。改为就地展开原生 time 输入，
+  // 选好再点确定；取消/再点＋即收起，不发请求。
   function addTime() {
-    const times = (state.checkin_times || []).slice();
+    if (timeOpen) { setTimeOpen(false); return; }
     const now = new Date();
-    const next = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-    if (!times.includes(next)) times.push(next);
+    setTimeDraft(`${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`);
+    setTimeOpen(true);
+  }
+
+  function commitTime() {
+    const v = (timeDraft || '').trim();
+    if (!v) { onToast('请先选择时间'); return; }
+    const times = (state.checkin_times || []).slice();
+    if (times.includes(v)) { onToast(`${v} 已在列表中`); setTimeOpen(false); return; }
+    times.push(v);
+    setTimeOpen(false);
     onSaveTimes(times.sort());
   }
 
@@ -605,6 +820,15 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
                 ))}
               </div>
               <button className="icon-btn" id="btnAddTime" title="增加一个签到时间" onClick={addTime}>＋</button>
+              {timeOpen ? (
+                <span className="row" style={{ gap: 6, alignItems: 'center', marginLeft: 8 }}>
+                  <input className="input" id="timePicker" type="time" value={timeDraft} style={{ width: 120 }}
+                         onChange={(e) => setTimeDraft(e.target.value)}
+                         onKeyDown={(e) => { if (e.key === 'Enter') commitTime(); if (e.key === 'Escape') setTimeOpen(false); }} />
+                  <button className="btn small primary" id="btnTimeCommit" onClick={commitTime}>确定</button>
+                  <button className="btn small" id="btnTimeCancel" onClick={() => setTimeOpen(false)}>取消</button>
+                </span>
+              ) : null}
             </div>
             <div className="hint">保活 22:00 自动 · 下次 <span id="nextCheckin">{state.next_checkin || '-'}</span></div>
             <div className="row" style={{ marginTop: 8 }}>
@@ -800,9 +1024,9 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
             <div id="customChList" className="custom-channels-list">
               {customCh.length ? customCh.map((c, i) => {
                 const isOff = c.enabled === false;
-                const keyMask = c.api_key
-                  ? (c.api_key.length > 8 ? c.api_key.slice(0, 3) + MASK_SENTINEL + c.api_key.slice(-4) : '••••••')
-                  : '无密钥';
+                // 后端已按 maskKey 脱敏（长头 + **** + 短尾），前端**不得**再切一遍：
+                // R121 的「双手脱敏」会把 `sk-re****1234` 切成 `sk-****1234`，失去辨识度。
+                const keyMask = c.api_key || '无密钥';
                 const models = c.models || [];
                 const d = modelDraftOf(i);
                 return (
@@ -811,12 +1035,21 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
                       <span className="badge custom">{c.name}</span>
                       <span className="custom-ch-url">{c.base_url}</span>
                       {/* 只显示脱敏形态，**不放 title 明文**：面板本就只应拿到脱敏值
-                          （/api/state 已脱敏），万一拿到明文也不该再往 DOM 里写一份。 */}
-                      <span className="hint">[{keyMask}]</span>
+                          （/api/state 已脱敏），万一拿到明文也不该再往 DOM 里写一份。
+                          点一下才向后端取一次明文进剪贴板（R119）。 */}
+                      <span className="hint" role="button" tabIndex={0} style={{ cursor: 'pointer' }}
+                            title="点击复制完整 api-key（此时才向后端取明文，不随列表批量下发）"
+                            onClick={() => copyCustomKey(c.name)}
+                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); copyCustomKey(c.name); } }}>
+                        [{keyMask}]
+                      </span>
                       <span className={`tag ${isOff ? 'neutral' : 'ok'}`}>{isOff ? '已禁用' : '已启用'}</span>
                       <span className="custom-ch-actions">
-                        <button className="btn small" disabled={customTesting}
-                                data-test-custom={i}
+                        <button className="btn small" data-import-custom={i} disabled={customTesting}
+                                title="探测上游 /models，勾选导入模型（拿不到能力就标「未探测」，不编造默认值）"
+                                onClick={() => openModelImport(c)}>导入模型</button>
+                        <button className="btn small" data-test-custom={i}
+                                disabled={customTesting}
                                 onClick={() => testCustomChannel(c.name, c.base_url, c.api_key)}>测试连通</button>
                         <button className="btn small" data-toggle-custom={i}
                                 onClick={() => setCustomCh((cs) => cs.map((x, k) => (k === i ? { ...x, enabled: x.enabled === false } : x)))}>
@@ -859,7 +1092,10 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
                               if (!obj || m.supports_tools !== false) caps.push(<span key="t" className="tag">工具</span>);
                               return (
                                 <tr key={mid}>
-                                  <td><code>{mid}</code></td>
+                                  <td>
+                                    <code>{mid}</code>
+                                    {obj ? <CapSourceTag src={m.cap_source} style={{ marginLeft: 6 }} /> : null}
+                                  </td>
                                   <td>{ctx}</td>
                                   <td>{out}</td>
                                   <td>{hasRsn
@@ -945,6 +1181,42 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
       </div>
       {msOpen ? <ModelSearch fees={msFees} onClose={() => setMsOpen(false)}
           onCopy={async (id) => { try { await navigator.clipboard.writeText(id); onToast(`已复制 ${id}`); } catch { onToast('复制失败，请手动选择'); } }} /> : null}
+      {imp && imp.open ? (
+        <div className="overlay" id="customImportOverlay"
+             onClick={(e) => { if (e.target.id === 'customImportOverlay') setImp(null); }}>
+          <div className="modal" style={{ width: '780px', maxWidth: '94vw' }}>
+            <div className="modal-title">导入模型 · {imp.chName}</div>
+            <div className="hint" id="customImportHint" style={{ marginBottom: 8 }}>{imp.hint}</div>
+            {imp.err ? <div className="hint" id="customImportErr" style={{ color: 'var(--danger)', marginBottom: 8 }}>{imp.err}</div> : null}
+            <div className="import-list" id="customImportList" style={{ maxHeight: 360, overflowY: 'auto' }}>
+              {imp.busy ? <div className="hint">加载中…</div>
+                : imp.rows.length === 0 ? <div className="hint">（没有可取回的模型）</div>
+                  : imp.rows.map((r, i) => {
+                    const bits = capSummary(r.cap);
+                    return (
+                      <div key={r.id} className="import-row" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0' }}>
+                        <input type="checkbox" checked={r.checked} disabled={r.exists} onChange={() => toggleImportRow(i)} />
+                        <code style={{ minWidth: 220 }}>{r.id}</code>
+                        {r.cap && bits.length
+                          ? <span className="cm-meta cap-api" title="上游 /models 声明的能力（未列出的字段上游没给）">{bits.join('·')}</span>
+                          : <CapSourceTag src="unknown" />}
+                        {r.exists ? (
+                          <button className="btn small" data-apply-cap={i} disabled={!r.cap}
+                                  title={r.cap ? '用本次拉到的上游能力覆写已存模型（不动模型 ID）' : '本次未拉到该模型的能力信息'}
+                                  onClick={() => updateImportedCap(i)}>更新能力</button>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+            </div>
+            <div className="modal-actions">
+              <button className="btn small" onClick={() => setImp(null)}>关闭</button>
+              <button className="btn small primary" id="btnImportApply" disabled={imp.busy || !imp.rows.length}
+                      onClick={applyImportedCaps}>导入选中</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

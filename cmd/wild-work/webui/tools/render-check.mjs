@@ -96,10 +96,12 @@ const STATE = {
   // ② supports_tools 缺省 = 支持（未声明不得画成"无工具"）；③ supports_tools:false 要如实标出。
   reasoning_efforts: { '*': 'medium', 'workbuddyai/deepseek-v4.1-flash': 'high' },
   custom_channels: [{
-    name: 'stepfun', base_url: 'https://api.stepfun.com/step_plan/v1', api_key: 'sk-test-1234567890', enabled: true,
+    // api_key 用**后端下发的脱敏形态**（R121：长头 12 + **** + 尾 4）：
+    // 面板不得再切一遍（双手脱敏会把脱敏串切坏），也不得把明文写进 DOM。
+    name: 'stepfun', base_url: 'https://api.stepfun.com/step_plan/v1', api_key: 'sk-test-1234****7890', enabled: true,
     models: [
-      { id: 'step-3', context_window: 1000000, max_tokens: 64000, supports_images: true, supports_reasoning: true, reasoning_efforts: ['low', 'high'] },
-      { id: 'step-2-mini', context_window: 32000, max_tokens: 8000, supports_tools: false },
+      { id: 'step-3', context_window: 1000000, max_tokens: 64000, supports_images: true, supports_reasoning: true, reasoning_efforts: ['low', 'high'], cap_source: 'api' },
+      { id: 'step-2-mini', context_window: 32000, max_tokens: 8000, supports_tools: false, cap_source: 'user' },
     ],
   }],
   fees: {
@@ -226,6 +228,27 @@ try {
     React.createElement(Fees, { fees: STATE.fees, refreshBusy: false, onRefresh: noop, onClose: noop }));
   check('Fees 弹层', feesHtml, ['btnRefreshFees', 'btnFeesClose', 'btnModelSearch']);
 
+  // 4b) 费率页的自定义渠道接入点（R119）：接入点 + 脱敏 key 可见，明文不得出现。
+  //     未探测能力的行，tooltip 必须说「未探测」而不是画成 0 或默认值。
+  const feesCustom = {
+    ...STATE.fees,
+    channels: [{
+      channel: 'stepfun', base_url: 'https://api.stepfun.com/v1', api_key_masked: 'sk-test-1234****7890',
+      models: [{ model: 'step-3', id: 'stepfun/step-3', priced: false, rate: 0, free: false, has_context: false, cap_source: 'unknown' }],
+    }],
+  };
+  const feesCustomHtml = renderToStaticMarkup(React.createElement(Fees, {
+    fees: feesCustom, state: STATE, refreshBusy: false, onRefresh: noop, onCopy: noop, onToast: noop, onClose: noop,
+  }));
+  const v4b = [];
+  if (!/class="fee-access"/.test(feesCustomHtml)) v4b.push('自定义渠道的接入点一行没渲染');
+  if (!/sk-test-1234\*\*\*\*7890/.test(feesCustomHtml)) v4b.push('费率页的脱敏 key 没渲染');
+  if (/sk-test-1234567890/.test(feesCustomHtml)) v4b.push('费率页出现明文 key（必须只给脱敏串）');
+  if (!/尚未探测上游/.test(feesCustomHtml)) v4b.push('未探测能力的行应按「未探测」措辞，不得画成 0/默认值');
+  results.push({ name: '费率页自定义渠道接入点', visible: visibleControls(feesCustomHtml).length, missing: v4b });
+  if (v4b.length) console.error(`✗ 费率页自定义渠道接入点：${v4b.join('；')}`);
+  else console.log('✓ 费率页显示接入点与脱敏 key、不泄漏明文，未探测能力措辞正确');
+
   // 5) 复制给客户端的「完整模型 ID」的唯一真源是费率行的 `id`（Go 侧 provider.PublicModelID）。
   //    R59 起 Cline 直通上游命名空间：对外就是 cline-free/grok-4，不再拼成 cline/cline-free/...；
   //    runtimeForModel 用 SplitN(model,"/",2) 切第一个斜杠，故普通渠道仍是 <渠道>/<模型>。
@@ -290,11 +313,15 @@ try {
   has('value="medium"') || v8.push('全局默认档位没回显到 effGlobalInput（`*` 必须单独走全局默认行）');
   has('workbuddyai/deepseek-v4.1-flash') || v8.push('模型档位映射行没渲染（应显示 workbuddyai/deepseek-v4.1-flash）');
   has('data-test-custom="0"') || v8.push('自定义渠道的「测试连通」按钮没渲染');
+  has('data-import-custom="0"') || v8.push('自定义渠道的「导入模型」按钮没渲染（R119）');
+  has('cap-api') || v8.push('能力来源「上游」标签没渲染（R119）');
+  has('cap-user') || v8.push('能力来源「手填」标签没渲染（R119）');
   // 自定义渠道卡片：标识 / 地址 / 脱敏密钥（不得明文回显完整 key）
   has('stepfun') || v8.push('自定义渠道标识没渲染');
   has('https://api.stepfun.com/step_plan/v1') || v8.push('自定义渠道 Base URL 没渲染');
   !has('sk-test-1234567890') || v8.push('自定义渠道的 api_key 明文进了面板 HTML（必须脱敏回显）');
-  has('sk-…7890') || v8.push('脱敏密钥形态应为 sk-…7890（保留首 3 末 4 供识别「未改动」）');
+  has('sk-test-1234****7890') || v8.push('脱敏密钥应原样显示后端下发的串（长头 12 + **** + 尾 4）');
+  !has('sk-****7890') || v8.push('前端不得二次脱敏（会把长头切掉，R121）');
   // 容量 k/M 单位：1M→"1M"、64k→"64k"（不是 1000000 / 64000）
   has('>1M<') || v8.push('上下文 1000000 应格式化为 1M');
   has('>64k<') || v8.push('最大输出 64000 应格式化为 64k');

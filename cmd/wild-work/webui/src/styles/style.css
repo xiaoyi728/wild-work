@@ -864,3 +864,14 @@ html[data-theme="paper"] .shiny {
 .custom-ch-name { width: 130px; flex-shrink: 0; }
 .custom-ch-key { width: 150px; flex-shrink: 0; }
 .custom-ch-add-row #btnCustomSave { margin-left: auto; }
+
+/* ---------- R119/R121：能力来源标签、自定义渠道接入点、模型导入 ---------- */
+.cm-meta.cap-api { color: var(--ok); }
+.cm-meta.cap-measured { color: var(--warn); }
+.cm-meta.cap-user { color: var(--accent); }
+.cm-meta.cap-unknown { color: var(--muted); }
+.fee-access { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 8px; margin-bottom: 8px; background: var(--code-bg); border: 1px solid var(--hairline); border-radius: 10px; font-size: 12px; }
+.fee-access-k { color: var(--muted); flex-shrink: 0; }
+.fee-access-v { font-family: ui-monospace, "SF Mono", monospace; overflow-wrap: anywhere; cursor: pointer; }
+.fee-access-v:hover { color: var(--accent); text-decoration: underline dotted; }
+.import-row:hover { background: var(--code-bg); border-radius: 8px; }

@@ -113,6 +113,13 @@ func Classify(status int, body string) ErrKind {
 				return ErrClient // BadParams：不罚号但仍轮转
 			}
 		}
+		// 会话头族缺失（11128 "conversation id missing"）是上游**按账号灰度**的渠道校验，
+		// 属账号级问题（补头后仍撞 ⇒ 该号被灰度到别的口径）：软冷却 + 换号。必须排在
+		// contentBlocked 之前——同一个 11128 的另一形态 "Illegal API invocation from an
+		// unapproved channel" 才是请求级指纹问题（改提示词就能过）。R116。
+		if strings.Contains(lower, "conversation id missing") {
+			return ErrAccountFault
+		}
 		for _, m := range contentBlockedMarkers {
 			if strings.Contains(lower, m) {
 				return ErrContentBlocked
@@ -310,7 +317,8 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	ChatHeaders(req, a)
+	conv, turn := conversationAnchors(body)
+	ChatHeaders(req, a, conv, turn)
 	req, cancel := idle.WithCancel(req)
 	hc := c.HTTP
 	if c.StreamHTTP != nil {

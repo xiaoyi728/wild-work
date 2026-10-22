@@ -1438,3 +1438,64 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   `scrollWidth==clientWidth`（438）无溢出、仅「今日到期」行判临期、标签完整在格内。
   生产 15:06 重启（PID 1276150），首页 `index-DXBSQ2Pa.js`，日志无异常。
 - **未做**：版本常量仍 **2.9.3**（未 bump、未发版）。
+
+### L21 2026-10-22 对齐上游 v2.9.5（按需摘取，仍不做新渠道）
+
+- **范围裁定（所有者「全部修复，但排除新增渠道」）**：只修已有渠道与面板，**不做**上游 v2.9.5 的新渠道
+  `internal/officeace/**`（OfficeAce，按日消耗查询）。唯一涉及已有渠道却被排除的是
+  `internal/login_loomy/**`（#173 Loomy 短信登录）——本地 Loomy 是纯导入型，补它等于**新增一套登录编排**
+  （非修复），如需要须单独开一轮。`scripts/ui-static-check.mjs` 照 L11 不采纳（孤儿脚本，驱动冻结 vanilla）。
+- **① DSH Web GUI 脱敏（R115 续）**：`internal/sanitize` 与 `internal/upstream` 两份表各加
+  `DeepSeek Harness Web GUI` → `DSH Web GUI`（上游按 system 开头**整段 221 字符逐字前缀**匹配，
+  缩写为 DSH 即破坏逐字串，实测 200）。补 `sanitize_test.go` / `sanitize_parity_test.go`，
+  更新 `upstream/sanitize_test.go` 的逐字节快照（8→9 项、6→7 对）。
+- **② WorkBuddy 双区身份链（R116/R117）**：新增 `internal/upstream/convheaders.go` 与
+  `internal/workbuddyai/convheaders.go`（两区各持一份，**不共享**）；会话头三层语义——
+  `X-Conversation-ID` 会话级（首条 user 文本哈希 + uid）、`X-Conversation-Request-ID` 轮级
+  （末条 user，重试/换号复用）、`X-Conversation-Message-ID` 调用级（每请求新值）；
+  国内版补齐 `X-Conversation-ID`。身份串整体对齐官方桌面 5.8.3：
+  UA `WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0`、`X-IDE-Version=5.8.3`、`X-Product=SaaS`、
+  `X-Private-Data=true`、`X-Agent-Intent=craft`，**删除自造的 `X-Machine-ID`/`X-Session-ID`**；
+  登录链 UA 同步（`internal/login/login.go`）。`Classify` 新增 `conversation id missing` → `ErrAccountFault`
+  （排在 contentBlocked 之前；另一形态 `unapproved channel` 仍是内容拦截）。锚点在 `PrepareBody` **之前**
+  从原始 body 抽取。
+- **③ custom 可用化（R119/R121，后端 + React）**：新增 `custom/{endpoint,probe,caps}.go`
+  （BaseURL 规范化：补协议/丢 query/循环剥 `/chat/completions` 尾巴；`Discover` **只发 GET**、
+  有界嗅探、401/403 与 HTML 兑底页不算确认；能力只认上游显式声明）；`ModelConfig.CapSource`
+  三态（api/user/unknown）+ `provider.ModelInfo.ContextFromUser`；`/api/config/custom_channel_test`
+  改走 `Discover` 并回 `caps/base_url/adjusted/renormed/models_ok/chat_ok/tries/note`；
+  `custom_channel_key` 按需下发单条明文（日志只记渠道名）；`maskKey` 改**长头 12 + `****` + 尾 4**
+  （短 key 全遮、可见量不超原文一半），`isMaskedKey` 同时认 `****`/`…`/`••`（升级瞬间旧脱敏串不得当真值落盘）。
+  费率表新增 `base_url`/`api_key_masked`/`cap_source`，`staticModelFallback` 对 custom 例外
+  （其 `FetchModels` 不发网络，可安全取回）。
+  **React 侧**：`Settings.jsx` 加「导入模型」（勾选 + 已存在可「更新能力」）、`cap_source` 标签、
+  新增渠道自动探测、前端**不再二次脱敏**（`c.api_key` 已是后端脱敏串）；模型默认值**留空**
+  （推翻旧版预填 1M/64k/全能力）；`Fees.jsx` 加接入点一行 + 点击复制 key（走新端点，明文不进 DOM），
+  `hand_measured` 布尔改为 `cap_source` 四态文案。
+- **④ 小浣熊等响应头上限（R118）**：`raccoon.NewWithTimeout` 统一算等响应头（≥180s，总超时仍取
+  `upstream.timeout_seconds`），`main.go` 改用它；补 `raccoon/timeout_test.go`（含 180s 硬下限护栏）。
+  保留本地 `catalogModel` 的 `visible`/`billing_category`/`ability_level` 字段。
+- **⑤ 面板签到时间**：`Settings.jsx` 点「＋」不再直接塞当前时刻，改为就地 `input[type=time]` + 确定/取消
+  （取消不发请求），与上游 `06c8b31` 的行为对齐（React 版实现，不改冻结的 vanilla）。
+- **⑥ 只补测试（行为早已对齐）**：`qoder`/`qodercom` 的 `envelope_notice_test.go`、
+  `qodercn/queue_frame_test.go`（R108 信封/排队帧）、`server/fallback_dimension_test.go`（降级记账维度）。
+  四者均一次通过，说明本地行为与上游一致，只是缺负向锁。
+- **保留的本地偏离（不得被下轮融合冲掉）**：`custom.ChannelConfig.Enabled`（上游 R83 已删，本地保留并
+  `IsEnabled()` 供 main 装配过滤）、`ledger` 的 `prevMonthCutoff`/`monthSegments`、`oczen` 五道闸门判据、
+  `app.go` 的 `Version = 2.9.3`（**未跟随上游 2.9.5**）、`ownAccounts`/`runtimesMu`、`App.closed`。
+  其中 `App.closed` 是**本轮新增的本地修复**：`FeesInfo` 触发的后台 `RefreshPricing` 可能在 `Close()`
+  之后写 `pricing-cache.json`（实测会让 `t.TempDir` 清理偶发 `directory not empty`），
+  故 `Close` 置位、`savePricingCache` 关闭后不落盘。
+- **口径更新（现查现写）**：面板 `/api/*` 路由 **42 → 44**（新增 `POST /api/config/custom_channel_key`，
+  另有既有端点计数变化），前端引用 43 条 + 白名单 2 条；`_test.go` **约 208 个**；
+  `go test ./...` 实测 **35 个包 ok、0 FAIL**；render-check 场景 **10 → 11**（新增费率页接入点/脱敏断言）；
+  版本常量仍 **2.9.3**（未 bump、未发版）。
+- **验证**：`go build ./... && go vet ./... && go test ./...` 全绿；`npm run build` + `npm run check`（11 场景）绿；
+  三项负向验证均实测变红——① 摘掉 sanitize 的 Web GUI 重写 → `TestDSHFullPromptSanitizedViaMessages` 失败；
+  ② `conversationID` 改为每次随机 → 会话 id 稳定性 3 条失败；③ `maskKey` 退回旧「首5…尾4」→ 长前缀用例失败。
+  `dist/wild-work.exe` 已重建（见下），**未重建 `dist/wild-work-linux`、未重启生产**（运行中会 ETXTBSY，
+  重启需所有者点头，走 L7 备份流程）。
+- **未做/待办（如实披露）**：① WorkBuddy 双区身份链**尚未实发对话验证**（改的是真实上游请求头，
+  单测只能证明形态；实发各 1 次低成本对话需所有者点头）；② 生产仍在跑 v2.9.4 时代的二进制；
+  ③ 上游 `cmd/wild-work/web/**` 的签到时间选择器只在本仓 React 面板等价实现，冻结基准不动；
+  ④ officeace 与 login_loomy 未采纳（见范围裁定）。

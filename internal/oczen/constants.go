@@ -17,6 +17,11 @@
 //     另有 User-Agent 须含 `opencode/<version>` 记号（`dsh/…` 实测被拒）。
 //   - 匿名通道未观测到请求数配额（1900+ 次、峰值 230 req/min、64 并发均无 429），
 //     唯一约束是并发升高时的延迟背压（排队不拒绝）。
+//   - **2026-10-25 起上游还校验会话时间戳**：会话 id 解码出的时间超窗直接回
+//     429 FreeUsageLimitError（与真实配额耗尽同一报文，极难排障）。旧实现从哈希
+//     直派生时间戳、落在 1970 年代 ⇒ 必被拒。现锚定「今日 UTC 零点 − 哈希偏移
+//     (≤30 天)」，同一信号一天内稳定（保住 prompt cache 亲和）。
+//   - 两条车道基址不同（2026-10-14 上游拆分）：匿名 → /inference，自备 sk- Key → /zen。
 package oczen
 
 import (
@@ -29,11 +34,15 @@ const (
 	// Kind 渠道标识，同时是模型名前缀。
 	Kind = provider.Oczen
 
-	// DefaultBase 上游 OpenCode Zen 免费档的基址。
-	// 2026-10-15 起对话必须在推理 API 前缀下：/zen/v1/chat/completions 即使请求与
+	// DefaultBase 键控车道基址（用户自备 sk-… key，OpenAI 兼容面）。
+	// 凭据为空（匿名 public）时不用本常量，见 AnonymousBase。
+	DefaultBase = "https://opencode.ai/zen/v1"
+
+	// AnonymousBase 匿名免费档基址。
+	// 2026-10-15 起匿名对话必须在推理 API 前缀下：/zen/v1/chat/completions 即使请求与
 	// 官方客户端逐字相同也回 403 FreeTierError。模型目录两个前缀都仍可用
-	// （实测 /zen/v1/models 与 /inference/v1/models 均 200 / 86 条），故统一走后者。
-	DefaultBase = "https://opencode.ai/inference/v1"
+	// （实测 /zen/v1/models 与 /inference/v1/models 均 200 / 86 条），故匿名统一走后者。
+	AnonymousBase = "https://opencode.ai/inference/v1"
 
 	// AnonymousKey 匿名免费凭证：字面量 "public"，无需注册。
 	// 来源：opencode2api gateway.go anonymousZenKey。

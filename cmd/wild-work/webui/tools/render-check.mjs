@@ -314,6 +314,7 @@ try {
   has('workbuddyai/deepseek-v4.1-flash') || v8.push('模型档位映射行没渲染（应显示 workbuddyai/deepseek-v4.1-flash）');
   has('data-test-custom="0"') || v8.push('自定义渠道的「测试连通」按钮没渲染');
   has('data-import-custom="0"') || v8.push('自定义渠道的「导入模型」按钮没渲染（R119）');
+  has('data-rename-custom="0"') || v8.push('自定义渠道的「改名」入口没渲染（R122）');
   has('cap-api') || v8.push('能力来源「上游」标签没渲染（R119）');
   has('cap-user') || v8.push('能力来源「手填」标签没渲染（R119）');
   // 自定义渠道卡片：标识 / 地址 / 脱敏密钥（不得明文回显完整 key）
@@ -333,6 +334,27 @@ try {
   results.push({ name: '思考强度 + 自定义渠道', visible: visibleControls(settingsHtml).length, missing: v8 });
   if (v8.length) console.error(`✗ 思考强度 + 自定义渠道：${v8.join('；')}`);
   else console.log('✓ 思考强度全局默认/映射行、自定义渠道卡片（脱敏 key、k/M 单位、工具能力缺省、档位列表）均通过');
+
+  // 9) 降级链别名（R129）：带 name 的规则必须渲染「行内别名输入 + 复制入口」，
+  //    并且底部草稿也有别名输入（添加新规则时可直接起名）。
+  const STATE_ALIAS = {
+    ...STATE,
+    model_fallback: [{ name: 'gpt', from: 'workbuddy/deepseek-v4.1-flash', to: ['qodercn/glm-5.3'] }],
+  };
+  const aliasHtml = renderToStaticMarkup(
+    React.createElement(Settings, {
+      state: STATE_ALIAS, onClose: noop, onSaved: noop, onToast: noop, onEnsureSession: async () => true,
+      setAuthSession: noop, onLogout: noop, onShowLogin: noop, onSaveTimes: async () => {},
+    }));
+  const v9 = [];
+  /class="input fb-alias"/.test(aliasHtml) || v9.push('行内别名输入框没渲染（规则带 name 时须可编辑）');
+  /value="gpt"/.test(aliasHtml) || v9.push('别名没回显到输入框');
+  /class="fb-alias-copy"/.test(aliasHtml) || v9.push('别名复制入口没渲染');
+  /id="fbNameInput"/.test(aliasHtml) || v9.push('底部草稿的别名输入没渲染（新增规则时无法起名）');
+  /workbuddy\/deepseek-v4\.1-flash/.test(aliasHtml) || v9.push('主模型没渲染');
+  results.push({ name: '降级链别名', visible: visibleControls(aliasHtml).length, missing: v9 });
+  if (v9.length) console.error(`✗ 降级链别名：${v9.join('；')}`);
+  else console.log('✓ 降级链别名（行内别名输入、回显、复制、草稿别名输入）均通过');
 } finally {
   await server.close();
 }

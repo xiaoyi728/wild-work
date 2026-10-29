@@ -157,7 +157,9 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
   const [bodyLog, setBodyLog] = useState(!!state.body_log);
   const [fbFrom, setFbFrom] = useState('');
   const [fbTo, setFbTo] = useState('');
+  const [fbName, setFbName] = useState('');
   const [fbErr, setFbErr] = useState('');
+  const [fbWarns, setFbWarns] = useState([]);
   const [oczenKey, setOczenKey] = useState(state.oczen_api_key || ''); // 回显脱敏值
   const oczenTouched = useRef(false);
   // 思考强度注入编辑副本（R63）：`*` 全局默认行单独存，其余为模型→档位映射。
@@ -175,6 +177,12 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
   const [customErr, setCustomErr] = useState('');
   const [customOk, setCustomOk] = useState('');
   const [customTesting, setCustomTesting] = useState(false);
+  // 渠道标识改名（R122）：面板必须**显式提交** renames——后端只比对新旧两张表
+  // 无法区分「改名」与「删掉一个 + 新增一个」。pendingRenames 里的 old 用最初的名字
+  // （连续改名 A→B→C 会折叠成 {new:C, old:A}，密钥找回才能按旧名查到）。
+  const [pendingRenames, setPendingRenames] = useState([]);
+  const [renameIdx, setRenameIdx] = useState(-1);
+  const [renameVal, setRenameVal] = useState('');
   // 模型导入弹层（R119）：探测一次上游 /models，把 id + 尽力解析出的能力列出来勾选。
   // null = 关闭；打开后由后端 Discover 填 rows，拉不到能力就标「未探测」。
   const [imp, setImp] = useState(null);
@@ -259,17 +267,34 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
   function collectFbDraft(base, requireDraft) {
     const from = fbFrom.trim();
     const to = fbTo.trim();
+    const name = fbName.trim();
     if (!from && !to) {
       return requireDraft ? [null, '先在输入框填主模型与备胎，再点「添加规则」'] : [base, ''];
     }
     if (!from || !to) return [null, '主模型与备胎需同时填写（或清空两框）'];
     if (!/^[^/]+\/.+/.test(from)) return [null, `主模型 ${from} 需为 channel/model 形式`];
     if (base.some((r) => r.from === from)) return [null, `主模型 ${from} 已有规则（每个主模型只允许一条）`];
+    const nameErr = validateAliasName(name, base, -1);
+    if (nameErr) return [null, nameErr];
     const [tos, err] = parseModelList(to);
     if (err) return [null, err];
     const backups = tos.filter((t) => t !== from);
     if (!backups.length) return [null, '备胎不能与主模型相同'];
-    return [base.concat([{ from, to: backups }]), ''];
+    const rule = { from, to: backups };
+    if (name) rule.name = name;
+    return [base.concat([rule]), ''];
+  }
+
+  // 别名（R129）形态校验：裸名（不含 /）、不含空白/逗号/*、不得与其它规则重名。
+  // 与后端 validateAliases 同口径（后端仍是唯一真相，这里只为即时反馈）。
+  function validateAliasName(name, rules, skipIdx) {
+    if (!name) return '';
+    if (name.includes('/')) return `别名 ${name} 不能含 /（别名是裸名）`;
+    if (/[\s,*\u3000\uff0c]/.test(name)) return `别名 ${name} 不能含空白、逗号或 *`;
+    if (rules.some((r, k) => k !== skipIdx && (r.name || '').trim() === name)) {
+      return `别名 ${name} 与其它规则重名（大小写敏感）`;
+    }
+    return '';
   }
 
   // 「添加规则」：主模型须为 channel/model 全路径且全局唯一（与后端 SetModelFallback 同源校验）。
@@ -277,7 +302,7 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
     const [rules, err] = collectFbDraft(fbRules, true);
     if (err) { setFbErr(err); return; }
     setFbRules(rules);
-    setFbFrom(''); setFbTo(''); setFbErr('');
+    setFbFrom(''); setFbTo(''); setFbName(''); setFbErr('');
   }
 
   // 行内追加备胎：同一 API 同时服务「＋」按钮与输入框回车两条路径。
@@ -297,13 +322,32 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
     const [rules, fbDraftErr] = collectFbDraft(fbRules, false);
     if (fbDraftErr) { setFbErr(fbDraftErr); return; }
     try {
-      await api('/api/config/model_fallback', { rules });
+      const resp = await api('/api/config/model_fallback', { rules });
       setFbRules(rules);
-      setFbFrom(''); setFbTo('');
+      setFbFrom(''); setFbTo(''); setFbName('');
       setFbErr('');
-      onToast('降级链已保存（热生效）');
+      const warns = (resp && resp.warnings) || [];
+      setFbWarns(warns);
+      onToast(warns.length ? `降级链已保存（${warns.length} 条提示）` : '降级链已保存（热生效）');
       onSaved();
     } catch (e) { setFbErr(e.message); }
+  }
+
+  // 行内改别名（R129）：形态/重名校验失败回滚输入框（非受控 + key=r.from，
+  // 不会因改名重挂载，故必须手动拨回）；清空 = 删除别名。
+  function editFbName(i, raw, el) {
+    const next = String(raw || '').trim();
+    const cur = (fbRules[i].name || '').trim();
+    if (next === cur) { if (el) el.value = cur; return; }
+    const err = validateAliasName(next, fbRules, i);
+    if (err) { setFbErr(err); if (el) el.value = cur; return; }
+    setFbRules((rs) => rs.map((r, k) => {
+      if (k !== i) return r;
+      const n = { ...r };
+      if (next) n.name = next; else delete n.name;
+      return n;
+    }));
+    setFbErr('');
   }
 
   // 行内改主模型 ID（上游 eb0ccec9）：形态校验 + 主模型唯一性校验，失败回滚输入框；
@@ -569,7 +613,7 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
     try {
       // 自动收录「填了输入行但没点＋新增渠道」的那一条（否则会静默保存空列表）。
       let list = customCh;
-      const name = newChName.trim();
+      const name = newChName.trim().toLowerCase(); // 标识统一小写（与后端 custom.Validate 同口径）
       if (name && !customCh.some((c) => c.name === name)) {
         if (RESERVED_CHANNEL_NAMES.has(name.toLowerCase())) { setCustomErr('渠道标识与内建渠道同名，请换一个'); return; }
         if (!/^[A-Za-z0-9_-]+$/.test(name)) { setCustomErr('渠道标识只能用字母/数字/下划线/连字符'); return; }
@@ -578,12 +622,52 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
         setCustomCh(list);
         setNewChName(''); setNewChURL(''); setNewChKey('');
       }
-      await api('/api/config/custom_channels', { channels: list });
+      const resp = await api('/api/config/custom_channels', { channels: list, renames: pendingRenames });
+      setPendingRenames([]);
       setCustomErr('');
       setCustomOk('渠道及模型配置已成功保存并立即生效');
-      onToast('自定义渠道已保存（热生效）');
+      const renamed = (resp && resp.renamed) || 0;
+      onToast(renamed ? `自定义渠道已保存（改名 ${renamed} 个，热生效）` : '自定义渠道已保存（热生效）');
       onSaved();
     } catch (e) { setCustomErr(e.message); setCustomOk(''); }
+  }
+
+  // 开始/提交渠道标识改名。改名是**不可逆的级联**（模型前缀、引用配置、状态文件），
+  // 故提交前如实列出代价；取消不改任何状态。
+  function startRename(i) {
+    setRenameIdx(i);
+    setRenameVal(customCh[i].name.toLowerCase());
+    setCustomErr(''); setCustomOk('');
+  }
+
+  function commitRename(i) {
+    const oldName = customCh[i].name;
+    const next = renameVal.trim().toLowerCase(); // 标识唯一正规形态是小写
+    if (!next) { setRenameIdx(-1); setRenameVal(''); return; }
+    if (next === oldName) { setRenameIdx(-1); setRenameVal(''); setCustomOk('标识统一小写；仅大小写不同等同未改名'); return; }
+    if (RESERVED_CHANNEL_NAMES.has(next.toLowerCase())) { setCustomErr(`渠道标识 ${next} 与内建渠道同名`); return; }
+    if (!/^[A-Za-z0-9_-]+$/.test(next)) { setCustomErr('渠道标识只能用字母/数字/下划线/连字符'); return; }
+    if (customCh.some((c, k) => k !== i && c.name === next)) { setCustomErr(`渠道标识 ${next} 已存在`); return; }
+    const ok = window.confirm(
+      `确定把渠道标识「${oldName}」改为「${next}」？\n\n`
+      + `· 旧前缀模型立即不可用：${oldName}/xxx 会返回 400，客户端需改配置\n`
+      + `· 模型映射 / 默认渠道 / 降级链 / 思考强度里的 ${oldName}/… 引用会一并改写\n`
+      + `· 历史用量/积分流水仍记在旧名下（不改写账本）\n`
+      + `· 旧状态文件会留档为 .old（账号需要重新登录一次）`);
+    if (!ok) return;
+    setCustomCh((cs) => cs.map((c, k) => (k === i ? { ...c, name: next } : c)));
+    setPendingRenames((rs) => {
+      // 连续改名折叠：A→B 后再 B→C，最终提交 {new:C, old:A}
+      const out = rs.map((r) => (r.new === oldName ? { ...r, new: next } : r));
+      if (!out.some((r) => r.new === next && r.old === oldName)) out.push({ new: next, old: oldName });
+      const seen = new Map();
+      for (const r of out) if (!seen.has(r.new)) seen.set(r.new, r);
+      return [...seen.values()];
+    });
+    setRenameIdx(-1);
+    setRenameVal('');
+    setCustomErr('');
+    setCustomOk('改名将在点「保存」后生效');
   }
 
   async function saveSettings() {
@@ -653,10 +737,11 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
       if (fbConfErr) { setFbErr(fbConfErr); onToast(fbConfErr); return; }
       if (JSON.stringify(fbFinal) !== JSON.stringify(state.model_fallback || [])) {
         try {
-          await api('/api/config/model_fallback', { rules: fbFinal });
+          const fbResp = await api('/api/config/model_fallback', { rules: fbFinal });
           setFbRules(fbFinal);
-          setFbFrom(''); setFbTo('');
+          setFbFrom(''); setFbTo(''); setFbName('');
           setFbErr('');
+          setFbWarns((fbResp && fbResp.warnings) || []);
         } catch (e) { setFbErr(e.message); onToast(e.message); return; }
       }
 
@@ -904,6 +989,8 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
               主模型在渠道全部账号上限流冷却（503 提示解冻时间）时，按顺序找第一个可用的备胎模型顶上，
               响应头 <span className="mono-inline">X-Model-Fallback</span> 标注实际备胎；原模型解冻后自动切回，不粘滞。
               模型 ID 用 <span className="mono-inline">channel/model</span> 全路径（如 workbuddyai/deepseek-v4.1-flash），备胎可跨渠道。
+              每条规则可选一个<b>别名</b>（裸名，不含 /、空白、逗号、*）：客户端直接请求别名等同请求主模型，
+              别名只在入口解析、不参与备胎链、也不会在用量榜单独成行。
               填完两个输入框后点「添加规则」或任一保存按钮都会提交；右下角「保存」也会一并保存本区块。
             </div>
             <div id="fbList" className="proxy-list">
@@ -912,6 +999,18 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
                   {/* 主模型改成行内可编辑输入框（上游 eb0ccec9）：左列上下两行=主模型 + 备胎添加框，
                       右侧 → 备胎 chips。主模型 ID 超长时在输入框内横向滚动，不再遮挡箭头与档位。 */}
                   <span className="fb-from-col">
+                    <span className="fb-alias-row">
+                      <input className="input fb-alias" spellCheck="false"
+                             title="别名（可选，R129）：客户端可直接请求这个名字，等同主模型；不含 /、空白、逗号、*"
+                             placeholder="别名（可选）"
+                             defaultValue={r.name || ''}
+                             onBlur={(e) => editFbName(i, e.target.value, e.target)}
+                             onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }} />
+                      {r.name ? (
+                        <a className="fb-alias-copy" title={`复制别名 ${r.name}`}
+                           onClick={() => { navigator.clipboard?.writeText(r.name); onToast(`已复制别名 ${r.name}`); }}>复制</a>
+                      ) : null}
+                    </span>
                     <input className="input fb-from" spellCheck="false"
                            title="主模型 ID（channel/model，可编辑；失焦或回车确认，点「保存降级链」生效）"
                            defaultValue={r.from}
@@ -950,6 +1049,9 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
               )) : <div className="hint">（暂无规则——原模型无可用账号时将直接返回 503 提示）</div>}
             </div>
             <div className="row" style={{ marginTop: 8 }}>
+              <input id="fbNameInput" className="input" style={{ width: 130 }} spellCheck="false"
+                     placeholder="别名（可选）" title="可选：给这条链起个短名，客户端直接请求它等同主模型"
+                     value={fbName} onChange={(e) => { setFbName(e.target.value); setFbErr(''); }} />
               <input id="fbFromInput" className="input" style={{ width: 230 }} spellCheck="false"
                      placeholder="主模型 ID（channel/model）"
                      value={fbFrom} onChange={(e) => { setFbFrom(e.target.value); setFbErr(''); }} />
@@ -961,6 +1063,11 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
               <button className="btn small primary" id="btnFbSave" onClick={saveModelFallback}>保存降级链</button>
             </div>
             <div className="hint" id="fbErr" style={{ color: 'var(--danger)' }}>{fbErr}</div>
+            {fbWarns.length ? (
+              <div className="hint" id="fbWarns" style={{ color: 'var(--danger)' }}>
+                {fbWarns.map((w) => <div key={w}>⚠ {w}</div>)}
+              </div>
+            ) : null}
           </div>
 
           {/* 思考强度注入（R63）：与 R49「只透传上游声明」互补——这条解决「客户端没说话时用哪档」 */}
@@ -1032,7 +1139,26 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
                 return (
                   <div key={c.name} className="custom-ch-card">
                     <div className="custom-ch-header">
-                      <span className="badge custom">{c.name}</span>
+                      {renameIdx === i ? (
+                        <span className="custom-rename-row">
+                          <input className="input custom-rename-input" autoFocus value={renameVal}
+                                 spellCheck="false" title="新渠道标识（小写字母/数字/下划线/连字符；后端会统一转小写）"
+                                 onChange={(e) => setRenameVal(e.target.value)}
+                                 onKeyDown={(e) => {
+                                   if (e.key === 'Enter') commitRename(i);
+                                   if (e.key === 'Escape') { setRenameIdx(-1); setRenameVal(''); }
+                                 }} />
+                          <button className="btn small" onClick={() => commitRename(i)}>确认改名</button>
+                          <button className="btn small" onClick={() => { setRenameIdx(-1); setRenameVal(''); }}>取消</button>
+                        </span>
+                      ) : (
+                        <span className="custom-name-row">
+                          <span className="badge custom">{c.name}</span>
+                          <button className="icon-btn" title="重命名渠道标识（会级联改写引用配置，可能影响客户端）"
+                                  data-rename-custom={i}
+                                  onClick={() => startRename(i)}>✎</button>
+                        </span>
+                      )}
                       <span className="custom-ch-url">{c.base_url}</span>
                       {/* 只显示脱敏形态，**不放 title 明文**：面板本就只应拿到脱敏值
                           （/api/state 已脱敏），万一拿到明文也不该再往 DOM 里写一份。

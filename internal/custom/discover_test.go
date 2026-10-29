@@ -192,3 +192,95 @@ func TestDiscoverSendsBearerAndCleanPath(t *testing.T) {
 		t.Fatalf("尾斜杠应被削掉：%+v", d)
 	}
 }
+
+// 大目录（R122）：OpenRouter 一类上游的 /models 实测 3~4 MiB，旧的 1 MiB 上限会把
+// JSON 拦腰截断并报「不是合法 JSON」，看起来像上游列不出模型。
+func TestProbeLargeCatalogBeyond1MiB(t *testing.T) {
+	const n = 4000
+	var b strings.Builder
+	b.WriteString(`{"data":[`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		// 每条 ~1 KiB，总量 ~4 MiB（> 旧的 1 MiB，< 新的 8 MiB）
+		b.WriteString(`{"id":"vendor-`)
+		b.WriteString(strings.Repeat("x", 60))
+		b.WriteString(`-`)
+		b.WriteString(strings.Repeat("y", 900))
+		b.WriteString(`-`)
+		b.WriteString(strings.Repeat("z", 20))
+		b.WriteString(`-`)
+		b.WriteString(strings.Repeat("m", 10))
+		b.WriteString(`-model-`)
+		if i < 10 {
+			b.WriteByte(byte('0' + i))
+		} else {
+			b.WriteString("9")
+		}
+		b.WriteString(`"}`)
+	}
+	b.WriteString(`]}`)
+	payload := b.String()
+	if len(payload) <= 1<<20 || len(payload) >= probeBodyCap {
+		t.Fatalf("夹具体量不合预期：%d 字节", len(payload))
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	caps, err := New(ChannelConfig{Name: "big", BaseURL: srv.URL}).TestConnection()
+	if err != nil {
+		t.Fatalf("4 MiB 目录必须能解析（旧上限 1 MiB 会截断）：%v", err)
+	}
+	if len(caps) != n {
+		t.Fatalf("模型数 = %d, want %d", len(caps), n)
+	}
+}
+
+// 超过 8 MiB：明确报错，不拿半截内容去解析。
+func TestProbeRejectsOversizeBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		chunk := strings.Repeat("a", 1<<20)
+		for i := 0; i < 9; i++ {
+			_, _ = w.Write([]byte(chunk))
+		}
+	}))
+	defer srv.Close()
+
+	_, err := New(ChannelConfig{Name: "huge", BaseURL: srv.URL}).TestConnection()
+	if err == nil || !strings.Contains(err.Error(), "超过 8 MiB") {
+		t.Fatalf("超限应明确报错，实际：%v", err)
+	}
+}
+
+// 用户粘的就是目录地址：规范化剥 /models，不得拼出 /models/models。
+func TestDiscoverStripsModelsTail(t *testing.T) {
+	var hits []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits = append(hits, r.URL.Path)
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"m1"}]}`))
+		case "/v1/chat/completions":
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	d, err := Discover(ChannelConfig{Name: "t", BaseURL: srv.URL + "/v1/models"})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if d.Base != srv.URL+"/v1" || !d.Renormed || !d.ModelsOK {
+		t.Fatalf("应剥掉 /models 尾巴：%+v", d)
+	}
+	for _, h := range hits {
+		if strings.Contains(h, "/models/models") {
+			t.Fatalf("拼出了 /models/models：%s", h)
+		}
+	}
+}

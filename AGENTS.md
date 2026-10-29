@@ -169,10 +169,10 @@ POST /api/config/compat            # 模型路由（默认渠道 / 封顶 tokens
 POST /api/config/loop_guard        # {on:bool} 思考链防癫热切换（R50，atomic 全局、无需重启；GET /api/state 回读 loop_guard）
 POST /api/config/body_log          # {on:bool} 请求体摘要诊断开关（L18，默认关；写 data/ledger/body-trace-*.jsonl）
 POST /api/config/proxy             # {proxy,oczen_api_key?} 全局备用上游通道（R57；空串 = 关闭）
-POST /api/config/model_fallback    # {rules:[{from,to[]}]} 模型降级链（R54，保存即热生效）
+POST /api/config/model_fallback    # {rules:[{from,to[],name?}]} 模型降级链（R54/R129；name=可选别名；响应含 warnings）
 POST /api/config/reasoning_efforts # {efforts:{"channel/model":"high","*":"medium"}} 思考强度注入映射（R63，保存即热生效）
 POST /api/config/oczen_test        # {api_key} OpenCodeZen 凭证连通性测试
-POST /api/config/custom_channels   # {channels:[{name,base_url,api_key,models,enabled}]} 自定义 OpenAI 兼容渠道（R66，保存即热生效；api_key 提交脱敏值 = 不修改）
+POST /api/config/custom_channels   # {channels:[{name,base_url,api_key,models,enabled}],renames:[{new,old}]} 自定义渠道（R66/R122；api_key 提交脱敏值=不修改；renames=显式改名并级联引用；响应含 renamed 计数与脱敏后的 channels）
 # 推理面另有 glm 生图端点（L18）：POST /v1/images/generations、POST /v1/images/edits（同 API-Key 鉴权）
 
 GET  /api/fees                     # 渠道费率（本地缓存 + 按需刷新）
@@ -293,7 +293,7 @@ POST /api/quit                     # 退出程序
 8. 上游 HTTP ≥400 错误直接透传原始响应，不包装
 9. 定价缓存持久化到 `data/pricing-cache.json`，启动加载，超 1h 自动刷新
 10. 无桌面 Linux 必须 `--no-tray`，不带参数 panic 直接 exit 提示
-11. **粘性路由**：`pickWithSticky` 优先复用上次账号，直至连续成功请求达 50 次或遭遇错误冷却。成功时 `stickySuccess` 递增计数，错误时 `stickyClear` 清除粘性记录。不使用 credits 阈值（pool 中余额是 stale 数据）。
+11. **粘性路由**：`pickWithSticky` 优先复用上次账号，直至连续成功请求达 `config.server.sticky_max_requests` 次（**默认 50**，2026-10-29 起可配；非法值 WARN 回落默认、不改写配置文件、需重启生效）或遭遇错误冷却。成功时 `stickySuccess` 递增计数，错误时 `stickyClear` 清除粘性记录。不使用 credits 阈值（pool 中余额是 stale 数据）。
 12. **`internal/server` 主链路不得被绕过**：`POST /v1/chat/completions` 与 `GET /v1/models` 由内层直接服务，`internal/gateway` 只接管 `/v1/responses`、`/v1/messages`、`/v1/messages/count_tokens`。
 13. **兼容层调用内层只能经 `Gateway.call()`**（`io.Pipe`），调用方读完必须 `res.Close()`，否则内层 goroutine 可能阻塞在 Write 上泄漏。
 14. **`pipeRW.Flush()` 为空操作是刻意的**：`io.Pipe` 无缓冲，Write 即送达；不要改成缓冲 + 定时 flush。
@@ -1499,3 +1499,83 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   单测只能证明形态；实发各 1 次低成本对话需所有者点头）；② 生产仍在跑 v2.9.4 时代的二进制；
   ③ 上游 `cmd/wild-work/web/**` 的签到时间选择器只在本仓 React 面板等价实现，冻结基准不动；
   ④ officeace 与 login_loomy 未采纳（见范围裁定）。
+
+### L22 2026-10-29 对齐上游 v2.9.6 / v2.10.0（按需摘取，仍不做新渠道）
+
+- **范围裁定（所有者「以上全部更新」）**：只补**在用渠道与后端**，仍排除上游新增渠道
+  （Comate / ZCode / OfficeAce / Kilo / MiniMax / LobsterAI / Gemini / CodeArts）、
+  `login_loomy` 短信登录、`auth.Extra`、`cdp` 浏览器接管、`ledger.Credit`/`stats.CreditExact`
+  （comate 逐请求积分）与 `config.login` 段（lobsterai/comate）。`scripts/ui-static-check.mjs` 照 L11 不采纳。
+- **① refresh 失败路径按错误语义分层（本地漏抄 R111 的另一半，必做）**：v2.9.3 的
+  「换号策略分层」表格已写明「传输层超时 / refresh 的本机 DNS 故障 → 不换号，直接 502」，
+  本地只把判据抄到了对话路径，refresh 路径仍把网络错误当账号故障（`Cooldown` 10 分钟并换号）
+  ⇒ 一次 10 秒 DNS 抖动会把「恰好要刷新」的账号逐个冷却、整条渠道 503；refresh 401 仍走
+  `Pool.Disable` **永久停用**（同文件其它路径早已改 `MarkSessionDead`）。
+  修法：新增 `isNetworkError`（net.Error + 稳定错误文本），网络错误直接 502 且**不罚号**；
+  401 → `MarkSessionDead`（重登后按 auth 文件 mtime 自愈）。回归
+  `internal/server/refresh_failure_test.go`（三例：网络/401/其它账号错误）。
+- **② 自定义渠道探测上限 8 MiB / 45s + 剥 `/models` 尾巴（R122）**：旧值 1 MiB 会把
+  OpenRouter 类 3~4 MiB 目录拦腰截断 ⇒ 报「不是合法 JSON」（看起来像上游列不出模型）；
+  用户粘目录地址时还会拼出 `{root}/models/models`。修法：`probeBodyCap=8<<20`（读满即明确
+  报错，不解析半截内容）、`probeTimeout=45s`、`apiTails` 增加 `/models`。回归
+  `TestProbeLargeCatalogBeyond1MiB` / `TestProbeRejectsOversizeBody` / `TestDiscoverStripsModelsTail`。
+- **③ `/v1/models` 补 `supported_parameters` 与 `reasoning.mandatory`（R124）**：只列已声明能力
+  （tools/tool_choice、reasoning/reasoning_effort），两者皆无则字段缺席；`mandatory` 只在
+  上游明确给过 `can_disable_thinking` 时出现（三态指针）；**剔除 `include_reasoning`**
+  （本仓全仓零处理点，宣告即违约 R49）。回归 `handler_models_params_test.go`。
+- **④ oczen 会话时间戳窗口 + keyed 车道（R126）**：本地 `descendingTimePart` 从哈希直派生，
+  解码后落在 1970 年代；上游自 2026-10-25 起校验时间合理性（超窗回 429 FreeUsageLimitError，
+  与配额耗尽同一报文）。修法：锚定「今日 UTC 零点 − 哈希偏移（≤30 天）」，同一信号一个 UTC
+  天内稳定（prompt cache 亲和）；`DefaultBase` 改回 `/zen/v1`（**键控车道**），新增
+  `AnonymousBase=/inference/v1` 供匿名（`base()` 按 `apiKey` 分流）。**本地 header 判据不动**
+  （上游 R69 与 L15.1 相反且本次无法复现；实测两出口 × 两种 wire × 新旧时间戳全部 429、
+  `Retry-After ≈ 22.5h` ⇒ 当前是上游匿名免费档的配额/准入不可用，不是本机 wire）。
+  回归：`TestBaseLanes`、`TestDescendingTimePartWithinWindow`（按官方 36 位 mod 2^36 口径解码）、
+  `TestLegacyHashDerivedTimestampIsOutOfWindow`（负向对照用字面路径）、`TestAnonymousBaseIsInferencePath`。
+- **⑤ 粘性路由阈值可配（R127）**：`server.sticky_max_requests`（默认 50）；非法值
+  `WARN config: … invalid, fallback=50` 且**不改写用户配置文件**；改完需重启（在跑的链路按旧阈值
+  跑到耗尽）。装配：`config.Default/normalize` → `server.Config.StickyMaxRequests` → `pickWithSticky`。
+  回归 `config/sticky_max_requests_test.go`、`server/sticky_max_requests_test.go`。
+- **⑥ 模型目录换号重试（R133 的一般化）**：目录是**渠道维度**的，旧实现单次 `Pick` 抽中
+  「未开通/失效」的账号就把整条渠道模型面清零并进 5 分钟负缓存。改为最多试 3 个账号
+  （`maxModelsFetchAccounts`），取第一个非空目录；全部失败才进负缓存，逐次留痕
+  （`models fetch failed … uid=…`）。回归 `handler_models_rotation_test.go`（换号成功 / 全失败负缓存）。
+- **⑦ 降级链别名（R129）**：`ModelFallbackRule.Name`（裸名，可选）；`config.AliasIndex` 为**唯一派生源**，
+  内层 handler 与兼容层各持副本。解析优先级 **别名 → model_map 精确 → 通配 → default_channel**；
+  别名只在**入口**解析一次（路由/容量/降级/记账/档位注入全部按主力模型），
+  **不参与备胎链**、不在用量榜独立成行；`/v1/models` 现拼一条 `id=别名 + alias=主力全路径`
+  （能力字段逐字段继承，不编造），`count_tokens` 同样认别名。保存校验六条硬拒（含 `/`、空白/逗号/`*`、
+  与其他别名重名、与 model_map 键/渠道名重名、To 里写别名）；软警告：别名与真实模型裸名重合。
+  接线两处（R61 教训）：启动 `Router.Aliases` + 热更新 `inner.SetModelFallbacks` 与
+  `compat.SetAliases`（**不从 SetCompat 里塞**，两条保存通道互不覆盖）。回归：
+  `config/alias_test.go`、`server/model_alias_test.go`（入口解析/列表/缺席/无别名不变）、
+  `gateway/alias_test.go`（优先级 + count_tokens + 未知仍 400）、`app/model_alias_test.go`（校验矩阵）、
+  `cmd/wild-work/model_alias_wiring_test.go`（静态锁两处接线）。
+- **⑧ 自定义渠道标识改名级联（R122）**：标识**就是** `provider.Kind`，改名是一次级联。
+  面板**显式提交** `renames:[{new,old}]`（只比对新旧表无法区分「改名」与「删一个+加一个」）；
+  后端按**新名**查不到脱敏串时回退**旧名**找回真 key（否则真 key 被空串覆盖，最致命）；
+  联动 `compat.model_map`/`compat.default_channel`/`model_fallback`/`reasoning_efforts`
+  （按旧名匹配；**渠道标识唯一正规形态是小写**——`custom.Validate` 会 ToLower，故仅改大小写
+  等同未改名、必须当 no-op 丢弃，否则会把引用改写成与落盘 Kind 大小写不一致的值 ⇒ 路由断）；旧状态文件留档 `.old`
+  （不搬到新名：UID 是 `custom-<旧名>`）；重推 fb/ef 两个 syncer。响应 `channels` 改为**脱敏值**
+  （与 /api/state 同口径，此前该端点回明文 key）。面板：卡片 ✎ → 就地输入 → `window.confirm` 列出
+  代价（旧前缀立即 400、引用联动、历史流水仍记旧名、状态文件留档）→ 保存时提交；
+  连续改名 A→B→C 折叠成 `{new:C, old:A}`。回归 `app/custom_rename_test.go`（级联五件事 +
+  三类非法改名静默丢弃）、`render-check` 场景 8/9 断言改名入口与别名控件。
+- **负向验证（均实测变红后还原）**：`isNetworkError` 恒 false → refresh 网络用例红；
+  `maxModelsFetchAccounts=1` → 换号用例红；`probeBodyCap=1MiB` → 大目录用例红；
+  摘掉网关别名分支 → 优先级用例红（点名 gpt→qoder/gmodel）；改名不按旧名找回 key →
+  级联用例红（落盘空串）；摘掉 `supported_parameters` → 模型字段用例红；
+  `descendingTimePart` 退回哈希直派生 → 时间窗用例红（距今日 74.5 天）。
+- **验证（实测）**：`go build ./... && go vet ./... && go test ./...` 全绿（35 包 0 FAIL）；
+  `npm run build` + `npm run check` 12 场景绿；`dist/wild-work.exe` 已重建。
+  **沙箱浏览器实测**（`/tmp/ww-sbx2` + `127.0.0.1:28764`，生产 daemon 1954 全程未动）：
+  别名行内改名+保存写穿 `config.json`（`name` 落盘、拒绝 `bad/name` 并回滚输入框）；
+  渠道改名 UI（✎ → 确认 → 保存）后 `/api/state` 与磁盘 `config.json` 同步改写
+  `default_channel`/`model_map`/`fallback.from`/efforts 键、真 key 保留、面板只见脱敏值、
+  旧状态留档 `.old`；`/v1/models` 别名条目随之变 `gpt2 → newch/m1`。
+  已知限制：in-app 浏览器无可见表面（viewport 0×0），**几何/截图判据本轮未验**，仅有结构+功能链路。
+- **保留的本地偏离**：`ledger` 的 `prevMonthCutoff`/`monthSegments`（上游至今未修，别被融合冲掉）、
+  oczen 五道闸门判据（L15.1）、`app.Version=2.9.3`（未 bump、未发版）。
+- **未做/待办**：① 生产二进制未重建/未重启（`dist/wild-work-linux` 运行中会 ETXTBSY，重启需所有者点头，
+  走 L7 备份流程）；② oczen 修复后仍需实盘复验（当前上游免费档对本机两出口全 429，代码无法证明恢复）。

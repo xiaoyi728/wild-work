@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -144,6 +145,11 @@ type Config struct {
 		// 多张截图的 base64 会线性累积；gateway 转发前会把图缩到 1568px/JPEG，
 		// 所以这个上限只需容纳**客户端原始体**，不代表上游会收到这么大的包（issue #176）。
 		MaxRequestBodyMB int `json:"max_request_body_mb,omitempty"`
+		// StickyMaxRequests 同一渠道粘性账号连续成功使用多少次后轮换（默认 50）。
+		// 调小（10~20）⇒ 消耗摊到更多账号，但会话缓存命中率下降；调大（200+）⇒
+		// 缓存亲和更好、更长时间钉在同一个号上。非法值（0/负数）记 WARN 并回落默认值，
+		// **不改写配置文件**。改完需重启（已在跑的粘性链路按旧阈值跑到耗尽）。
+		StickyMaxRequests int `json:"sticky_max_requests"`
 	} `json:"server"`
 
 	// Compat 三接口兼容层（OpenAI Responses / Anthropic Messages）配置。
@@ -222,10 +228,59 @@ type Config struct {
 // ModelFallbackRule 单条模型降级规则：From（"channel/model" 全路径）在其渠道内
 // 全部账号上限流冷却时，按 To 顺序找第一个仍有可用账号的备胎模型顶上。
 // 约束：From 全局唯一；To 内不含 From（不自环）；To 至少一项。
+//
+// Name 是这条链的**可选别名**（R129）：别名是主力模型（From）的另一个名字，
+// 客户端请求别名等同于请求 From——同样的粘性路由、容量判定、降级链与冷却。
+// 别名只在**入口**解析，不参与备胎链（To 里不得写别名，From 也不得写别名）；
+// 空串 = 无别名（旧配置零迁移）。生命周期绑定规则：删规则别名一起消失，
+// 改 From 别名自动跟随（无需任何级联改写）。
 type ModelFallbackRule struct {
 	From string   `json:"from"`
 	To   []string `json:"to"`
+	Name string   `json:"name,omitempty"`
 }
+
+// AliasIndex 从降级链规则列表派生「别名 → 主力模型全路径」索引。
+//
+// **单一来源**：内层 handler（Chat）与兼容层（Responses/Anthropic）各自持有该
+// map 的副本，但派生只在这里发生一次，避免两边各写一套清洗逻辑而漂移（R129）。
+// 跳过不合规的名字（保存时已硬拒，这里再兜底一次——手改 config.json 造出的脏数据
+// 不得导致崩溃或误路由）：空名、含 `/`、含空白/逗号/`*`、以及重复别名（先到先得）。
+func AliasIndex(rules []ModelFallbackRule) map[string]string {
+	out := map[string]string{}
+	for _, r := range rules {
+		name := strings.TrimSpace(r.Name)
+		if !ValidAliasName(name) {
+			continue
+		}
+		from := strings.TrimSpace(r.From)
+		if from == "" {
+			continue
+		}
+		if _, dup := out[name]; dup {
+			continue
+		}
+		out[name] = from
+	}
+	return out
+}
+
+// ValidAliasName 报告 name 是否是可用的别名（空串 = 无别名，也返回 false）。
+// 规则：不含 `/`（避免与 channel/model 前缀语义打架）、不含空白、逗号、`*`
+// （避免输入框里被切碎 / 与 model_map 通配语义混淆）。大小写敏感（R129）。
+func ValidAliasName(name string) bool {
+	if name == "" {
+		return false
+	}
+	if strings.ContainsAny(name, "/ \t\r\n,*\u3000\uff0c") {
+		return false
+	}
+	return true
+}
+
+// DefaultStickyMaxRequests 粘性路由的默认轮换阈值（连续成功多少次后换号）。
+// 2026-10-28 起可经 server.sticky_max_requests 调整；历史行为保持不变。
+const DefaultStickyMaxRequests = 50
 
 // Default 默认配置。
 func Default() *Config {
@@ -246,6 +301,7 @@ func Default() *Config {
 	c.Schedule.CheckinTimes = []string{"09:00", "21:00"}
 	c.Schedule.KeepaliveHours = []int{22}
 	c.Upstream.TimeoutSeconds = 120
+	c.Server.StickyMaxRequests = DefaultStickyMaxRequests
 	c.Compat.DefaultChannel = "workbuddy"
 	c.Compat.MaxTokensCap = 32000
 	c.Features.LoopGuard = true // 思考链死循环检测默认开启（面板可关）
@@ -485,6 +541,12 @@ func (c *Config) normalize() error {
 	if c.Server.MaxRequestBodyMB > 1024 {
 		c.Server.MaxRequestBodyMB = 1024
 	}
+	// 粘性路由轮换阈值：非法值回落默认并记 WARN（不阻断启动、不改写用户配置）。
+	if c.Server.StickyMaxRequests <= 0 {
+		log.Printf("WARN config: server.sticky_max_requests=%d invalid, fallback=%d",
+			c.Server.StickyMaxRequests, DefaultStickyMaxRequests)
+		c.Server.StickyMaxRequests = DefaultStickyMaxRequests
+	}
 	// 临期阈值：默认 24h，下限 24h（日期粒度的到期判定低于一天没有意义）。
 	if c.Compat.MaxTokensCap < 0 {
 		c.Compat.MaxTokensCap = 0 // 负数视为「不限制」，避免误用导致 max_tokens 被置 0
@@ -549,7 +611,6 @@ func (c *Config) normalize() error {
 	}
 	return nil
 }
-
 
 // parseClockHM 把 "HH:MM" 解析为当天分钟数（time.Duration）。
 func parseClockHM(v string) (time.Duration, error) {

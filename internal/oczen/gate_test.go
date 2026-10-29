@@ -34,13 +34,38 @@ import (
 	"testing"
 )
 
-// TestDefaultBaseIsInferencePath 对话端点须在 /inference/v1 下：
+// TestAnonymousBaseIsInferencePath 匿名车道（无 key）的对话端点须在 /inference/v1 下：
 // /zen/v1 即便请求与官方客户端逐字相同也 403（2026-10-15 实测）。
 // 模型目录不受影响（两个前缀都仍 200），故本断言只锁聊天基址。
-func TestDefaultBaseIsInferencePath(t *testing.T) {
+// 自备 key 是另一条车道（DefaultBase=/zen/v1，2026-10-14 上游拆分），见 TestBaseLanes。
+func TestAnonymousBaseIsInferencePath(t *testing.T) {
 	const want = "https://opencode.ai/inference/v1"
-	if DefaultBase != want {
-		t.Fatalf("DefaultBase = %q; want %q（/zen/v1 自 2026-10-15 起对话恒 403）", DefaultBase, want)
+	if AnonymousBase != want {
+		t.Fatalf("AnonymousBase = %q; want %q（/zen/v1 自 2026-10-15 起匿名对话恒 403）", AnonymousBase, want)
+	}
+	if DefaultBase != "https://opencode.ai/zen/v1" {
+		t.Fatalf("DefaultBase = %q; want https://opencode.ai/zen/v1（键控车道）", DefaultBase)
+	}
+}
+
+// TestBaseLanes 匿名与自备 key 必须落在不同基址（上游 2026-10-14 拆分），
+// 显式注入的 Base（测试）优先于两条车道。
+func TestBaseLanes(t *testing.T) {
+	c := New()
+	if got := c.base(); got != AnonymousBase {
+		t.Fatalf("匿名 base() = %q, want %q", got, AnonymousBase)
+	}
+	c.SetAPIKey("sk-test")
+	if got := c.base(); got != DefaultBase {
+		t.Fatalf("键控 base() = %q, want %q", got, DefaultBase)
+	}
+	c.SetAPIKey("")
+	if got := c.base(); got != AnonymousBase {
+		t.Fatalf("清空 key 后应回匿名车道，实得 %q", got)
+	}
+	inj := NewWithBase("http://127.0.0.1:9")
+	if got := inj.base(); got != "http://127.0.0.1:9" {
+		t.Fatalf("注入的 Base 必须优先，实得 %q", got)
 	}
 }
 

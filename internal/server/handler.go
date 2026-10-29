@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -83,6 +84,8 @@ type Config struct {
 	HardCooldown time.Duration
 	// MaxRequestBody 请求体上限（字节）。0 = 用 DefaultMaxRequestBody（128MiB）。
 	MaxRequestBody int64
+	// StickyMaxRequests 同渠道粘性账号连续成功使用多少次后轮换。0 = 默认 50。
+	StickyMaxRequests int
 	// HardCooldownFor 硬冷却时长计算钩子（nil 时恒用 HardCooldown）。装配层注入
 	// config.HardCooldownFor（402 截到每日发奖窗口），server 不直接依赖 config。
 	HardCooldownFor func(now time.Time) time.Duration
@@ -128,6 +131,9 @@ type Handler struct {
 
 	fbMu      sync.RWMutex               // 保护 fallbacks（面板可运行时修改）
 	fallbacks []config.ModelFallbackRule // 模型降级链（cfg.ModelFallbacks 初始，热更新经 SetModelFallbacks）
+	// aliases 是 fallbacks 的派生索引（别名 → 主力模型全路径），与 fallbacks 同锁同寿命：
+	// 任何写入 fallbacks 的地方都必须经 setFallbacks 重建，避免两份状态漂移（R129）。
+	aliases map[string]string
 
 	efMu    sync.RWMutex      // 保护 efforts（面板可运行时修改）
 	efforts map[string]string // 思考强度注入映射（cfg.ReasoningEfforts 初始，热更新经 SetReasoningEfforts）
@@ -163,9 +169,55 @@ func (h *Handler) Traffic() (int64, int64) {
 
 // SetModelFallbacks 热更新模型降级链（面板保存后由 app 层回调；nil/空 = 清空禁用）。
 func (h *Handler) SetModelFallbacks(rules []config.ModelFallbackRule) {
+	h.setFallbacks(rules)
+}
+
+// setFallbacks 是 fallbacks 的唯一写入点：规则与别名索引在同一把锁内一起换，
+// 派生只走 config.AliasIndex（单一来源，R129）。
+func (h *Handler) setFallbacks(rules []config.ModelFallbackRule) {
+	idx := config.AliasIndex(rules)
 	h.fbMu.Lock()
 	h.fallbacks = rules
+	h.aliases = idx
 	h.fbMu.Unlock()
+}
+
+// resolveAlias 把客户端请求名解析为别名指向的主力模型全路径。
+// 命中时打一行 `alias resolved:` 日志（别名可观测性），未命中原样返回。
+func (h *Handler) resolveAlias(model string) string {
+	m := strings.TrimSpace(model)
+	if m == "" {
+		return model
+	}
+	h.fbMu.RLock()
+	target, ok := h.aliases[m]
+	h.fbMu.RUnlock()
+	if !ok || target == "" {
+		return model
+	}
+	log.Printf("alias resolved: %s -> %s", m, target)
+	return target
+}
+
+// aliasTarget 返回别名指向的主力模型全路径（无别名返回空串），供 /v1/models 现拼条目用。
+func (h *Handler) aliasTarget(name string) string {
+	h.fbMu.RLock()
+	defer h.fbMu.RUnlock()
+	return h.aliases[strings.TrimSpace(name)]
+}
+
+// aliasEntries 返回按配置顺序排列的「别名 → 主力模型」对（给 /v1/models 现拼条目用）。
+func (h *Handler) aliasEntries() [][2]string {
+	h.fbMu.RLock()
+	defer h.fbMu.RUnlock()
+	out := make([][2]string, 0, len(h.aliases))
+	for _, rule := range h.fallbacks {
+		name := strings.TrimSpace(rule.Name)
+		if target, ok := h.aliases[name]; ok && target != "" {
+			out = append(out, [2]string{name, target})
+		}
+	}
+	return out
 }
 
 // SetReasoningEfforts 热更新思考强度注入映射（面板保存后由 app 层回调；nil/空 = 清空禁用）。
@@ -199,7 +251,10 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger, stats: cfg.Stats, fallbacks: cfg.ModelFallbacks, efforts: cfg.ReasoningEfforts}
+	if cfg.StickyMaxRequests <= 0 {
+		cfg.StickyMaxRequests = config.DefaultStickyMaxRequests
+	}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger, stats: cfg.Stats, fallbacks: cfg.ModelFallbacks, aliases: config.AliasIndex(cfg.ModelFallbacks), efforts: cfg.ReasoningEfforts}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	// OpenAI Images 兼容端点（glm 渠道）：外部生图工具零改造接入。
@@ -231,12 +286,11 @@ func (h *Handler) stickyKey(kind provider.Kind) string { return kind.String() }
 // pickWithSticky 粘性路由选择账号。
 // 优先使用上次成功路由的账号，直到：
 //   - 账号进入冷却/禁用状态，或对该请求模型处于模型级冷却（429/6004 按模型限额）
-//   - 连续成功请求达到 maxReqs 次（默认 50），自动轮换
+//   - 连续成功请求达到 cfg.StickyMaxRequests 次（默认 50，config.server.sticky_max_requests），
+//     自动轮换
 //
 // 任一条件触发则降级为 PickForModel(model) 选新账号并重置粘性记录。
 func (h *Handler) pickWithSticky(rt *Runtime, model string) *auth.Auth {
-	const defaultMaxReqs = 50
-
 	h.stickyMu.RLock()
 	sticky := h.sticky[h.stickyKey(rt.Kind)]
 	h.stickyMu.RUnlock()
@@ -263,9 +317,9 @@ func (h *Handler) pickWithSticky(rt *Runtime, model string) *auth.Auth {
 
 	// 新建粘性记录
 	h.stickyMu.Lock()
-	h.sticky[h.stickyKey(rt.Kind)] = &stickyEntry{uid: acct.UID, maxReqs: defaultMaxReqs}
+	h.sticky[h.stickyKey(rt.Kind)] = &stickyEntry{uid: acct.UID, maxReqs: h.cfg.StickyMaxRequests}
 	h.stickyMu.Unlock()
-	log.Printf("new sticky route platform=%s uid=%s maxReqs=%d", rt.Kind, acct.UID, defaultMaxReqs)
+	log.Printf("new sticky route platform=%s uid=%s maxReqs=%d", rt.Kind, acct.UID, h.cfg.StickyMaxRequests)
 	return acct
 }
 
@@ -385,14 +439,32 @@ var dynamicModelsCache struct {
 const (
 	dynamicModelsTTL        = time.Hour
 	modelsFetchFailCooldown = 5 * time.Minute
+
+	// maxModelsFetchAccounts 一次目录拉取最多尝试几个账号（R133）。
+	// 目录是渠道级的，理论上要试到「有一个账号能给出目录」为止；但一个池若全是
+	// 坏账号，逐个串行探测会让 /v1/models 首字节等上几十秒。3 个覆盖绝大多数
+	// 真实场景（同人多开 / 少数号未开通），剩下的由负缓存与下一轮刷新兜底。
+	maxModelsFetchAccounts = 3
 )
+
+// errEmptyModelCatalog 表示上游正常应答但目录为空（如账号未开通模型时 /models
+// 返回空数组）。它不是传输/鉴权错误，但对「渠道维度」的目录来说等价于这次尝试
+// 失败，需要换号重试。
+var errEmptyModelCatalog = errors.New("upstream returned an empty model catalog")
 
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": h.modelList()})
 }
 
+// modelList 构造 /v1/models 的 data 数组。
+//
+// 别名条目（R129）**排在真实模型之前**，每次请求现拼、不进上游目录缓存：
+// 别名表随降级链热更新即时生效，无需任何缓存失效通道。
+// 能力字段**逐字段继承主力模型**（不新增任何推断），另带一个 alias 字段指向主力全路径。
+// 沿用现有过滤：主力所在渠道未接入任何账号时该别名不出现。
 func (h *Handler) modelList() []map[string]any {
 	out := []map[string]any{}
+	out = append(out, h.aliasModelEntries()...)
 	for _, k := range h.runtimeKinds() {
 		rt := h.getRuntime(k)
 		if rt == nil || rt.Pool == nil || len(rt.Pool.List()) == 0 { // 只暴露已接入账号的平台
@@ -405,6 +477,50 @@ func (h *Handler) modelList() []map[string]any {
 		for _, mi := range infos {
 			out = append(out, buildModelEntry(k, mi))
 		}
+	}
+	return out
+}
+
+// aliasModelEntries 把别名表现拼成 /v1/models 条目（按降级链配置顺序）。
+//
+// 只做两件事：① 找到主力模型的 ModelInfo（找不到 = 主力所在渠道没接入账号 /
+// 模型不在目录里 ⇒ 整个条目不出现，沿用现有过滤口径）；② 拿 buildModelEntry 的
+// **同一份输出**换掉 id 并加 alias 字段。为什么不另写一份能力拼装：那等于给能力
+// 字段开第二个来源，迟早与真实模型条目漂移（R49「不编造」+ 单一来源）。
+func (h *Handler) aliasModelEntries() []map[string]any {
+	pairs := h.aliasEntries()
+	if len(pairs) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(pairs))
+	for _, p := range pairs {
+		name, target := p[0], p[1]
+		kind, upstream, ok := provider.SplitModelID(target)
+		if !ok {
+			continue
+		}
+		rt := h.getRuntime(kind)
+		if rt == nil || rt.Pool == nil || len(rt.Pool.List()) == 0 {
+			continue // 主力渠道没接入账号：别名不出现
+		}
+		infos := h.fetchRuntimeModels(rt)
+		if len(infos) == 0 {
+			infos = rt.StaticModels
+		}
+		var found *provider.ModelInfo
+		for i := range infos {
+			if infos[i].ID == upstream {
+				found = &infos[i]
+				break
+			}
+		}
+		if found == nil {
+			continue // 主力模型不在当前目录：不凭空造一条条目
+		}
+		entry := buildModelEntry(kind, *found)
+		entry["id"] = name
+		entry["alias"] = target
+		out = append(out, entry)
 	}
 	return out
 }
@@ -433,7 +549,17 @@ func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
 		"input_modalities": mi.InputModalities(),
 		"modality":         mi.Modality(),
 	}
+	// supported_parameters 只列**已声明**的能力（R124）：工具 ⇒ tools/tool_choice，
+	// 有档位 ⇒ reasoning/reasoning_effort；两者皆无则整个字段缺席（不是空数组）。
+	// 刻意**不**声明 include_reasoning：本仓全仓零处理点（入站只吃 reasoning_effort 与
+	// Responses 的 reasoning 对象），宣告一个我们不接的参数等于让客户端发了被静默忽略——
+	// 与 R49「只透传声明，绝不编造」同一条红线。
+	var params []string
+	if mi.SupportsTools {
+		params = append(params, "tools", "tool_choice")
+	}
 	if len(mi.ReasoningEfforts) > 0 || mi.DefaultReasoningEffort != "" {
+		params = append(params, "reasoning", "reasoning_effort")
 		reasoning := map[string]any{}
 		if len(mi.ReasoningEfforts) > 0 {
 			reasoning["supported_efforts"] = mi.ReasoningEfforts
@@ -443,9 +569,15 @@ func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
 		}
 		if mi.CanDisableThinking != nil {
 			reasoning["can_disable_thinking"] = *mi.CanDisableThinking
+			// mandatory 只在上游明确给过 can_disable_thinking 时出现（三态指针）：
+			// 未声明时不得脑补 mandatory:true。
+			reasoning["mandatory"] = !(*mi.CanDisableThinking)
 		}
 		entry["reasoning"] = reasoning
 		entry["supports_reasoning"] = true
+	}
+	if len(params) > 0 {
+		entry["supported_parameters"] = params
 	}
 	return entry
 }
@@ -475,23 +607,50 @@ func (h *Handler) fetchRuntimeModels(rt *Runtime) []provider.ModelInfo {
 		return nil
 	}
 	rt.mu.RUnlock()
-	acct := rt.Pool.Pick()
-	if acct == nil {
-		return nil
-	}
-	// 401 自愈：与费率路径（RefreshPricing）同款——拉取前先检查 token 有效性，
-	// 过期先 refresh + 落盘。否则冷启动时 qodercn/qodercom 等无静态兑底渠道
-	// 拿过期 token 拉 FetchModels → 401 → 静默失败 → 负缓存 5min，
-	// 费率面板整组消失，最坏要等 30min ticker 才补拉（不变量 19）。
-	if acct.NeedsRefresh(10 * time.Minute) {
-		if err := rt.Upstream.RefreshToken(acct); err != nil {
-			log.Printf("models fetch token refresh failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
-		} else if serr := acct.SaveAtomic(); serr != nil {
-			log.Printf("models fetch token save failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
+	// 多账号回退（R133）：模型目录是**渠道维度**的，而 Pick 只取一个账号。
+	// 只要池里有一个「拉不到目录」的账号——未开通模型时返回空目录、token 失效返回 401——
+	// 单次 Pick 抽中它的那一刻，整条渠道的模型面就归零并进 5 分钟负缓存。
+	// 因此「拉不到」不等于「渠道没有模型」：换下一个账号重试，只有所有候选都失败
+	// 才认领渠道级失败（与旧语义一致，进负缓存）。
+	// 上限 3 个：一个池若全是坏账号（20 个），逐个串行探测会让 /v1/models 首字节
+	// 等上几十秒；3 个覆盖绝大多数真实场景，剩下的由负缓存与下一轮刷新兜底。
+	tried := make(map[string]bool, maxModelsFetchAccounts)
+	var (
+		lastUID string
+		lastErr error
+		infos   []provider.ModelInfo
+	)
+	for attempt := 0; attempt < maxModelsFetchAccounts; attempt++ {
+		acct := rt.Pool.PickExcluding(tried)
+		if acct == nil {
+			break
 		}
+		tried[acct.UID] = true
+		lastUID = acct.UID
+		// 401 自愈：与费率路径（RefreshPricing）同款——拉取前先检查 token 有效性，
+		// 过期先 refresh + 落盘。否则冷启动时 qodercn/qodercom 等无静态兑底渠道
+		// 拿过期 token 拉 FetchModels → 401 → 静默失败 → 负缓存 5min，
+		// 费率面板整组消失，最坏要等 30min ticker 才补拉（不变量 19）。
+		if acct.NeedsRefresh(10 * time.Minute) {
+			if err := rt.Upstream.RefreshToken(acct); err != nil {
+				log.Printf("models fetch token refresh failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
+			} else if serr := acct.SaveAtomic(); serr != nil {
+				log.Printf("models fetch token save failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
+			}
+		}
+		got, err := rt.Upstream.FetchModels(acct)
+		if err == nil && len(got) > 0 {
+			infos = got
+			break
+		}
+		lastErr = err
+		if err == nil {
+			lastErr = errEmptyModelCatalog
+		}
+		// 换号重试时同样逐条留痕，否则用户只看到渠道消失、查不到是谁拖垮的。
+		log.Printf("models fetch failed platform=%s uid=%s err=%v n=%d", rt.Kind, acct.UID, lastErr, len(got))
 	}
-	infos, err := rt.Upstream.FetchModels(acct)
-	if err != nil || len(infos) == 0 {
+	if len(infos) == 0 {
 		// 失败不再静默：无静态兑底渠道（qodercn/qodercom）整组消失时，
 		// 至少日志里要有原因可查（曾致 issue #40 复发 40 分钟无法定位）。
 		now := time.Now()
@@ -503,7 +662,10 @@ func (h *Handler) fetchRuntimeModels(rt *Runtime) []provider.ModelInfo {
 			dynamicModelsCache.lastFail = now
 			dynamicModelsCache.Unlock()
 		}
-		log.Printf("models fetch failed platform=%s uid=%s err=%v n=%d", rt.Kind, acct.UID, err, len(infos))
+		if lastUID != "" {
+			log.Printf("models fetch failed platform=%s uid=%s err=%v n=0 (no account yielded a catalog, tried=%d)",
+				rt.Kind, lastUID, lastErr, len(tried))
+		}
 		return nil
 	}
 	now := time.Now()
@@ -541,12 +703,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body: "+err.Error())
 		return
 	}
-	rt, model, err := h.runtimeForModel(peek.Model)
+	// 别名解析（R129）：别名是主力模型的另一个名字，命中即等价于请求主力模型。
+	// 只在**入口**解析一次，reqModel 是后续一切（路由 / 容量判定 / 降级链 / 记账 /
+	// 档位注入）的输入；clientModel 仍保留客户端原话，只用于回填响应与降级标注。
+	reqModel := h.resolveAlias(peek.Model)
+	rt, model, err := h.runtimeForModel(reqModel)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_model", err.Error())
 		return
 	}
-	clientModel := peek.Model // 客户端请求的原始模型名（含 channel/ 前缀），回填进响应
+	clientModel := peek.Model // 客户端请求的原始模型名（可能是别名），回填进响应
 	// 诊断：记录上下文构成摘要（config.body_log 关闭时立即返回，无实际开销）。
 	// 必须放在 rewriteModel 之前——要记的是客户端发来的原始体。
 	if h.ledger != nil {
@@ -554,7 +720,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	// 统计/流水的归一 ID：新旧写法（cline-free/x 与 cline/cline-free/x）归一到同一串，
 	// 否则同一模型会在用量榜/请求日志里裂成两行（R59）；其余渠道为恒等变换。
-	canonModel := provider.CanonicalModelID(clientModel)
+	// 别名已在上面解析成主力全路径 ⇒ 账本记的永远是主力模型，用量榜不会出现别名（R129）。
+	canonModel := provider.CanonicalModelID(reqModel)
 	// 模型降级链：请求模型在本渠道已无账号可承载（no_healthy_account 的两种形态——
 	// 「模型全冷」或「整渠道全灭」，pickWithSticky 必败）时，按用户配置的链找第一个
 	// 仍有可用账号的备胎模型顶上；备胎可跨渠道，渠道全灭时不至于直接 503。
@@ -599,7 +766,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 思考强度注入：客户端未传 reasoning_effort 且面板配置命中（按客户端请求模型 ID 匹配，
 	// 含 `*` 全局默认）时补上档位。未配置 = 零开销直通（applyEffort 内部快检）；
 	// 注入失败仅记日志、原 body 照发，绝不因此中断请求。
-	body = h.applyEffort(body, clientModel)
+	body = h.applyEffort(body, reqModel)
 
 	// 运行统计插桩：每客户端请求一行（最终结果；中间换号尝试不逐行——对齐 sidecar 口径）。
 	// TTFB 由 statWriter 记首字节，耗时/吞吐在出口由 defer 收口；
@@ -670,9 +837,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					log.Printf("refresh failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
 					lastErr = err
 					h.stickyClear(rt)
+					// 本机网络/DNS 挂着时（`dial tcp: lookup ...: no such host`、connection refused），
+					// 所有账号都刷不出来，换号必撞同一面墙 ⇒ 直接 502，别把 N×超时堆满，
+					// 更不能把账号记进冷却（那是本机网络故障，不是凭据问题）。
+					if isNetworkError(err) {
+						log.Printf("refresh failed by network platform=%s uid=%s（不换号、不计账号错误）err=%v",
+							rt.Kind, acct.UID, err)
+						statRow.Status = http.StatusBadGateway
+						writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+						return
+					}
+					// 账号侧问题：只有「恰好要刷新」的号受影响，其余号 token 仍有效 ⇒ 换下一个号。
+					// 登录态死标 SessionDead（可自愈：重登后按 auth 文件 mtime 自动清除），
+					// 不再用 Disable —— 那会把一个可恢复的会话失效永久钉成「手动停用」。
 					var ue *provider.Error
 					if errors.As(err, &ue) && ue.Kind == provider.ErrSessionDead {
-						rt.Pool.Disable(acct.UID, "refresh session dead")
+						rt.Pool.MarkSessionDead(acct.UID, "refresh: "+err.Error())
 					} else {
 						rt.Pool.Cooldown(acct.UID, pool.CoolErr, h.cfg.ErrCooldown, "refresh: "+err.Error())
 					}
@@ -1003,7 +1183,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 						log.Printf("model fallback platform=%s from=%s to=%s (in-request)", rt.Kind, clientModel, fb2)
 						w.Header().Set("X-Model-Fallback", clientModel+" -> "+fb2)
 						body = nb
-						body = h.applyEffort(body, clientModel)
+						body = h.applyEffort(body, reqModel) // 与入口同参数；键已存在不碰（双注入守卫）
 						rt, model = rt2, m2
 						dispModel = fb2
 						canonModel = provider.CanonicalModelID(fb2)
@@ -1695,6 +1875,30 @@ func truncateBody(body []byte) string {
 		return s[:max]
 	}
 	return s
+}
+
+// isNetworkError 报告 err 是否属于「本机网络/DNS/链路」故障（与账号凭据无关）。
+//
+// 判据来源：refresh 失败路径必须把这类错误与「refresh token 失效」区分开——
+// 前者换号必撞同一面墙（同渠道所有号打同一个 host），罚号等于让一次网络抖动
+// 把整池账号冷却 10 分钟；后者才该走账号级处置（SessionDead/冷却）。
+// net.Error 覆盖超时；其余按下层错误文本识别（Go 的 url.Error 文案稳定）。
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return true
+	}
+	s := err.Error()
+	for _, m := range []string{"dial tcp", "no such host", "connection refused",
+		"connection reset", "i/o timeout", "timeout awaiting response headers", "network is unreachable"} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }
 
 func WorkBuddyStaticModels() []provider.ModelInfo {

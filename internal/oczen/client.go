@@ -63,7 +63,10 @@ func New() *Client {
 		IdleConnTimeout:       30 * time.Second,
 		ResponseHeaderTimeout: 120 * time.Second,
 	}
-	return &Client{HTTP: &http.Client{Timeout: requestTimeout, Transport: tr}, Base: DefaultBase,
+	// 刻意**不**设 Base：让它留空，由 base() 按凭证车道选择
+	// （匿名 → AnonymousBase，自备 key → DefaultBase）。写死成任一个都会把另一条
+	// 车道钉在错误入口上（匿名走 /zen 是 2026-10-15 那次恒 403 的形态）。
+	return &Client{HTTP: &http.Client{Timeout: requestTimeout, Transport: tr},
 		StreamHTTP:  &http.Client{Transport: tr}, // 共用 Transport，不设 Timeout
 		IdleTimeout: idle.DefaultTimeout,         // 流中空闲监控兜底（见 internal/idle）
 	}
@@ -76,11 +79,23 @@ func NewWithBase(base string) *Client {
 	return c
 }
 
+// base 返回当前出站基址：**按车道分流**。
+//
+// 匿名（无 key）走 AnonymousBase(/inference)，自备 sk-… key 走 DefaultBase(/zen)：
+// 上游 2026-10-14 把 keyless 推理迁到了独立入口，两条车道基址不再相同。
+// 显式 c.Base（测试注入 NewWithBase）仍优先，两种车道共用同一 httptest 假上游。
 func (c *Client) base() string {
-	if c.Base == "" {
+	if c.Base != "" {
+		return c.Base
+	}
+	// apiKey 由面板热更新（SetAPIKey 持写锁），故取值也须持读锁，否则与保存操作并发即数据竞争。
+	c.mu.RLock()
+	keyed := c.apiKey != ""
+	c.mu.RUnlock()
+	if keyed {
 		return DefaultBase
 	}
-	return c.Base
+	return AnonymousBase
 }
 
 // AnonymousAuth 构造匿名虚拟账号。唯一合法账号，由 main 装配时注入 pool。
@@ -140,18 +155,29 @@ func canonicalSessionID(signal string) string {
 		// 形状对但编码外来（旧摘要段 / 升序 ID）：落到下面确定性重编码。
 	}
 	sum := sha256.Sum256([]byte("ses\x00" + signal))
-	timePart := descendingTimePart(sum[:6])
+	timePart := descendingTimePart(time.Now(), sum[:6])
 	n := new(big.Int).SetBytes(sum[6:16])
 	return "ses_" + timePart + base62Fixed(n, 14)
 }
 
-// descendingTimePart 把哈希前 6 字节渲染成官方客户端 Identifier.descending()
-// 的布局：36 位时间戳移位进 48 位字的高位，OR 上 counter=1，再按位取反，
-// 故末三位恒为 ffe。
-func descendingTimePart(hash []byte) string {
-	current := (uint64(hash[0])<<28 | uint64(hash[1])<<20 | uint64(hash[2])<<12 |
-		uint64(hash[3])<<4 | uint64(hash[4])>>4) << 12
-	current |= 1
+// sessionTimestampWindow 合成会话时间戳的回落窗口。
+//
+// 上游自 2026-10-25 起校验会话 id 里的时间合理性（超窗回 429 FreeUsageLimitError，
+// 与真实配额耗尽同一报文）。取 30 天：绝不逼近上游边界，同时给哈希留出足够散列空间。
+const sessionTimestampWindow = 30 * 24 * time.Hour
+
+// descendingTimePart 按官方客户端 Identifier.descending() 的布局渲染时间戳：
+// 36 位时间戳移位进 48 位字的高位，OR 上 counter=1，再按位取反，故末三位恒为 ffe。
+//
+// 时间戳锚定「今日 UTC 零点 − 哈希派生偏移（<窗口）」，即落在窗口内的某个零点偏移上：
+// 哈希只挑偏移、不提供日期，同一信号（同一对话）在同一个 UTC 天内恒定 ⇒ prompt cache
+// 亲和；跨天变更属预期（上游只要求时间合理，不要求永久不变）。
+// 旧实现从哈希直派生时间戳，落在 1970 年代 ⇒ 2026-10-25 起必被拒。
+func descendingTimePart(now time.Time, hash []byte) string {
+	window := uint64(sessionTimestampWindow / time.Millisecond)
+	offset := (uint64(hash[0])<<24 | uint64(hash[1])<<16 | uint64(hash[2])<<8 | uint64(hash[3])) % window
+	base := now.UTC().Truncate(24 * time.Hour).Add(-time.Duration(offset) * time.Millisecond)
+	current := uint64(base.UnixMilli())<<12 | 1
 	inverted := ^current & 0xFFFFFFFFFFFF
 	return hex.EncodeToString([]byte{
 		byte(inverted >> 40), byte(inverted >> 32), byte(inverted >> 24),

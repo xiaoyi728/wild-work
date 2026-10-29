@@ -17,6 +17,10 @@ func TestNormalizeBaseURL(t *testing.T) {
 		{"https://x.com/v1/completions", "https://x.com/v1"},                       // legacy 尾巴同样剥（只是不再剥第二层）
 		{"https://x.com/v1/chat/completions/chat/completions", "https://x.com/v1"}, // 连粘两层要剥到不动为止
 		{"https://x.com/V1/Chat/Completions", "https://x.com/V1"},                  // 大小写不敏感匹配，但保留原大小写
+		// /models 尾巴同样剥（R122）：用户粘的是目录地址，留着会拼出 {root}/models/models
+		{"https://openrouter.ai/api/v1/models", "https://openrouter.ai/api/v1"},
+		{"https://x.com/v1/models/", "https://x.com/v1"},
+		{"https://x.com/v1/MODELS", "https://x.com/v1"},
 		// 缺协议头：内网补 http、公网补 https
 		{"127.0.0.1:11434/v1", "http://127.0.0.1:11434/v1"},
 		{"localhost:8000/v1", "http://localhost:8000/v1"},

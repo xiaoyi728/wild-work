@@ -835,6 +835,16 @@ html[data-theme="paper"] .shiny {
 .fb-from { width: 100%; box-sizing: border-box; font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; }
 .fb-rule .fb-tos { min-width: 0; }
 
+/* 降级链别名（R129）：行内可选别名 + 复制。别名是客户端可直接请求的裸名，
+   不参与备胎链；保存时由后端 validateAliases 做形态/重名/渠道名冲突的硬校验。 */
+.fb-alias-row { display: flex; align-items: center; gap: 6px; }
+.fb-alias { width: 100%; box-sizing: border-box; font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; }
+.fb-alias-copy { cursor: pointer; color: var(--accent); font-size: 12px; white-space: nowrap; }
+
+/* 自定义渠道改名（R122）：标识从只读 badge 变成可就地编辑（确认后还要点保存才提交） */
+.custom-name-row, .custom-rename-row { display: inline-flex; align-items: center; gap: 6px; }
+.custom-rename-input { width: 130px; font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; }
+
 /* 思考强度映射行：长模型 ID 用 ellipsis 截断（不换行撑破行高） */
 .eff-model {
   max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

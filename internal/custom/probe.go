@@ -276,7 +276,18 @@ func (c *Client) TestConnection() ([]ModelCap, error) {
 	return caps, err
 }
 
-// getAt 发一个带 Bearer 的 GET。响应体限 1 MiB：探测响应可能是网关错误页或 SPA 首页 HTML。
+// 探测响应的读取上限与超时（R122）。
+//
+// 上限 8 MiB：OpenRouter 一类大目录上游的 /models 实测 3~4 MiB，旧值 1 MiB 会把 JSON
+// 拦腰截断 ⇒ json.Unmarshal 报「不是合法 JSON」，看起来像「这个上游列不出模型」。
+// 读满即判定超限并如实报错，绝不拿半截内容去解析。
+// 超时 45s：探测走的是用户自己配的接入点，经加速代理时首字节常态数十秒。
+const (
+	probeBodyCap = 8 << 20
+	probeTimeout = 45 * time.Second
+)
+
+// getAt 发一个带 Bearer 的 GET。
 // 返回 (body, status, err)，status==0 只在传输层失败（DNS/连接/超时）时为 0。
 func getAt(u, key string) ([]byte, int, error) {
 	req, err := http.NewRequest(http.MethodGet, u, nil)
@@ -286,16 +297,19 @@ func getAt(u, key string) ([]byte, int, error) {
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	// 探测是面板上的一次用户点击动作，15s 足够；不复用 StreamHTTP（那是对话流用的，无总超时）。
-	hc := &http.Client{Timeout: 15 * time.Second}
+	hc := &http.Client{Timeout: probeTimeout}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("连接失败：%v", err)
 	}
 	defer resp.Body.Close()
-	raw, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, rerr := io.ReadAll(io.LimitReader(resp.Body, probeBodyCap+1))
 	if rerr != nil {
 		return raw, resp.StatusCode, fmt.Errorf("读取响应失败：%v", rerr)
+	}
+	if len(raw) > probeBodyCap {
+		return raw[:probeBodyCap], resp.StatusCode,
+			fmt.Errorf("上游响应超过 %d MiB，已放弃解析", probeBodyCap>>20)
 	}
 	return raw, resp.StatusCode, nil
 }

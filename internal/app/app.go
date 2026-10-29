@@ -1924,7 +1924,6 @@ func (a *App) SetCheckinTimes(times []string) error {
 	return nil
 }
 
-
 // SetLoopGuard 更新思考链死循环检测（发癫拦截）开关：保存配置并即时生效。
 // 生效机制：loopguard 的全局 atomic 开关，各渠道 Stream 在每次请求时读取，
 // 热切换无需重启（下一个流式请求即按新值）。
@@ -2075,45 +2074,200 @@ func (a *App) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[st
 // 用户没改动过某个渠道的 key 时，提交回来的仍是脱敏串——若原样落盘，
 // 就会把真实密钥换成「sk-abc****wxyz」这种废值。故此处对每个渠道：
 // 提交值是脱敏形态（isMaskedKey）则视为未修改，从现有配置按渠道名找回真实密钥。
-func (a *App) SetCustomChannels(channels []custom.ChannelConfig) error {
+// customRename 面板显式提交的「渠道标识改名」（R122）。
+//
+// 为什么必须显式提交：后端只比对新旧两张表，无法区分「改名」与「删掉一个 + 新增一个」——
+// 前者要级联引用与密钥找回，后者不能。所以改名的意图只能由调用方说清楚。
+type customRename struct {
+	New string `json:"new"`
+	Old string `json:"old"`
+}
+
+// SetCustomChannels 保存自定义渠道（向后兼容：不传 renames = 纯编辑，不涉及改名）。
+// 改名请用 setCustomChannels（内部返回改名条数供面板如实告知）。
+func (a *App) SetCustomChannels(channels []custom.ChannelConfig, renames ...customRename) error {
+	_, err := a.setCustomChannels(channels, renames)
+	return err
+}
+
+// setCustomChannels 保存自定义渠道并处理改名级联（R122）。
+//
+// 渠道标识**就是** provider.Kind：状态文件名、虚拟账号 UID、模型前缀、降级链与
+// 思考强度映射全以它为键 ⇒ 改名不是改一个字段，而是一次级联：
+//   - 面板提交的密钥是脱敏串时，按**新名**查不到必须回退查**旧名**找回真值
+//     （否则真 key 会被空串覆盖并落盘，最致命的一条）；
+//   - 联动改写 compat.model_map / compat.default_channel / model_fallback /
+//     reasoning_efforts —— 这四类只校形状不校渠道存在性，不联动就是「配置还在、
+//     永久静默失效」；
+//   - 旧 state 文件改名留档为 .old（不搬到新名：里面的 UID 是 custom-<旧名>）；
+//   - 降级链/思考强度在 Handler 里是另一份内存副本，必须重推 syncer。
+func (a *App) setCustomChannels(channels []custom.ChannelConfig, renames []customRename) (int, error) {
 	seen := map[string]bool{}
 	for i := range channels {
 		if isMaskedKey(channels[i].APIKey) { // 脱敏形态 = 未改动，保留现值
 			channels[i].APIKey = ""
 		}
 		if err := channels[i].Validate(); err != nil {
-			return err
+			return 0, err
 		}
 		if seen[channels[i].Name] {
-			return fmt.Errorf("重复的渠道标识 %q", channels[i].Name)
+			return 0, fmt.Errorf("重复的渠道标识 %q", channels[i].Name)
 		}
 		seen[channels[i].Name] = true
 	}
 	a.mu.Lock()
-	// 找回被提交为脱敏形态的密钥（按渠道名匹配现值）
+	// 找回被提交为脱敏形态的密钥（按渠道名匹配现值；名字大小写不敏感，取值保留原文）
 	prev := map[string]string{}
+	prevNames := map[string]bool{}
+	actualName := map[string]string{} // lower(name) → 配置里的原始写法
 	for _, cc := range a.cfg.CustomChannels {
-		prev[strings.ToLower(cc.Name)] = cc.APIKey
+		key := strings.ToLower(cc.Name)
+		prev[key] = cc.APIKey
+		prevNames[key] = true
+		actualName[key] = cc.Name
+	}
+	// 改名映射：lower(新名) → 旧名（lower），同时记下新名的原始大小写用于级联改写。
+	ren := map[string]string{}
+	renNew := map[string]string{}
+	for _, r := range renames {
+		// 渠道标识的唯一正规形态是小写（custom.ChannelConfig.Validate 会 ToLower）。
+		// 故目标名先规范化，再比较：old → Old 等价于「没改名」⇒ 必须当 no-op 丢弃——
+		// 否则 renNew 会写出 "Old/m1" 而落盘的 Kind 是 "old"，引用与路由大小写不一致。
+		nw := strings.ToLower(strings.TrimSpace(r.New))
+		od := strings.ToLower(strings.TrimSpace(r.Old))
+		if nw == "" || od == "" || nw == od || !prevNames[od] {
+			continue
+		}
+		if prevNames[nw] { // 目标名已被别的渠道占用 ⇒ 脏数据，丢弃
+			continue
+		}
+		ren[nw] = od
+		renNew[nw] = nw
 	}
 	for i := range channels {
-		if channels[i].APIKey == "" {
-			if k := prev[channels[i].Name]; k != "" {
-				channels[i].APIKey = k
+		if channels[i].APIKey != "" {
+			continue
+		}
+		key := strings.ToLower(channels[i].Name)
+		k := prev[key]
+		if k == "" { // 改名后按新名查不到 ⇒ 必须回退查旧名，否则真密钥被空串覆盖并落盘
+			if od, ok := ren[key]; ok {
+				k = prev[od]
 			}
 		}
+		if k != "" {
+			channels[i].APIKey = k
+		}
+	}
+	compatTouched := 0
+	if len(ren) > 0 {
+		compatTouched = renameCustomRefs(a.cfg, ren, renNew)
 	}
 	a.cfg.CustomChannels = channels
 	err := config.Save(a.cfg, a.cfgPath)
 	syncer := a.customSyncer
+	fbSyncer, efSyncer := a.fbSyncer, a.efSyncer
+	fbRules, efforts := a.cfg.ModelFallback, a.cfg.ReasoningEfforts
 	a.mu.Unlock()
 	if err != nil {
-		return fmt.Errorf("保存配置失败：%w", err)
+		return 0, fmt.Errorf("保存配置失败：%w", err)
+	}
+	// 改名连带改写了降级链/思考强度映射，而这两张表在 server.Handler 里是**另一份内存副本**：
+	// 只改 cfg 不推 syncer，热路径会继续拿旧 key 查（要到面板重存一次才能修好）。
+	if len(ren) > 0 {
+		if fbSyncer != nil {
+			fbSyncer(fbRules)
+		}
+		if efSyncer != nil {
+			efSyncer(efforts)
+		}
+	}
+	for nwLower, od := range ren {
+		renameCustomState(a.stateDir(), actualName[od]) // 旧 state 文件留 .old，不硬删
+		log.Printf("自定义渠道标识已改名：%s → %s（引用配置联动 %d 处）",
+			actualName[od], renNew[nwLower], compatTouched)
 	}
 	if syncer != nil {
 		syncer(channels)
 	}
 	log.Printf("自定义渠道配置已更新：共 %d 个渠道", len(channels))
-	return nil
+	return len(ren), nil
+}
+
+// renameCustomRefs 把以 `旧标识/` 为键或值前缀的引用配置改写成新标识（R122）：
+// compat.model_map / compat.default_channel / model_fallback / reasoning_efforts。
+// ren: lower(新名) → lower(旧名)；renNew: lower(新名) → 新名原始写法（保住大小写）。
+// 返回改写条数，供面板如实告知。持 a.mu 调用。
+func renameCustomRefs(cfg *config.Config, ren map[string]string, renNew map[string]string) int {
+	// ren 的方向是「新→旧」（密钥找回靠它），而引用配置里出现的是**旧名** ⇒ 必须先倒转。
+	// 同一个旧名被声明改成两个新名是脏数据（无法判断哪个是真），跳过它，不猜。
+	cnt := map[string]int{}
+	for _, od := range ren {
+		cnt[od]++
+	}
+	to := make(map[string]string, len(ren))
+	for nwLower, od := range ren {
+		if cnt[od] == 1 {
+			to[od] = renNew[nwLower]
+		}
+	}
+	swap := func(s string) string {
+		if i := strings.Index(s, "/"); i > 0 {
+			if nw, ok := to[strings.ToLower(s[:i])]; ok {
+				return nw + s[i:]
+			}
+		}
+		return s
+	}
+	n := 0
+	for k, v := range cfg.Compat.ModelMap {
+		if nv := swap(v); nv != v {
+			cfg.Compat.ModelMap[k] = nv
+			n++
+		}
+	}
+	if od := strings.ToLower(strings.TrimSpace(cfg.Compat.DefaultChannel)); od != "" {
+		if nw, ok := to[od]; ok {
+			cfg.Compat.DefaultChannel = nw
+			n++
+		}
+	}
+	for i := range cfg.ModelFallback {
+		if v := swap(cfg.ModelFallback[i].From); v != cfg.ModelFallback[i].From {
+			cfg.ModelFallback[i].From, n = v, n+1
+		}
+		for j := range cfg.ModelFallback[i].To {
+			if v := swap(cfg.ModelFallback[i].To[j]); v != cfg.ModelFallback[i].To[j] {
+				cfg.ModelFallback[i].To[j], n = v, n+1
+			}
+		}
+	}
+	for k, v := range cfg.ReasoningEfforts {
+		if nk := swap(k); nk != k {
+			delete(cfg.ReasoningEfforts, k)
+			cfg.ReasoningEfforts[nk] = v
+			n++
+		}
+	}
+	return n
+}
+
+// renameCustomState 把旧渠道的状态文件留档为 .old（不搬到新名：旧文件里的 UID 是
+// custom-<旧名>，搬过去等于塞进一堆对不上号的条目）。oldName 用配置里的原始写法
+// （buildCustomRuntimes 就是按原始 Name 拼文件名）。
+func renameCustomState(dir, oldName string) {
+	// 旧名来自配置文件；渠道标识的合法字符集是 [A-Za-z0-9_-]，这里再挡一次路径分隔符，
+	// 避免手改 config.json 造出的脏名字把 Rename 引到别的目录。
+	if oldName == "" || oldName == "." || oldName == ".." || strings.ContainsAny(oldName, `/\`) {
+		return
+	}
+	old := filepath.Join(dir, "state-custom-"+oldName+".json")
+	if !fileExists(old) {
+		return
+	}
+	if err := os.Rename(old, old+".old"); err != nil {
+		log.Printf("迁移自定义渠道状态文件失败（%s）：%v", oldName, err)
+	}
 }
 
 // resolveCustomKey 按渠道名取真实 api_key（供脱敏回显时的测试与保存路径使用）。
@@ -2167,18 +2321,37 @@ func (a *App) SetCompatSyncer(fn func(defaultChannel string, maxTokensCap int, m
 func (a *App) SetModelFallbackSyncer(fn func(rules []config.ModelFallbackRule)) { a.fbSyncer = fn }
 
 // SetModelFallback 保存模型降级链（设置面板可视化编辑）。
-// 校验：From/To 均须 "channel/model" 全路径；From 全局唯一；每链 To 至少一项、
-// 不含 From 自身（不自环）；空规则列表 = 清空禁用。保存即热生效（fbSyncer）。
-func (a *App) SetModelFallback(rules []config.ModelFallbackRule) error {
+//
+// 校验（后端是**唯一真相**，前端同一套校验只为即时反馈）：
+//   - From/To 均须 "channel/model" 全路径；From 全局唯一；每链 To 至少一项、不含 From 自身
+//   - Name（别名，R129）可选，空串 = 无别名；非空时按 validateAliases 的硬拒矩阵逐条拦下
+//
+// 返回的 warnings 是**软警告**（允许保存）：目前只有「别名与当前模型列表的某个裸名重合」。
+// 空规则列表 = 清空禁用。保存即热生效（fbSyncer 推内层 handler 与兼容层，R129）。
+func (a *App) SetModelFallback(rules []config.ModelFallbackRule) ([]string, error) {
+	// 别名索引先建：下面校验 To 时要靠它识别「备胎里写了别名」。
+	// 形态类硬拒（含 / 、空白/逗号/*、重名）仍由 validateAliases 统一点名，
+	// 这里只取一份「合法别名 → 规则序号」用于 To 检查（脏名不进索引，与运行时同源）。
+	aliasIdx := map[string]int{}
+	for i, r := range rules {
+		name := strings.TrimSpace(r.Name)
+		if name == "" || strings.Contains(name, "/") || !config.ValidAliasName(name) {
+			continue
+		}
+		if _, dup := aliasIdx[name]; !dup {
+			aliasIdx[name] = i
+		}
+	}
 	seen := map[string]bool{}
 	for i := range rules {
 		r := &rules[i]
 		r.From = strings.TrimSpace(r.From)
+		r.Name = strings.TrimSpace(r.Name)
 		if strings.Index(r.From, "/") <= 0 {
-			return fmt.Errorf("规则 %d 的主模型 %q 需为 channel/model 形式", i+1, r.From)
+			return nil, fmt.Errorf("规则 %d 的主模型 %q 需为 channel/model 形式", i+1, r.From)
 		}
 		if seen[r.From] {
-			return fmt.Errorf("主模型 %q 重复（每个主模型只允许一条规则）", r.From)
+			return nil, fmt.Errorf("主模型 %q 重复（每个主模型只允许一条规则）", r.From)
 		}
 		seen[r.From] = true
 		tos := make([]string, 0, len(r.To))
@@ -2187,31 +2360,133 @@ func (a *App) SetModelFallback(rules []config.ModelFallbackRule) error {
 			if to == "" {
 				continue
 			}
+			// ⑥ 备胎链不得写别名（必须在「需为 channel/model 形式」之前判，
+			// 否则用户只会看到一条不知道自己做错了什么的形态错误）。
+			if j, isAlias := aliasIdx[to]; isAlias {
+				return nil, fmt.Errorf("规则 %d 的备胎 %q 是规则 %d 的别名（备胎链只能写 channel/model 全路径，别名不参与备胎链）", i+1, to, j+1)
+			}
 			if strings.Index(to, "/") <= 0 {
-				return fmt.Errorf("主模型 %q 的备胎 %q 需为 channel/model 形式", r.From, to)
+				return nil, fmt.Errorf("主模型 %q 的备胎 %q 需为 channel/model 形式", r.From, to)
 			}
 			if to == r.From {
-				return fmt.Errorf("主模型 %q 的备胎不能是它自己", r.From)
+				return nil, fmt.Errorf("主模型 %q 的备胎不能是它自己", r.From)
 			}
 			tos = append(tos, to)
 		}
 		if len(tos) == 0 {
-			return fmt.Errorf("主模型 %q 的降级链为空（至少填一个备胎模型）", r.From)
+			return nil, fmt.Errorf("主模型 %q 的降级链为空（至少填一个备胎模型）", r.From)
 		}
 		r.To = tos
 	}
+	// ⑥ 的兜底（防御）：主模型也不得写别名——别名指向别名会让「一次请求最多
+	// 降级一次 + 不自环」失去可静态证明性。
+	for i, r := range rules {
+		if _, isAlias := aliasIdx[r.From]; isAlias {
+			return nil, fmt.Errorf("规则 %d 的主模型 %q 本身是别名（主力模型必须写 channel/model 全路径，别名指向别名不合法）", i+1, r.From)
+		}
+	}
+	warns, err := a.validateAliases(rules)
+	if err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	a.cfg.ModelFallback = rules
-	err := config.Save(a.cfg, a.cfgPath)
+	err = config.Save(a.cfg, a.cfgPath)
 	a.mu.Unlock()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if a.fbSyncer != nil {
 		a.fbSyncer(rules)
 	}
 	log.Printf("模型降级链已更新（%d 条规则，保存即热生效）", len(rules))
-	return nil
+	return warns, nil
+}
+
+// validateAliases 校验别名矩阵（R129）。硬拒：含 `/`、含空白/逗号/`*`、与其他规则
+// 的别名重名、与 compat.model_map 的键（含 `*` 通配键）重名、与任一渠道名重名。
+// 返回的软警告：别名与当前模型列表里的某个裸名重合（运行时会按别名走，允许但提示）。
+func (a *App) validateAliases(rules []config.ModelFallbackRule) ([]string, error) {
+	idx := map[string]int{}
+	for i, r := range rules {
+		name := strings.TrimSpace(r.Name)
+		if name == "" {
+			continue
+		}
+		if strings.Contains(name, "/") {
+			return nil, fmt.Errorf("规则 %d 的别名 %q 不能含 /（别名是裸名，不是 channel/model 形式）", i+1, name)
+		}
+		if !config.ValidAliasName(name) {
+			return nil, fmt.Errorf("规则 %d 的别名 %q 不能含空白、逗号或 *", i+1, name)
+		}
+		if j, dup := idx[name]; dup {
+			return nil, fmt.Errorf("规则 %d 的别名 %q 与规则 %d 重名（别名不可重复，且大小写敏感：Fast ≠ fast）", i+1, name, j+1)
+		}
+		idx[name] = i
+	}
+	if len(idx) == 0 {
+		return nil, nil
+	}
+
+	a.mu.Lock()
+	modelMap := map[string]string{}
+	for k, v := range a.cfg.Compat.ModelMap {
+		modelMap[k] = v
+	}
+	a.mu.Unlock()
+	channels := map[string]bool{}
+	for _, rt := range a.runtimesSnapshot() {
+		if rt != nil {
+			channels[rt.Kind.String()] = true
+		}
+	}
+	// 保留名（含上游命名空间如 cline-free）也算渠道名：它们参与前缀解析
+	for k := range provider.BuiltinKinds() {
+		channels[k] = true
+	}
+
+	for name, i := range idx {
+		if _, hit := modelMap[name]; hit {
+			return nil, fmt.Errorf("规则 %d 的别名 %q 与 compat.model_map 的键重名（别名优先，同名会造出「有时走映射、有时走别名」的幽灵行为）", i+1, name)
+		}
+		if channels[name] {
+			return nil, fmt.Errorf("规则 %d 的别名 %q 与渠道名重名（会搅乱 channel/model 前缀解析）", i+1, name)
+		}
+	}
+	return a.aliasBareNameWarnings(idx), nil
+}
+
+// aliasBareNameWarnings 别名与真实模型的裸名重合时给出软警告（允许保存）。
+// 运行时别名优先于 model_map / default_channel，用户需要知道这一点。
+func (a *App) aliasBareNameWarnings(idx map[string]int) []string {
+	if a.handler == nil {
+		return nil
+	}
+	byKind := a.handler.CachedChannelModels()
+	if len(byKind) == 0 {
+		return nil
+	}
+	bare := map[string]bool{}
+	for _, infos := range byKind {
+		for _, mi := range infos {
+			id := strings.TrimSpace(mi.ID)
+			if id == "" {
+				continue
+			}
+			bare[id] = true
+			if i := strings.Index(id, "/"); i > 0 { // 命名空间形态（cline-free/x）也提供裸名视角
+				bare[id[i+1:]] = true
+			}
+		}
+	}
+	var out []string
+	for name := range idx {
+		if bare[name] {
+			out = append(out, fmt.Sprintf("别名 %q 与某个真实模型的裸名重合：运行时按别名走（别名优先于 model_map / default_channel）", name))
+		}
+	}
+	sort.Strings(out) // 稳定输出（面板逐条提示，map 遍历序不确定）
+	return out
 }
 
 // SetReasoningEffortsSyncer 注入思考强度映射热更新回调（由 main.go 注入：推给 server.Handler）。
@@ -3002,11 +3277,12 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			Rules []config.ModelFallbackRule `json:"rules"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		if err := a.SetModelFallback(req.Rules); err != nil {
+		warns, err := a.SetModelFallback(req.Rules)
+		if err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "warnings": warns})
 	})
 	mux.HandleFunc("POST /api/config/reasoning_efforts", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -3063,16 +3339,25 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/config/custom_channels", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Channels []custom.ChannelConfig `json:"channels"`
+			Renames  []customRename         `json:"renames"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			apiError(w, http.StatusBadRequest, "解析请求失败："+err.Error())
 			return
 		}
-		if err := a.SetCustomChannels(req.Channels); err != nil {
+		n, err := a.setCustomChannels(req.Channels, req.Renames)
+		if err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "channels": a.cfg.CustomChannels})
+		a.mu.Lock()
+		saved := maskCustomChannels(a.cfg.CustomChannels) // 与 /api/state 同口径：只下发脱敏值
+		a.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":       true,
+			"channels": saved,
+			"renamed":  n,
+		})
 	})
 	mux.HandleFunc("POST /api/config/custom_channel_test", func(w http.ResponseWriter, r *http.Request) {
 		var req custom.ChannelConfig

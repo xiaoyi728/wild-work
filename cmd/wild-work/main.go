@@ -494,20 +494,21 @@ func main() {
 		fatal("embed web-app: %v", err)
 	}
 	inner := server.NewHandler(server.Config{
-		Runtimes:         runtimes,
-		APIKey:           cfg.APIKey,
-		Ledger:           appInst.Ledger(),
-		Stats:            appInst.Stats(), // 转发路径插桩 AddUsage/AddRequestRow（运行统计）
-		HardCooldown:     cfg.HardCreditDur,
-		HardCooldownFor:  cfg.HardCooldownFor,
-		SoftCooldown:     cfg.SoftRateDur,
-		ErrThreshold:     cfg.Cooldown.ErrThresh,
-		ErrCooldown:      cfg.ErrCooldownDur,
-		ModelFallbacks:   cfg.ModelFallback,    // 启动时载入降级链（此前仅面板保存后热更新，重启即丢）
-		ReasoningEfforts: cfg.ReasoningEfforts, // 启动时载入思考强度映射（同上）
-		MaxRequestBody:   int64(cfg.Server.MaxRequestBodyMB) << 20, // 0 = server 默认 128MiB
-		WebUI:            sub,
-		AttachAPI:        appInst.HandleAPI,
+		Runtimes:          runtimes,
+		APIKey:            cfg.APIKey,
+		Ledger:            appInst.Ledger(),
+		Stats:             appInst.Stats(), // 转发路径插桩 AddUsage/AddRequestRow（运行统计）
+		HardCooldown:      cfg.HardCreditDur,
+		HardCooldownFor:   cfg.HardCooldownFor,
+		SoftCooldown:      cfg.SoftRateDur,
+		ErrThreshold:      cfg.Cooldown.ErrThresh,
+		ErrCooldown:       cfg.ErrCooldownDur,
+		ModelFallbacks:    cfg.ModelFallback,                        // 启动时载入降级链（此前仅面板保存后热更新，重启即丢）
+		ReasoningEfforts:  cfg.ReasoningEfforts,                     // 启动时载入思考强度映射（同上）
+		MaxRequestBody:    int64(cfg.Server.MaxRequestBodyMB) << 20, // 0 = server 默认 128MiB
+		StickyMaxRequests: cfg.Server.StickyMaxRequests,             // 0 = server 默认 50
+		WebUI:             sub,
+		AttachAPI:         appInst.HandleAPI,
 	})
 	inner.SetCustomRuntimes(initCustomServerRts)
 
@@ -535,6 +536,9 @@ func main() {
 			Default:  cfg.Compat.DefaultChannel,
 			Map:      cfg.Compat.ModelMap,
 			Channels: gateway.SortChannels(currentChannels()),
+			// 启动时也要带上别名表（R129）：不得只靠面板热更新——否则重启后
+			// 「Chat 能用别名、Codex 不能用」，直到用户重新保存一次降级链。
+			Aliases: config.AliasIndex(cfg.ModelFallback),
 		},
 		MaxTokensCap: cfg.Compat.MaxTokensCap,
 	})
@@ -542,9 +546,13 @@ func main() {
 	appInst.SetCompatSyncer(func(defaultChannel string, maxTokensCap int, modelMap map[string]string) {
 		compat.SetCompat(defaultChannel, maxTokensCap, modelMap, currentChannels())
 	})
-	// 面板保存模型降级链时热更新内层 handler（不然新链要重启才生效）
+	// 面板保存模型降级链时热更新**两处**（R129）：内层 handler（降级路由 + 别名解析）
+	// 与兼容层（Responses / Anthropic 的别名表）。旧实现只推内层，这是既有接线缺口——
+	// 漏推的表现是「Chat 能用别名、Codex 不能」。兼容层的别名表走独立的 SetAliases，
+	// 不扩展 SetCompat（后者由另一条保存路径负责，两条通道互不覆盖）。
 	appInst.SetModelFallbackSyncer(func(rules []config.ModelFallbackRule) {
 		inner.SetModelFallbacks(rules)
+		compat.SetAliases(config.AliasIndex(rules))
 	})
 	// 面板保存思考强度映射时热更新内层 handler（不然新映射要重启才生效）
 	appInst.SetReasoningEffortsSyncer(func(efforts map[string]string) {

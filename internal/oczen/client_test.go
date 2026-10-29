@@ -1,6 +1,8 @@
 package oczen
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -8,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"wild-work/internal/provider"
 )
@@ -82,9 +85,74 @@ func TestCanonicalSessionIDReencodesForeignEncodings(t *testing.T) {
 
 // TestDescendingTimePartLayout 低 12 位恒为 0xFFE（counter 1 取反）。
 func TestDescendingTimePartLayout(t *testing.T) {
-	got := descendingTimePart([]byte{0, 0, 0, 0, 1, 0xFF})
+	got := descendingTimePart(time.Now(), []byte{0, 0, 0, 0, 1, 0xFF})
 	if got[9:] != "ffe" {
 		t.Fatalf("descendingTimePart = %q, 末三位应为 ffe", got)
+	}
+}
+
+// TestDescendingTimePartWithinWindow 时间戳必须落在上游可接受的窗口内（R126）。
+// 旧实现从哈希直派生 → 解码后是 1970 年代的任意值；上游 2026-10-25 起超窗回
+// 429 FreeUsageLimitError。官方解码口径是 **36 位 ms（mod 2^36 回绕）**，
+// 故与今日比较也必须按模比较，否则 2026 年的值会被误读成 1970 年。
+func TestDescendingTimePartWithinWindow(t *testing.T) {
+	const wrap = int64(1) << 36
+	nowMS := time.Now().UnixMilli() % wrap
+	if nowMS < 0 {
+		nowMS += wrap
+	}
+	for i := 0; i < 16; i++ {
+		hash := []byte{byte(i), 0x5a, byte(i * 7), 0x3c, 0x99, 0x01}
+		hexPart := descendingTimePart(time.Now(), hash)
+		raw, err := hex.DecodeString(hexPart)
+		if err != nil || len(raw) != 6 {
+			t.Fatalf("descendingTimePart(%d) = %q 非 6 字节 hex", i, hexPart)
+		}
+		var inv uint64
+		for _, c := range raw {
+			inv = inv<<8 | uint64(c)
+		}
+		decoded := int64((^inv & 0xFFFFFFFFFFFF) >> 12)
+		diff := decoded - nowMS
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff > int64(31*24*time.Hour/time.Millisecond) {
+			t.Fatalf("解码时间距今日 %.1f 天，超出上游接受窗口", float64(diff)/86400000)
+		}
+	}
+}
+
+// TestLegacyHashDerivedTimestampIsOutOfWindow 负向对照：旧实现（哈希直派生）对同一个
+// 已知种子解码后距今日远超窗口。期望值是字面量（不用被测公式反算，避免测试与实现同错）。
+func TestLegacyHashDerivedTimestampIsOutOfWindow(t *testing.T) {
+	sum := sha256.Sum256([]byte("ses\x00" + "hello conversation"))
+	legacy := (uint64(sum[0])<<28 | uint64(sum[1])<<20 | uint64(sum[2])<<12 |
+		uint64(sum[3])<<4 | uint64(sum[4])>>4) << 12
+	legacy |= 1
+	inverted := ^legacy & 0xFFFFFFFFFFFF
+	decoded := int64(inverted >> 12)
+	const wrap = int64(1) << 36
+	nowMS := time.Now().UnixMilli() % wrap
+	diff := decoded - nowMS
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff <= int64(31*24*time.Hour/time.Millisecond) {
+		t.Fatalf("负向对照失效：旧算法解码距今日仅 %.1f 天，说明该用例已无法区分两种实现", float64(diff)/86400000)
+	}
+}
+
+// TestDescendingTimePartStableSameDay 同一信号同一天内恒定（prompt cache 亲和）。
+func TestDescendingTimePartStableSameDay(t *testing.T) {
+	h := []byte{1, 2, 3, 4, 5, 6}
+	day := time.Date(2026, 10, 29, 6, 0, 0, 0, time.UTC)
+	later := day.Add(10 * time.Hour)
+	if a, b := descendingTimePart(day, h), descendingTimePart(later, h); a != b {
+		t.Fatalf("同一 UTC 天内应稳定：%q vs %q", a, b)
+	}
+	if a, b := descendingTimePart(day, h), descendingTimePart(day.AddDate(0, 0, 1), h); a == b {
+		t.Fatal("跨天时间戳应推进（否则窗口会随天数漂出边界）")
 	}
 }
 

@@ -54,9 +54,14 @@ export const hasWebLogin = (ch) => WEB_LOGIN_CHANNELS.has(ch);
 export const PASTE_KEY_CHANNELS = new Set(['cline']);
 export const isPasteKey = (ch) => PASTE_KEY_CHANNELS.has(ch);
 
-// 积分汇总条的固定渠道顺序（与添加按钮布局一致；traecode 是别名池不单独出现，
-// qoder 已下线仅存量兜底）。不在表里的渠道按字母序垫后，保证不丢行。
-export const CH_SUMMARY_ORDER = ['workbuddy', 'workbuddyai', 'traework', 'qodercn', 'qodercom', 'qwenwork', 'glm', 'cline', 'monkeycode', 'raccoon', 'loomy', 'oczen', 'qoder'];
+// 积分汇总条的固定渠道顺序（R142）：由 CH_LABEL 派生，按显示名的 UTF-8 字节序升序，
+// 不再手写数组——新增渠道只改 CH_LABEL 一处，漏登记会让它按字母序垫后而不是整行消失。
+// 旧 Qoder 已下线但仍有存量账号，保留在 CH_LABEL 中，故仍会出现于汇总条末尾附近。
+export const CH_SUMMARY_ORDER = Object.keys(CH_LABEL).sort((a, b) => {
+  const la = CH_LABEL[a], lb = CH_LABEL[b];
+  if (la === lb) return a < b ? -1 : a > b ? 1 : 0;
+  return la < lb ? -1 : 1;
+});
 
 // 无手动签到渠道的状态文案：国际版是「自动领日活奖励」，千问办公为「无签到」。
 export const NO_CHECKIN_TAG = { workbuddyai: '自动领日活奖励', oczen: '不支持', cline: '无签到' };

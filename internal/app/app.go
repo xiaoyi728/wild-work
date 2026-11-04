@@ -220,6 +220,8 @@ func New(opts Options) (*App, error) {
 	log.SetOutput(&logWriter{app: a})
 	a.loadPricingCache()
 	a.healRaccoonProtocol()
+	// Loomy 凭据历史估算 expiresAt 归一化（无 refresh 端点时短期值只会触发必失败刷新）。
+	a.healLoomyExpiry()
 	return a, nil
 }
 
@@ -337,37 +339,65 @@ func (a *App) allStatuses() []pool.Status {
 	return out
 }
 
-// channelOrder 渠道固定展示顺序（面板账号卡片/费率表/设置代理列表统一用此序）。
-// 旧 Qoder 已下线不列；未出现在表中的渠道排最后（按字母序）。
-var channelOrder = map[provider.Kind]int{
-	provider.Oczen: 0, provider.WorkBuddy: 1, provider.WorkBuddyAI: 2,
-	provider.QoderCN: 3, provider.QoderCOM: 4, provider.TraeWork: 5, provider.QwenWork: 6,
-	provider.GLM: 7,
+// channelDisplayRank 渠道展示名次（索引即排序键），从 provider.ChannelDisplayOrder 派生 ——
+// 与前端 CH_LABEL / CH_SUMMARY_ORDER、面板按钮序、费率 tab 序全部同源（R142）。
+var channelDisplayRank = func() map[provider.Kind]int {
+	m := make(map[provider.Kind]int, len(provider.ChannelDisplayOrder))
+	for i, k := range provider.ChannelDisplayOrder {
+		m[k] = i
+	}
+	return m
+}()
+
+// channelSortKey 面板渠道展示排序键（R142）：
+//   - tier 0 = 内建渠道，按**显示名的 UTF-8 字节序**（rank 即 ChannelDisplayOrder 下标）；
+//   - tier 1 = 自定义渠道 / 未登记渠道，**硬编码钉在最末**，组内按渠道标识字节序，
+//     保证同一批自定义渠道每次渲染顺序一致（不依赖入参顺序）。
+//
+// 旧 Qoder 已从界面下线（代码与路由保留）：它仍是内建渠道、有显示名，故落在「Q」位置，
+// 存量账号不再被特殊钉到最末——统一规则不为单个已下线渠道开例外。
+type channelSortKey struct {
+	tier int
+	rank int
+	name string
+}
+
+func channelSortKeyOf(k provider.Kind) channelSortKey {
+	if r, ok := channelDisplayRank[k]; ok {
+		return channelSortKey{tier: 0, rank: r}
+	}
+	return channelSortKey{tier: 1, name: k.String()}
+}
+
+func (a channelSortKey) less(b channelSortKey) bool {
+	if a.tier != b.tier {
+		return a.tier < b.tier
+	}
+	if a.tier == 0 {
+		return a.rank < b.rank
+	}
+	return a.name < b.name
 }
 
 // feeChannelOrder 「模型列表和费率」面板的渠道分组顺序。
-// 与 channelOrder 分开维护：本表把 Oczen 放首位（其免费模型最常被查），
-// 且含 TraeCode（与 TraeWork 共账号但模型集不同，需独立成组）。
-var feeChannelOrder = []provider.Kind{
-	provider.Oczen, provider.WorkBuddy, provider.WorkBuddyAI, provider.QoderCN,
-	provider.QoderCOM, provider.TraeWork, provider.TraeCode, provider.QwenWork, provider.GLM,
-	provider.Cline, // 漏在此表 = 面板永远不出该渠道 tab（buildFeesChannels 只遍历本表）
-	provider.MonkeyCode,
-	provider.Raccoon,
-	provider.Loomy,
-}
-
-// channelRank 渠道排序键：未知渠道排最后。
-func channelRank(k provider.Kind) int {
-	if r, ok := channelOrder[k]; ok {
-		return r
+// 与面板账号卡片/汇总条同序（R142：按渠道显示名字节序），旧 Qoder 已下线故不列
+// （buildFeesChannels 也会跳过它）。原先「Oczen 置首位」的特例被统一规则取代。
+var feeChannelOrder = func() []provider.Kind {
+	out := make([]provider.Kind, 0, len(provider.ChannelDisplayOrder))
+	for _, k := range provider.ChannelDisplayOrder {
+		if k == provider.Qoder {
+			continue
+		}
+		out = append(out, k)
 	}
-	return 100
-}
+	return out
+}()
 
-// sortChannelsByOrder 按 channelOrder 固定顺序稳定排序渠道条目（泛型，复用于各展示处）。
+// sortChannelsByOrder 按展示序稳定排序渠道条目（泛型，复用于各展示处）。
 func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
-	sort.SliceStable(items, func(i, j int) bool { return channelRank(kindOf(items[i])) < channelRank(kindOf(items[j])) })
+	sort.SliceStable(items, func(i, j int) bool {
+		return channelSortKeyOf(kindOf(items[i])).less(channelSortKeyOf(kindOf(items[j])))
+	})
 }
 
 // creditsNAKind 判定该渠道的「积分」概念是否不适用（面板显示「不适用」而不是 0）。
@@ -1893,7 +1923,7 @@ func (a *App) ResourceDetail(uid string) (remain int64, items []provider.Resourc
 // 配置操作
 // ---------------------------------------------------------------------------
 
-// SetCheckinTimes 更新自动签到时间（HH:MM）并立即唤醒两个调度器。
+// SetCheckinTimes 更新自动签到时间（HH:MM）并推送给跟随全局配置的调度器。
 func (a *App) SetCheckinTimes(times []string) error {
 	minutes, err := config.ParseClockTimes(times)
 	if err != nil {
@@ -1915,8 +1945,15 @@ func (a *App) SetCheckinTimes(times []string) error {
 	if err != nil {
 		return err
 	}
+	// 只推给「签到时刻跟随全局配置」的调度器（issue #210）。
+	//
+	// 旧实现无条件广播给所有调度器，带来两个后果：
+	//   - 显式配成 []int{} 的渠道（qwenwork/cline/oczen 等）只要用户改过一次
+	//     签到时间，就会获得签到时刻，从此每天空跑必然失败的签到并把面板染红；
+	//   - Qoder 双区的固定 10:00 窗口（上游活动开放时刻）会被全局时刻覆盖。
+	// 故改成白名单式推送：声明了 FollowGlobalCheckin 的渠道才更新。
 	for _, rt := range a.runtimesSnapshot() {
-		if rt != nil && rt.Scheduler != nil {
+		if rt != nil && rt.Scheduler != nil && rt.Scheduler.FollowsGlobalCheckin() {
 			rt.Scheduler.SetCheckinMinutes(clean)
 		}
 	}

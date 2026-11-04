@@ -218,7 +218,10 @@ function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDis
   const noCheckinTitle = a.group === 'workbuddyai'
     ? '无需手动签到：定时自动对话保活并领取日活奖励'
     : `${groupName} 不支持手动签到`;
-  const checkinFail = !!a.last_checkin_at && !a.last_checkin_ok;
+  // 签到状态徽标。判断顺序：**先判「本渠道无签到」再判时间戳**（issue #210）。
+  // 反过来（旧实现）会让灰分支永不可达——无签到渠道被巡检写过一次时间戳后，
+  // 面板上就永远是红色「签到失败」，即使积分照常到账。
+  const checkinFail = !noCheckin && !!a.last_checkin_at && !a.last_checkin_ok;
   const isNew = !knownUids.has(a.uid);
 
   const shownRef = useRef({});
@@ -227,10 +230,10 @@ function Card({ a, state, knownUids, onRename, onCheckin, onRefresh, onToggleDis
   let tag;
   if (a.session_dead) {
     tag = <span className="tag bad" title={a.session_dead_reason || '登录态失效，请重新登录'}>需重新登录</span>;
-  } else if (a.last_checkin_at) {
-    tag = <span className={`tag ${a.last_checkin_ok ? 'ok' : 'bad'}`}>{a.last_checkin_ok ? '签到成功' : '签到失败'}</span>;
   } else if (noCheckin) {
     tag = <span className="tag neutral" title={noCheckinTitle}>{noCheckinText(a.group)}</span>;
+  } else if (a.last_checkin_at) {
+    tag = <span className={`tag ${a.last_checkin_ok ? 'ok' : 'bad'}`}>{a.last_checkin_ok ? '签到成功' : '签到失败'}</span>;
   } else {
     tag = <span className="tag neutral">未签到</span>;
   }

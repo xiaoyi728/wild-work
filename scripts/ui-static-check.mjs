@@ -133,7 +133,7 @@ const FAKE_STATS = {
     group: "traework", accounts: 2, credits: 4736, credit_in: 200, credit_out: 150,
     credit_expired: 100, credit_used: 50, tokens: 12345, expire_7d: 300, expire_today: 100, expire_tomorrow: 0,
   }],
-  models: [{ model: "traework/DeepSeek-V4", reqs: 3, tokens: 5000, credit: 12.5, avg_ttfb_ms: 800, avg_tok_per_sec: 45.2, perf_samples: 3 }],
+  models: [{ model: "traework/DeepSeek-V4", reqs: 3, tokens: 5000, credit: 12.5, avg_ttfb_ms: 800, tok_per_sec: 45.2, tput_window_sec: 60, perf_samples: 3 }],
   expiry: [{ uid: "4298452267967801", nickname: "健康号", group: "traework", expire_at: "2026-10-08", days_left: 2, amount: 100, today_out: 30, burn_forecast: 45, risk: true }],
   rotation: [{
     group: "traework",
@@ -174,7 +174,7 @@ check("预计作废量 = 额度−外推消耗（55分）", stExpiry.includes("�
 
 const stModels = document.getElementById("stModels").innerHTML;
 check("Trae 系模型积分为估算（≈ 前缀）", stModels.includes("≈12.50"));
-check("模型平均速度含 tok/s 与 TTFB", stModels.includes("45.2 tok/s") && stModels.includes("800ms"));
+check("模型最近速度含 tok/s 与 TTFB", stModels.includes("45.2 tok/s") && stModels.includes("800ms"));
 
 T.renderAbnormal(FAKE_STATS.abnormal);
 const stAbnormal = document.getElementById("stAbnormal").innerHTML;

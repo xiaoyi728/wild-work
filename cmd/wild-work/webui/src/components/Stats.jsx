@@ -292,8 +292,8 @@ export default function Stats({ active, onToast }) {
                 </td>
                 <td className={`num${m.credit ? '' : ' zero'}`}>{fmtCreditS(m.credit)}</td>
                 <td className={`num${m.avg_ttfb_ms ? '' : ' zero'}`}>{m.avg_ttfb_ms ? `${m.avg_ttfb_ms} ms` : '—'}</td>
-                <td className={`num${m.avg_tok_per_sec ? '' : ' zero'}`}>
-                  {m.avg_tok_per_sec ? `${m.avg_tok_per_sec.toFixed(1)} tok/s` : '—'}
+                <td className={`num${m.tok_per_sec ? '' : ' zero'}`} title={m.tput_window_sec ? `最近 ${m.tput_window_sec} 秒滑动窗口的投递速率` : undefined}>
+                  {m.tok_per_sec ? `${m.tok_per_sec.toFixed(1)} tok/s` : '—'}
                   {m.perf_samples ? <span className="muted">{` (${m.perf_samples})`}</span> : null}
                 </td>
               </tr>

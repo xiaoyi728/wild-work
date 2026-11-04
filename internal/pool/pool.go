@@ -312,6 +312,18 @@ func (e *entry) expireOK(now time.Time) bool {
 	return !e.earliestExpire.IsZero() && e.earliestExpire.After(now)
 }
 
+// EarliestExpireOf 返回该账号「最早有效到期时刻」，ok=false 表示账号不存在。
+// 零值时间 = 该渠道不下发到期信息（R112：这类账号在选号时垫底）。
+func (p *Pool) EarliestExpireOf(uid string) (time.Time, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return time.Time{}, false
+	}
+	return e.earliestExpire, true
+}
+
 // unixOrZero 把持久化的 unix 秒还原成时刻（0 = 无到期信息）。
 func unixOrZero(sec int64) time.Time {
 	if sec <= 0 {

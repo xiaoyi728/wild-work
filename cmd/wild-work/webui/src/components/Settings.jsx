@@ -194,6 +194,24 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
   const [autostart, setAutostart] = useState(!!state.autostart);
   // 思考链防癫：后端缺省（旧 config.json 无 features 段）按开启显示，与 config.Default() 一致。
   const [loopGuard, setLoopGuard] = useState(state.loop_guard !== false);
+  // 临期口径（R112b）：只认 1/2/7，非法/缺省回退 1 天（与后端 config.IsExpiringDays 同口径）。
+  const EXPIRING_DEF = 1;
+  const normExpDays = (n) => (n === 1 || n === 2 || n === 7) ? n : EXPIRING_DEF;
+  const [expDays, setExpDays] = useState(() => normExpDays(state.expiring_days));
+  async function saveExpiringDays(days) {
+    const d = normExpDays(days);
+    const prev = expDays;
+    setExpDays(d); // 乐观更新：后端失败再回滚，避免下拉框看起来"没反应"
+    if (d === normExpDays(state.expiring_days)) return; // 值未变：不打一轮上游
+    try {
+      await api('/api/config/expiring_days', { days: d });
+      onToast(`临期口径已改为 ${d} 日`);
+      onSaved(); // 后端会异步刷一轮积分，重新拉 state 拿新数字
+    } catch (e) {
+      setExpDays(prev);
+      onToast(e.message);
+    }
+  }
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
   // 桌宠开关只存本浏览器 localStorage，后端不参与，故初值在弹层挂载时现读一次。
@@ -916,6 +934,16 @@ export default function Settings({ state, onClose, onSaved, onToast, onEnsureSes
               ) : null}
             </div>
             <div className="hint">保活 22:00 自动 · 下次 <span id="nextCheckin">{state.next_checkin || '-'}</span></div>
+            <div className="row" style={{ marginTop: 8 }}>
+              <label className="lbl wide" title="面板「积分汇总」里「临期」用几天窗口（纯展示口径，不参与选号）">临期口径</label>
+              <select id="selExpiring" className="select" style={{ minWidth: 160 }}
+                      value={String(expDays)} onChange={(e) => saveExpiringDays(parseInt(e.target.value, 10))}>
+                <option value="1">1 日（今日到期）</option>
+                <option value="2">2 日（今日+明日）</option>
+                <option value="7">7 日（7 日内到期）</option>
+              </select>
+              <span className="hint" style={{ marginLeft: 8 }}>决定「临期」列与汇总条的口径；选号仍按最早到期时刻，不受此影响</span>
+            </div>
             <div className="row" style={{ marginTop: 8 }}>
               <label className="lbl wide">开机自启</label>
               <label className="switch">

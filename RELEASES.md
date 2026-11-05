@@ -2019,3 +2019,29 @@ Cline 上游免费池的 ID 自带命名空间（`cline-free/*`），此前对�
 |--------|------|
 | [@ezjbc](https://github.com/ezjbc) | #118 思考强度档位注入（含面板可视化编辑与热更新） |
 | [@jianzhangg](https://github.com/jianzhangg) | #119 小浣熊 setting_info 签到、#120 自定义 OpenAI 兼容渠道、#121 自定义渠道 UI 打磨 |
+
+---
+
+# wild-work v2.11.5
+
+对齐上游 `v2.11.2` → `v2.11.5`（13 个提交），并修复一批本地既有缺陷。**渠道面只有 workbuddy 与 oczen 需要移植**：raccoon / traework / qoder 系在 v2.11.2→v2.11.5 之间零提交，未动。
+
+## 🔧 后端修复
+
+1. **临期口径可配（1/2/7 天）** —— 新增 `schedule.expiring_days`（默认 1）+ `POST /api/config/expiring_days` + `/api/state` 的 `expiring_days` 字段，调度器与面板同源。非法值只告警回退、**不写盘**（加载路径绝不改用户配置）。
+2. **`Close` 必须等积分刷新收尾** —— `SetExpiringDays` 末尾是 `go RefreshAll()`，而刷新会往回写 pool 快照/ledger/stats 并重建 `data` 目录。旧 `Close` 不等它 ⇒ 进程退出与后台 goroutine 抢句柄（Windows 上表现为 `RemoveAll cleanup: directory is not empty`）。新增 `waitRefresh` + `closed` 闸门。
+3. **`Close` 必须等 ledger 落盘收尾** —— `AutoFlush` 收到 stop 后还要跑一次 `Flush` 才 return，而 `Close` 紧接着就关句柄，两者无同步。实测全量跑 `internal/app` **约 1/3 概率**报 `TempDir RemoveAll cleanup: directory is not empty`。改为 `ledgerDone` 通道等 goroutine 真正退出（修复后连续 5 次全绿）。
+4. **oczen 挂上官方 TLS 指纹** —— 上游按 JA3 拒非官方 ClientHello，原生 Go 指纹稳定复现 429。默认用 uTLS 打官方 2.2.5 的 ClientHello；只设 `DialTLSContext`、不设 `TLSClientConfig`。诊断开关 `OCZEN_NO_FINGERPRINT=1` 退回原生。**注意**：走自定义 `DialTLSContext` 的连接不受 `Transport.TLSHandshakeTimeout` 约束，故拨号器内自加 10s 握手超时，否则静默上游会无限挂住。
+5. **sanitize 表对齐 v2.11.5** —— 删除 `BodyFallback`/`bodyDSHRe`，DSH 目标改为 `"You are an AI agent powered by DSH"`；`cleanMessages` 跳过 `user`/`tool`/`function`。`internal/sanitize` 与 `internal/upstream/sanitize.go` 两份实现同步更新，并补齐 parity 护栏测试。
+
+## 🎨 面板
+
+- 设置页新增「临期阈值」下拉（1/2/7 天），保存即时生效并触发重算。
+- **版本号修正**：`Version` 长期停在 `2.9.3`（面板标题栏与「关于」弹窗直接展示），已改为 `2.11.5`。
+- vanilla `web/index.html` 的临期下拉原为 `1/2/3`，与后端 `IsExpiringDays(1/2/7)` 不一致（选 3 必被拒），已对齐为 `1/2/7`。
+- `config.example.json` 补 `"expiring_days": 1`。
+
+## ⚠️ 明确不采纳的上游改动
+
+- **oczen 头集反转**：上游 v2.11.5 改为发送 `x-session-affinity`/`X-Session-Id`、去掉 `x-opencode-request`，并把工具集换成官方 12 个（`shell` 而非 `bash`）。**这与本地 2026-10-15 单变量实测判据完全相反**（本地 `gate_test.go` 冻结「带亲和头即 403」「缺 `bash` 即 403」），且本地 `live_gate_test.go` 已记录「上游 master 至今仍在发的那套 wire 会被拒」。对照实验证实：把上游整形层接进去后，本地四种工具输入**全部缺 `bash`**、判据全红。故只采纳与之正交的 TLS 指纹，整形层与头集反转**不采纳**（相关文件已移除，备份留于 `/tmp/oczen-v2-shaping-backup/`）。
+- **`scripts/ui-static-check.mjs`**：项目文档已裁定「有意不采纳（孤儿脚本、驱动 vanilla 冻结版）」。该脚本硬性导出 12 个函数、其中 11 个在 vanilla `app.js` 中已不存在（`renderSummary` 等），运行必崩——属既有状态，不在本次范围。

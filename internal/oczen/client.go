@@ -63,6 +63,14 @@ func New() *Client {
 		IdleConnTimeout:       30 * time.Second,
 		ResponseHeaderTimeout: 120 * time.Second,
 	}
+	// TLS 指纹（2026-11-04 上游 v2.11.5 证据）：上游按 JA3 拒非官方 ClientHello，
+	// 原生 Go 指纹会稳定复现 429。故默认用 uTLS 打官方 2.2.5 的 ClientHello。
+	// 只设 DialTLSContext、**不**设 TLSClientConfig：指纹由 uTLS 接管，两处同时设
+	// 会让 Go 在 addTLS 分支再套一层原生握手（tlsfp_test 对此有断言）。
+	// 诊断开关 OCZEN_NO_FINGERPRINT=1 退回原生，用于 A/B 复现「429 只由指纹决定」。
+	if !fingerprintDisabled() {
+		tr.DialTLSContext = officialFingerprintDialer(dialer.DialContext)
+	}
 	// 刻意**不**设 Base：让它留空，由 base() 按凭证车道选择
 	// （匿名 → AnonymousBase，自备 key → DefaultBase）。写死成任一个都会把另一条
 	// 车道钉在错误入口上（匿名走 /zen 是 2026-10-15 那次恒 403 的形态）。

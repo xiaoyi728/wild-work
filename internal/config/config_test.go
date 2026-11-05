@@ -188,3 +188,51 @@ func TestBadDuration(t *testing.T) {
 		t.Fatal("want error for bad duration")
 	}
 }
+
+// TestExpiringDaysNormalize 临期展示口径只接受 1/2/7（R112b），非法值在内存回退
+// 默认 1 天，且**加载时不写盘**（与 sticky_max_requests 同一纪律）。
+func TestExpiringDaysNormalize(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"缺字段落默认", `{}`, DefaultExpiringDays},
+		{"显式1日", `{"schedule":{"expiring_days":1}}`, 1},
+		{"显式2日", `{"schedule":{"expiring_days":2}}`, 2},
+		{"显式7日", `{"schedule":{"expiring_days":7}}`, 7},
+		{"非法3回退", `{"schedule":{"expiring_days":3}}`, DefaultExpiringDays},
+		{"非法0回退", `{"schedule":{"expiring_days":0}}`, DefaultExpiringDays},
+		{"非法负数回退", `{"schedule":{"expiring_days":-1}}`, DefaultExpiringDays},
+		{"非法30回退", `{"schedule":{"expiring_days":30}}`, DefaultExpiringDays},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := loadWith(t, c.in)
+			if cfg.Schedule.ExpiringDays != c.want {
+				t.Errorf("expiring_days = %d, want %d", cfg.Schedule.ExpiringDays, c.want)
+			}
+		})
+	}
+}
+
+// TestIsExpiringDays 面板下拉框的合法集合。
+func TestIsExpiringDays(t *testing.T) {
+	for _, d := range []int{1, 2, 7} {
+		if !IsExpiringDays(d) {
+			t.Errorf("IsExpiringDays(%d) = false, want true", d)
+		}
+	}
+	for _, d := range []int{0, 3, 4, 5, 6, 8, 30, -1} {
+		if IsExpiringDays(d) {
+			t.Errorf("IsExpiringDays(%d) = true, want false", d)
+		}
+	}
+}
+
+// TestDefaultExpiringDaysIsOne 默认口径必须与运行统计「今日到期」列同源。
+func TestDefaultExpiringDaysIsOne(t *testing.T) {
+	if got := Default().Schedule.ExpiringDays; got != DefaultExpiringDays {
+		t.Errorf("Default().Schedule.ExpiringDays = %d, want %d", got, DefaultExpiringDays)
+	}
+}

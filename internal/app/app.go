@@ -51,8 +51,11 @@ import (
 	"wild-work/internal/systray"
 )
 
-// Version 版本号。
-const Version = "2.9.3"
+// Version 版本号（面板标题栏与「关于」弹窗直接展示，须与已对齐的上游版本一致）。
+//
+// 2026-11-05 修正：此前长期停在 2.9.3，而 HEAD 已对齐 v2.11.2、本次又并入
+// v2.11.5 的 sanitize 表与 oczen TLS 指纹，用户看到的是过期版本号。
+const Version = "2.11.5"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -112,6 +115,10 @@ type App struct {
 	// 否则会与测试的临时目录清理、以及进程退出抢跑，留下写了一半的文件。
 	closed atomic.Bool
 
+	// refreshDone RefreshAll 的收尾信号（关闭时 Close 要等它落地）。
+	// 值可以是 nil（没有在跑的刷新），Close 对它做一次普通的 nil 判断即可。
+	refreshDone chan struct{}
+
 	muLogin      sync.Mutex
 	loginBusy    bool
 	loginCtx     context.Context
@@ -161,6 +168,14 @@ type App struct {
 	// ledger 用量/积分双流水（data/ledger/）；锦上添花统计，nil = 未启用
 	ledger     *ledger.Ledger
 	ledgerStop chan struct{}
+	// ledgerDone 在 AutoFlush goroutine **真正退出**时关闭。
+	//
+	// 只关 ledgerStop 不够：AutoFlush 收到 stop 后还要跑一次 l.Flush() 才 return，
+	// 而 Close 紧接着就关句柄 —— 两者无同步 ⇒ goroutine 可能在 Close 返回后仍往
+	// 目录里写，撞上 t.TempDir() 清理（实测 1/3 概率
+	// "RemoveAll cleanup: directory is not empty"，见 TestCustomChannelKeyRevealEndpoint）。
+	// 故 Close 必须等这个 done 通道，而不是发完 stop 就走。
+	ledgerDone chan struct{}
 
 	// stats 运行统计引擎（data/stats.json）：面板「运行统计」tab 的数据面，
 	// 数据注入全部进程内直调（见 internal/stats 包注释与 AGENTS.md R13）；nil = 未启用
@@ -196,7 +211,11 @@ func New(opts Options) (*App, error) {
 	}
 	if a.ledger != nil {
 		a.ledgerStop = make(chan struct{})
-		go a.ledger.AutoFlush(a.ledgerStop)
+		a.ledgerDone = make(chan struct{})
+		go func() {
+			defer close(a.ledgerDone)
+			a.ledger.AutoFlush(a.ledgerStop)
+		}()
 	}
 
 	// 运行统计引擎（data/stats.json）：初始化失败不致命——端点回 disabled、插桩/喂入全判 nil
@@ -248,15 +267,50 @@ func (a *App) healRaccoonProtocol() {
 	_ = raccoon.ClearCallback(dir)
 }
 
+// waitRefresh 等在跑的 RefreshAll 收尾（没有在跑就立即返回）。
+//
+// 为什么必须等：刷新链路会往回写 pool 快照 / ledger / stats，并在写的过程中
+// **重新创建 data 目录**。Close 若不等它，进程退出（或测试里的 TempDir 清理）
+// 会与后台 goroutine 抢同一批文件句柄——Windows 上表现为
+// `RemoveAll cleanup: ... directory is not empty` / `The process cannot access the file`，
+// 面板侧则可能留下一个半截的 state.json。
+// timeout 是有界的：上游可能卡在超时里，退出路径不能无限挂。
+func (a *App) waitRefresh(timeout time.Duration) {
+	a.refreshMu.Lock()
+	done := a.refreshDone
+	a.refreshMu.Unlock()
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		log.Printf("退出前等待积分刷新超时（%s）：后台刷新仍在写 data 文件", timeout)
+	}
+}
+
 // Close 关闭日志文件。
 func (a *App) Close() {
 	a.closed.Store(true)
-	// 停 ledger 自动落盘并冲刷句柄（丢最后几秒流水可接受，但不能一直丢）
+	// 第一件事：等正在跑的积分刷新收尾。closed 标志已在上方置位，堵住
+	// 「go RefreshAll() 还没被调度，Close 已经跑完」这个窗口——那个 goroutine
+	// 一旦还真跑起来，会在已关闭的目录上重新建出 data/ledger。
+	a.waitRefresh(5 * time.Second)
+	// 停 ledger 自动落盘：先发 stop，再**等 goroutine 真正退出**，最后才关句柄。
+	// AutoFlush 收到 stop 后还要跑一次 Flush 才 return；不等它就会出现
+	// 「Close 已返回、goroutine 仍在往目录写」⇒ t.TempDir 清理撞车（实测 1/3）。
 	if a.ledgerStop != nil {
 		select {
 		case <-a.ledgerStop:
 		default:
 			close(a.ledgerStop)
+		}
+	}
+	if a.ledgerDone != nil {
+		select {
+		case <-a.ledgerDone:
+		case <-time.After(5 * time.Second):
+			log.Printf("退出前等待 ledger 落盘超时（5s）：后台仍可能写 data/ledger")
 		}
 	}
 	if a.ledger != nil {
@@ -524,6 +578,18 @@ func (a *App) checkinTimes() []string {
 		return rt.Scheduler.CheckinTimes()
 	}
 	return nil
+}
+
+// expiringDays 面板「积分汇总·临期」的展示窗口（自然日，1/2/7）。
+// 配置值是唯一真源；缺省/非法（老配置没读过 normalize）一律回退 1 天。
+func (a *App) expiringDays() int {
+	a.mu.Lock()
+	d := a.cfg.Schedule.ExpiringDays
+	a.mu.Unlock()
+	if !config.IsExpiringDays(d) {
+		return config.DefaultExpiringDays
+	}
+	return d
 }
 
 func (a *App) keepaliveHours() []int {
@@ -1599,10 +1665,11 @@ func (a *App) creditSnapshot(rt *Runtime, au *auth.Auth) (remain int64, items []
 		return 0, nil, 0, 0, err
 	}
 	_, unusable = provider.Summarize(items)
-	// 临期额度：自然日口径（provider.ExpiringDays 个自然日内到期，次日 00:00 失效算今日）。
+	// 临期额度：自然日口径（config.schedule.expiring_days 个自然日内到期，次日 00:00 失效算今日）。
 	// R112 起**仅展示**（面板三口径/汇总条），不参与选号——选号用下面的 earliest。
+	// 窗口可配 1/2/7（R112b），与运行统计三桶同源。
 	now := time.Now()
-	expiring = provider.ExpiringWithinDays(items, provider.ExpiringDays, now)
+	expiring = provider.ExpiringWithinDays(items, a.expiringDays(), now)
 	// 最早到期时刻：Pick() 的第一排序键（R112）。ok=false（如 Qoder 不下发到期时间）
 	// 时返回零值，pool 会把它排到「有到期信息」的账号之后按余额兜底。
 	earliest, _ := provider.EarliestExpire(items, now)
@@ -1763,16 +1830,20 @@ func (a *App) RefreshCredits(uid string) (int64, error) {
 // RefreshAll 刷新全部账号积分，返回汇总（供托盘消息框 / Web UI）。
 func (a *App) RefreshAll() RefreshSummary {
 	a.refreshMu.Lock()
-	if a.refreshing {
+	if a.refreshing || a.closed.Load() {
 		a.refreshMu.Unlock()
 		return RefreshSummary{Busy: true}
 	}
 	a.refreshing = true
+	done := make(chan struct{})
+	a.refreshDone = done
 	a.refreshMu.Unlock()
 	defer func() {
 		a.refreshMu.Lock()
 		a.refreshing = false
+		a.refreshDone = nil
 		a.refreshMu.Unlock()
+		close(done) // 先解除记录再广播：等的人醒来时状态已是「空闲」
 	}()
 	sum := RefreshSummary{Platforms: map[string]PlatformSummary{}}
 	for _, rt := range a.runtimesSnapshot() {
@@ -1924,6 +1995,43 @@ func (a *App) ResourceDetail(uid string) (remain int64, items []provider.Resourc
 // ---------------------------------------------------------------------------
 
 // SetCheckinTimes 更新自动签到时间（HH:MM）并推送给跟随全局配置的调度器。
+// SetExpiringDays 更新「积分汇总」临期口径（自然日，1/2/7）：保存配置 → 推给所有
+// 调度器 → **立即刷一轮积分**让面板当场生效。
+//
+// 为什么必须立即刷：expiring 只在上游响应到达时计算并写进 pool 快照（见 creditSnapshot），
+// 不主动刷的话用户把下拉框从 1 天改成 7 天后，界面要等到下一次 10 分钟的自动刷新
+// 才有变化，看起来像没生效。刷新是**复用已有账号的余额端点**（每账号一次调用，与常规
+// 10 分钟刷新同源、同量级），不是新增探测。
+//
+// 注意它**不参与选号**：选号判据只有 provider.EarliestExpire（R112），
+// 这里是纯展示口径（R112b）。
+func (a *App) SetExpiringDays(days int) error {
+	if !config.IsExpiringDays(days) {
+		return errors.New("临期口径仅支持 1/2/7 天")
+	}
+	a.mu.Lock()
+	if a.cfg.Schedule.ExpiringDays == days {
+		a.mu.Unlock()
+		return nil // 值未变：不写盘、不刷积分（避免用户点两次就白打一轮上游）
+	}
+	a.cfg.Schedule.ExpiringDays = days
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	// 推给所有调度器：签到路径也会写 expiring，不推的话它会继续用旧窗口算，
+	// 并在下一次签到把 pool 里的值改回旧口径。
+	for _, rt := range a.runtimesSnapshot() {
+		if rt != nil && rt.Scheduler != nil {
+			rt.Scheduler.SetExpiringDays(days)
+		}
+	}
+	go a.RefreshAll() // 异步：接口立即返回，面板的旧数字在下一次 poll 时被新值替换
+	log.Printf("临期口径已更新：%d 个自然日", days)
+	return nil
+}
+
 func (a *App) SetCheckinTimes(times []string) error {
 	minutes, err := config.ParseClockTimes(times)
 	if err != nil {
@@ -2742,9 +2850,12 @@ type State struct {
 	Accounts       []AccountView `json:"accounts"`
 	CheckinTimes   []string      `json:"checkin_times"`
 	KeepaliveHours []int         `json:"keepalive_hours"`
-	ListenHost     string        `json:"listen_host"`
-	ListenPort     int           `json:"listen_port"`
-	APIKey         string        `json:"api_key"`
+	// ExpiringDays 面板「积分汇总·临期」的计算口径（自然日，1/2/7）。
+	// 只影响展示，不参与选号（R112b）。老前端不读该字段也无害。
+	ExpiringDays int    `json:"expiring_days"`
+	ListenHost   string `json:"listen_host"`
+	ListenPort   int    `json:"listen_port"`
+	APIKey       string `json:"api_key"`
 
 	// AdminPassSet 是否已配置管理密码（不回显密码本身）；
 	// AuthEnabled = 面板鉴权已生效（密码非空）；
@@ -2815,6 +2926,7 @@ func (a *App) GetState() State {
 	st := State{
 		CheckinTimes:   a.checkinTimes(),
 		KeepaliveHours: a.keepaliveHours(),
+		ExpiringDays:   a.expiringDays(),
 		ListenHost:     listen.Host,
 		ListenPort:     listen.Port,
 		APIKey:         a.cfg.APIKey,
@@ -3227,6 +3339,18 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if err := a.SetCheckinTimes(req.Times); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	mux.HandleFunc("POST /api/config/expiring_days", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Days int `json:"days"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetExpiringDays(req.Days); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}

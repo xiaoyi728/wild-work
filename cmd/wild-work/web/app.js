@@ -1021,7 +1021,7 @@ async function saveSettings() {
     await api("/api/config/compat", { default_channel: defaultChannel, max_tokens_cap: maxTokensCap, model_map: modelMap });
   } catch (e) { toast(e.message); return; }
 
-  // 4) 临期阈值（1/2/3 天，独立端点即时生效）
+  // 4) 临期阈值（1/2/7 天，独立端点即时生效；后端 IsExpiringDays 只收这三个值）
   const expDays = parseInt($("selExpiring").value, 10) || 1;
   if (expDays !== (state.expiring_days || 1)) {
     try {

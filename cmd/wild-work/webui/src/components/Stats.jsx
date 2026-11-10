@@ -247,24 +247,31 @@ export default function Stats({ active, onToast }) {
         <div className="ucard-label">最近临期</div>
         <table className="table" id="stExpiry">
           <thead><tr>
-            <th>账号</th><th>平台</th><th className="num">临期额度</th>
-            <th>到期</th><th className="num">今日已耗</th><th className="num">剩余</th>
+            <th>账号</th><th>平台</th><th className="num" title="临期额度 = 本行这批包（同一到期日）的待作废额度；今日花费 ≈ max(0, 今日余额下降差值 − 今日已作废)，发放与作废相抵时可能低估；今日已废 = 该账号今天已经清零的全部包，不一定是本行这批">临期额度</th>
+            <th>到期</th><th className="num" title="今日花费是估算值：余额下降差值扣今日已作废；老后端无 today_spent 时退回 today_out">今日花费</th><th className="num">剩余</th>
           </tr></thead>
           <tbody>
-            {(snap.expiry || []).map((r) => (
+            {(snap.expiry || []).map((r) => {
+              const spent = Number(r.today_spent ?? r.today_out);
+              const expired = Number(r.today_expired) || 0;
+              const burn = r.risk
+                ? ` · 到期前还会废 ${fmtCreditS(r.burn_forecast < 0 ? r.amount : Math.max(0, r.amount - r.burn_forecast))}分`
+                : '';
+              return (
               <tr key={r.uid} className={r.risk ? 'warn' : ''}>
                 <td title={r.uid}>{r.nickname || shortUid(r.uid)}</td>
                 <td>{chLabel(r.group)}</td>
                 <td className="num">{fmtCreditS(r.amount)}</td>
                 <td className={r.urgency === 'today' ? 'danger' : (r.urgency === 'tomorrow' ? 'warn' : '')}
                     title="完整到期时刻（秒级）">{fmtExpireInstant(r.expire_at)}</td>
-                <td className="num">{fmtCreditS(r.today_out)}</td>
+                <td className="num">{fmtCreditS(spent)}{expired > 0 ? <span className="muted">{` · 今日已废 ${fmtCreditS(expired)}分`}</span> : null}</td>
                 <td className={`num${r.hours_left != null && r.hours_left < 24 ? ' warn' : ''}`}>
                   {r.hours_left != null ? `${r.hours_left} 小时后` : (r.days_left <= 0 ? '今日到期' : `${r.days_left} 天后到期`)}
-                  {r.risk ? <span className="muted">{` · 预计作废 ${fmtCreditS(Math.max(0, r.amount - r.burn_forecast))}分`}</span> : null}
+                  {burn ? <span className="muted">{burn}</span> : null}
                 </td>
               </tr>
-            ))}
+            );
+            })}
           </tbody>
         </table>
         {!(snap.expiry || []).length ? <div className="empty">7 天内无临期账号</div> : null}

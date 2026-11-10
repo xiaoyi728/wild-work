@@ -2045,3 +2045,28 @@ Cline 上游免费池的 ID 自带命名空间（`cline-free/*`），此前对�
 
 - **oczen 头集反转**：上游 v2.11.5 改为发送 `x-session-affinity`/`X-Session-Id`、去掉 `x-opencode-request`，并把工具集换成官方 12 个（`shell` 而非 `bash`）。**这与本地 2026-10-15 单变量实测判据完全相反**（本地 `gate_test.go` 冻结「带亲和头即 403」「缺 `bash` 即 403」），且本地 `live_gate_test.go` 已记录「上游 master 至今仍在发的那套 wire 会被拒」。对照实验证实：把上游整形层接进去后，本地四种工具输入**全部缺 `bash`**、判据全红。故只采纳与之正交的 TLS 指纹，整形层与头集反转**不采纳**（相关文件已移除，备份留于 `/tmp/oczen-v2-shaping-backup/`）。
 - **`scripts/ui-static-check.mjs`**：项目文档已裁定「有意不采纳（孤儿脚本、驱动 vanilla 冻结版）」。该脚本硬性导出 12 个函数、其中 11 个在 vanilla `app.js` 中已不存在（`renderSummary` 等），运行必崩——属既有状态，不在本次范围。
+
+---
+
+# wild-work v2.11.6
+
+对齐上游 `v2.11.5` → `v2.11.6`（22 个提交，**无新渠道**），按「以上全部修复」移植 7 项现有渠道/后端修复，并完成本地 React 面板适配。上游 v2.11.5 的 oczen 官方整形层/头集反转仍按 L20 结论**有意不采纳**。
+
+## 🔧 后端修复
+
+1. **同账号 refresh 单飞** —— 新增 `internal/provider/refresh.go`（按凭据文件路径为键，map+channel 手写，不引入 x/sync）。接入请求路径、401 自愈、积分自动刷新、费率刷新、签到前刷新、保活六处；每处 fn 内重新判断 `NeedsRefresh`，401 自愈刻意不重检。修复 refresh_token 单会话渠道（raccoon/qwenwork）并发刷新时一成功一冲突（`200822`/`invalid_grant`）并把失败方打进冷却的问题。
+2. **小浣熊有效期取数与归属** —— `points/v1/bills` 改 `?paging.limit=100&type=income`（官方「收入明细」页签口径），避免当天发放记录被对话消耗流水挤出窗口；每日池为 0 时仍挂最早在效发放的到期时刻，不再让「有效期」整列消失；余额归属改为**最新发放优先**（上游 FIFO 消耗，剩余属于最新几笔），输出仍按到期升序。
+3. **千问办公登录改设备授权流** —— 重写 `internal/login_qwenwork`：`Start` 只拼 `/device/selectAccounts` 地址，`Poll` 轮询 `/api/v1/deviceToken/poll`（404 + `x-device-flow-state: pending` 为进行中），删除本机回调 server 与 DCR 注册；机器标识落盘复用。旧自拼 OAuth 的 state 非网关签发，回调恒 `INVALID_OAUTH_CALLBACK`，故旧路径实际不可用。
+4. **MonkeyCode 402 → `hard_credit`** —— 积分耗尽不再落 `ErrPassthrough`：账号进硬冷却、模型降级链可按既有 `hard_credit` 规则触发、不把上游原文直透给客户端。429 仍维持模型级软限流。
+5. **Loomy 余额字段全缺不再当 0** —— 上游 HTTP 200 但不带任何余额字段时返回错误，调用方保留上一轮余额；真实 `balance=0`（字段存在）仍正常放行，避免「假过期 + 假发放」成对刷屏。
+6. **DSH 脱敏增强 + `sanitize.toml`** —— 恢复 `deepseek harness` 预检；新增品牌串全量缩写正则（`DeepSeek Harness` → `DSH`，含 implementation checkout / WebGUI 段），身份句规则先行、不跨品牌替换；tool_call arguments 改写后过 `json.Valid`，坏 JSON 放弃该条。新增 `internal/sanitizecfg`：工作目录 `sanitize.toml` 首次启动生成完整模板，段键为源文件路径，只追加不覆盖内置规则，1 MiB 上限，坏条目逐条跳过，解析问题写同目录 `sanitize.log`。两渠道 `PrepareBody` 改为解码后原地脱敏（去掉整包二次解析），`sanitize.toml` 需重启生效。
+7. **临期预测区分「余额下降」与「到期作废」** —— `ApplyLedgerExpire` 改吃 `[]LedgerExpire`（Channel+UID+Amount），新增 `expiredByUID` 与 `netSpentLocked = creditOut − 今日作废（钳 0）`，`burnForecast` 改用净花费外推；`ExpiryRow` 新增 `today_spent`/`today_expired`（`today_out` 保留旧口径），快照 `Version` bump 到 `2`。`ledger.DiffCredits` 统一跳过 `InfoOnly` 条目（monkeycode 每日 Token 额度量纲不是分），避免 token 变动污染积分流水。修复「已耗 300 · 预计作废 264」自相矛盾。面板「最近临期」改为「今日花费 + 今日已废 / 到期前还会废（带批次限定词）」。
+
+## 🎨 面板
+
+- 「运行统计 → 最近临期」按新口径展示：今日花费取 `today_spent`（老后端无该字段时退回 `today_out`），有作废额时追加「· 今日已废 N分」；预计作废文案改为「到期前还会废」（与「今日已废」区分不同批次）。表头 title 写明三数口径不同、不必相加相等。
+
+## 📌 说明
+
+- 积分流水月末保留期 cutoff 修正**本地早已修复**（`18bc2dc`，同样锚到每月 1 号），本次不重复改。
+- `sanitize.toml` 只追加、不覆盖、不删除内置规则；改动后需重启。内置规则始终保留。

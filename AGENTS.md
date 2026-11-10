@@ -1579,3 +1579,54 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   oczen 五道闸门判据（L15.1）、`app.Version=2.9.3`（未 bump、未发版）。
 - **未做/待办**：① 生产二进制未重建/未重启（`dist/wild-work-linux` 运行中会 ETXTBSY，重启需所有者点头，
   走 L7 备份流程）；② oczen 修复后仍需实盘复验（当前上游免费档对本机两出口全 429，代码无法证明恢复）。
+
+### L23 2026-11-10 对齐上游 v2.11.6（现有渠道 + 后端修复，无新渠道）
+
+- **范围（所有者「以上全部修复」）**：只移植 `v2.11.5 → v2.11.6` 的现有渠道/后端修复，不做新渠道；
+  oczen 官方整形层/头集反转仍按 L20 结论不采纳（只保留 v2.11.5 已并入的 TLS 指纹）。
+- **refresh 单飞（R156 前置）**：新增 `internal/provider/refresh.go`（按 `auth.Auth.FilePath` 为键，
+  FilePath 空回落 UID；map+channel 手写，不引入 x/sync；fn panic 先唤醒等待者再上抛）。
+  接入六处：`server/handler.go` 请求路径、`app.refreshIfSessionDead`（401 自愈，刻意不重检）、
+  `StartCreditAutoRefresh`、`RefreshPricing`、`scheduler.refreshForCheckin`、`RunKeepaliveNow`。
+  内层重检封住「flight 刚结束、表项刚删」窗口；401 自愈不重检是因为 session 已被上游作废而本地
+  `expiresAt` 可能未到期。回归 `provider/refresh_test.go`（并发共享、不同账号不阻塞、错误共享、panic 唤醒）。
+- **小浣熊有效期（R107 续）**：`fetchDailyGrants` 改 `?paging.limit=100&type=income`（官方「收入明细」
+  页签），避免当天发放被对话消耗流水挤出最近 100 条窗口；每日池为 0 时仍挂最早在效发放的到期
+  （只补 `ExpireAt`，Total/Remain/Key 不动）；余额归属改为**最新发放优先**（FIFO 消耗 ⇒ 剩余属于最新几笔），
+  输出仍按到期升序供 ledger 聚合取最早 Expire。回归 `raccoon_test.go` 新增 10 条。
+- **千问办公设备授权流**：`internal/login_qwenwork` 重写——`Start` 只拼
+  `/device/selectAccounts?challenge=…&challenge_method=S256&nonce=…&machine_id=…&client_id=…&redirect_uri=qwenwork-cn://`，
+  `Poll` 轮询 `/api/v1/deviceToken/poll`（404 + `x-device-flow-state: pending` = 进行中，200 回 token 对），
+  删除本机回调页与 DCR 注册；机器标识落盘复用。旧自拼 OAuth 的 state 非网关签发 ⇒ 回调恒
+  `INVALID_OAUTH_CALLBACK`。`app.pollLogin` 的 qwenwork 分支改为终态错误即 `setLoginError` 并退出，
+  不再每 2s 重复报错。回归 `device_flow_test.go` 8 例。
+- **MonkeyCode 402**：`Classify` 增加 `StatusPaymentRequired → ErrHardCredit`（积分耗尽 → 账号硬冷却 +
+  既有模型降级链触发）；429 仍 `ErrSoftRate`。
+- **Loomy 空余额**：`UserResourceDetail` 在 JSON 解析失败或「一个余额字段都没识别到」时返回错误，
+  调用方保留上一轮余额；真实 `balance=0`（字段存在）仍放行，避免假过期/假发放刷屏。
+- **DSH 脱敏 + `sanitize.toml`（R156）**：恢复 `deepseek harness` 预检；在身份句规则之后新增
+  `deepseek[\s\-_]*harness → DSH` 全量品牌串缩写（覆盖 implementation checkout / WebGUI 段，
+  先身份句后品牌串、不跨品牌替换）；`tool_calls.arguments` 改写后 `json.Valid` 不过则放弃该条。
+  新增 `internal/sanitizecfg`：工作目录 `sanitize.toml` 首次启动生成完整模板（与根目录
+  `sanitize.example.toml` 逐字一致），段键 = 源文件路径、字段名 = `sanitizeFeatures` /
+  `sanitizeStringRewrites` / `sanitizeRegexpRewrites`，只追加不覆盖，坏条目逐条跳过，1 MiB 上限，
+  解析问题写 `sanitize.log`。**接线收敛**：国内版 `upstream.PrepareBody` 与
+  `workbuddyai.PrepareBody` 均改为 `prepareBodyInner` 内原地脱敏（`sanitizeMessagesInPlace` /
+  `sanitize.MessagesInPlace`），删除整包二次解析；`main.go` 在 config 加载后、鉴权检查前
+  `sanitizecfg.EnsureFile` + 两个 `Load`。`.gitignore` 增加 `sanitize.toml`。
+- **临期预测净花费（R157）**：`ApplyLedgerExpire` 改吃 `[]LedgerExpire{Channel,UID,Amount}`，
+  同时维护 `expiredByGroup`（平台表扣作废）与新增 `expiredByUID`（临期行算净花费）；
+  新增 `netSpentLocked = max(0, creditOut − expiredByUID[uid])`，`burnForecast` 改用净花费外推；
+  `ExpiryRow` 新增 `today_spent`/`today_expired`（`today_out` 保留旧口径），`Version` 1→2。
+  `ledger.DiffCredits` 统一跳过 `InfoOnly` 条目（monkeycode 每日 Token 额度量纲不是分），避免污染
+  earn/spend/expire。React `Stats.jsx` 临期表改为「今日花费 + 今日已废 / 到期前还会废」，带批次限定词。
+- **本地已具备、未重复改**：积分流水月末 cutoff 修正（`18bc2dc`，先锚 1 号再减月）。
+- **验证**：`go build ./...`、`go vet ./...`、`go test ./... -count=1` 全绿（含 `cmd/wild-work`）；
+  `npm run build` + `npm run check` 12 场景绿。
+- **生产已重启（2026-11-10 14:17:04，所有者点头）**：备份 `/home/incam/Software/_pre-restart-20261110-1416`
+  （`config.json` + `ledger/` 四文件 + 旧二进制）→ `systemctl --user stop wild-work.service` →
+  重建 `dist/wild-work-linux`（21,634,877 B，静态链接）→ start。新进程 **PID 29735**、`SID==PID`、
+  `/proc/29735/exe` 指向活路径（非 deleted）；`/api/auth/state`=200、无会话 `/api/state`=401、
+  登录后 `version=2.11.6`、11 个账号 / 5 个渠道、`/v1/models` 172 个模型 / 6 个前缀；
+  `config.json` 与备份逐字节相同，4 个 ledger 文件均以备份为严格字节前缀；
+  重启后新增 `app.log` 内 `panic|fatal error|level=error` 命中 **0**；`dist/sanitize.toml` 首启已生成。

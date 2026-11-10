@@ -53,9 +53,9 @@ import (
 
 // Version 版本号（面板标题栏与「关于」弹窗直接展示，须与已对齐的上游版本一致）。
 //
-// 2026-11-05 修正：此前长期停在 2.9.3，而 HEAD 已对齐 v2.11.2、本次又并入
-// v2.11.5 的 sanitize 表与 oczen TLS 指纹，用户看到的是过期版本号。
-const Version = "2.11.5"
+// 2026-11-10 修正：已并入 v2.11.6 的现有渠道与后端修复（refresh 单飞、小浣熊
+// 有效期、千问办公设备流、MonkeyCode 402、Loomy 空余额、DSH 脱敏、临期口径）。
+const Version = "2.11.6"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -922,7 +922,11 @@ func (a *App) pollLogin(ctx context.Context) {
 				return
 			}
 			if !errors.Is(err, loginqwenwork.ErrPending) {
+				// 终态错误（绑定校验失败 / 流程过期 / state 丢失）：立即结束轮询，
+				// 由 defer 关闭浏览器；继续轮询只会每 2s 重复报同一个错。
 				log.Printf("qwenwork login poll failed: %v", err)
+				a.setLoginError("登录失败：" + err.Error())
+				return
 			}
 			continue
 		}
@@ -1634,13 +1638,21 @@ func (a *App) refreshIfSessionDead(rt *Runtime, au *auth.Auth, err error) bool {
 		return false
 	}
 	log.Printf("session dead, refreshing platform=%s uid=%s", rt.Kind, au.UID)
-	if rerr := rt.Upstream.RefreshToken(au); rerr != nil {
+	// 单飞：同一账号的并发 401 只放一次刷新出去（refresh_token 单会话，并发刷新必然一方冲突）。
+	// 此处刻意不做 NeedsRefresh 重检 —— session 已被上游作废，而本地 expiresAt 可能还没到期。
+	rerr := provider.RefreshOnce(au, func() error {
+		if err := rt.Upstream.RefreshToken(au); err != nil {
+			return err
+		}
+		// 刷新成功必须落盘：否则下次启动又拿旧 token，重回 401。
+		if serr := au.SaveAtomic(); serr != nil {
+			log.Printf("session dead refresh save failed platform=%s uid=%s err=%v", rt.Kind, au.UID, serr)
+		}
+		return nil
+	})
+	if rerr != nil {
 		log.Printf("session dead refresh failed platform=%s uid=%s err=%v", rt.Kind, au.UID, rerr)
 		return false
-	}
-	// 刷新成功必须落盘：否则下次启动又拿旧 token，重回 401。
-	if serr := au.SaveAtomic(); serr != nil {
-		log.Printf("session dead refresh save failed platform=%s uid=%s err=%v", rt.Kind, au.UID, serr)
 	}
 	return true
 }
@@ -1719,14 +1731,23 @@ func (a *App) StartCreditAutoRefresh(ctx context.Context, kinds []provider.Kind,
 					if au == nil {
 						continue
 					}
-					// token 临近过期时先刷新（国际版 token 有效期长，通常不触发）
+					// token 临近过期时先刷新（国际版 token 有效期长，通常不触发）。
+					// 走单飞：本循环与请求路径/保活/费率是并发的，同账号并发刷新会互相作废 refresh_token。
 					if au.NeedsRefresh(10 * time.Minute) {
-						if err := rt.Upstream.RefreshToken(au); err != nil {
+						if err := provider.RefreshOnce(au, func() error {
+							if !au.NeedsRefresh(10 * time.Minute) {
+								return nil // 已被并发的另一次刷新刷过
+							}
+							if rerr := rt.Upstream.RefreshToken(au); rerr != nil {
+								return rerr
+							}
+							if serr := au.SaveAtomic(); serr != nil {
+								log.Printf("credit auto-refresh token save failed platform=%s uid=%s err=%v", k, st.UID, serr)
+							}
+							return nil
+						}); err != nil {
 							log.Printf("credit auto-refresh token refresh failed platform=%s uid=%s err=%v", k, st.UID, err)
 							continue
-						}
-						if err := au.SaveAtomic(); err != nil {
-							log.Printf("credit auto-refresh token save failed platform=%s uid=%s err=%v", k, st.UID, err)
 						}
 					}
 					usable, expiring, unusable, err := a.creditTotals(rt, au)
@@ -3990,16 +4011,24 @@ func (a *App) RefreshPricing() {
 		if acct == nil {
 			continue
 		}
-		// 先确保 token 有效
+		// 先确保 token 有效。走单飞：与请求路径/credit 循环并发，同账号并发刷新会互相作废 refresh_token。
 		if acct.NeedsRefresh(10 * time.Minute) {
-			if err := rt.Upstream.RefreshToken(acct); err != nil {
+			if err := provider.RefreshOnce(acct, func() error {
+				if !acct.NeedsRefresh(10 * time.Minute) {
+					return nil // 已被并发的另一次刷新刷过
+				}
+				if rerr := rt.Upstream.RefreshToken(acct); rerr != nil {
+					return rerr
+				}
+				// 必须落盘：refresh token 会轮换，不写回则下次启动用的是旧 refresh token，
+				// 而旧 access token 已被上游作废 → 本地 expiresAt 仍显示有效 → 卡死在 401。
+				if serr := acct.SaveAtomic(); serr != nil {
+					log.Printf("pricing token save failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
+				}
+				return nil
+			}); err != nil {
 				errs = append(errs, fmt.Sprintf("%s: token refresh failed", rt.Kind))
 				continue
-			}
-			// 必须落盘：refresh token 会轮换，不写回则下次启动用的是旧 refresh token，
-			// 而旧 access token 已被上游作废 → 本地 expiresAt 仍显示有效 → 卡死在 401。
-			if serr := acct.SaveAtomic(); serr != nil {
-				log.Printf("pricing token save failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
 			}
 		}
 		pricing, err := rt.Upstream.FetchModelPricing(acct)

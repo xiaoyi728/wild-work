@@ -1630,3 +1630,28 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   登录后 `version=2.11.6`、11 个账号 / 5 个渠道、`/v1/models` 172 个模型 / 6 个前缀；
   `config.json` 与备份逐字节相同，4 个 ledger 文件均以备份为严格字节前缀；
   重启后新增 `app.log` 内 `panic|fatal error|level=error` 命中 **0**；`dist/sanitize.toml` 首启已生成。
+
+### L24 2026-11-14 摘取上游 v2.11.7 的 QoderCN 积分包到期（只此一条）
+
+- **范围（所有者「只修复 qoder 那个」）**：只摘 `bed60fa`（4 文件 706 行，纯后端 + 测试），
+  不摘 `fa9cb51` 的手机端布局——它改的是 `cmd/wild-work/web/{app.js,style.css}`（vanilla），
+  本仓 R5 起 `/` 服务 React 产物（`web-app`），`web/` 只是 diff 基准 ⇒ 补丁无法套用；
+  `scripts/ui-static-check.mjs` 同理（本仓该脚本已按 React 面板重写）。版本号**仍为 2.11.6**
+  （未采纳 release 提交；将来整体对齐 v2.11.7 时再 bump）。
+- **实现**：`internal/qodercn/web_expiry.go` 按已抓包链路补到期——`POST /api/v1/auth/session-transfers`
+  （Bearer dt-）取一次性 `transferUrl` → 手动不跟随 303、从 `Set-Cookie` 取会话 cookie →
+  `GET /api/v2/me/usages/big_model_credits` 扫各池 `quota_detail`，取 `remaining_value>0 &&
+  expires_at>0` 的最小毫秒时间戳。`UserResourceDetail` 把结果写成 RFC3339（UTC+8），挂到
+  「赠送额度」（无则第一条有剩余的条目）的 `ExpireAt`；`EarliestExpire` 取全体最早值，挂哪条等价。
+- **缓存与降级**：ticket 一次性、cookie + 5 分钟结果按 dt 哈希缓存（每个凭据独立锁，换票串行、
+  不同账号不阻塞，旧条目按天淘汰）；401/403 或 303 无 cookie 重换一次票。换票 URL 含 ticket ⇒
+  日志只记阶段与状态码（不打印原始 err / URL / 响应体，Set-Cookie 不落日志）；任何一步失败返回
+  零值 ⇒ `ExpireAt` 留空，余额读取照常成功（绝不因网页接口挂掉把账号判成异常）。
+- **实盘（2026-11-14，`dist/auths` 三个 qodercn 号，临时探针跑通后已删）**：1000 分 → 2026-12-04 20:45；
+  2875 分 → **2026-11-15 09:59:59（次日到期）**；2676 分 → 2026-11-18 08:45。网页链路三次全成功。
+- **验证**：`go build ./...`、`go vet ./internal/qodercn/`、`go test ./... -count=1` 全绿；
+  `web_expiry_test.go` 覆盖三步链路与请求头、303 不跟随、cookie 拼接、缓存复用、401 重换票、
+  303 无 cookie 重换、换票失败降级、ticket/cookie 不进日志、`data` 包裹形态、RFC3339 回读。
+- **未做/待办**：`dist/wild-work-linux` 未重建、生产未重启（运行中会 ETXTBSY；重启需所有者点头，
+  同 L23 末条）。重建后刷新一次面板即可验收：`state-qodercn.json` 出现 `earliest_expire`、
+  积分明细「有效期」列出现日期，且账号按「最早到期优先」参与选号。

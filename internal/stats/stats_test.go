@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"wild-work/internal/provider"
 )
 
 // tNow 固定时区的时间锚（测试跨天用）。
@@ -337,5 +339,16 @@ func TestRotationCurrentEvaporates(t *testing.T) {
 	snap := s.Snapshot(now.Add(time.Minute))
 	if len(snap.Rotation) != 0 {
 		t.Fatalf("粘性账号消失后平台视图应退场: %+v", snap.Rotation)
+	}
+}
+
+// TestAllBuiltinChannelsAreKnown 新增内建渠道必须同步 channelKind 白名单。
+// 漏了它不会报错，只表现为「该渠道的 token/请求不进平台概览表」——
+// 与 R34 家族的「声明了却没接线」同型，故用内建渠道全集做双向守卫。
+func TestAllBuiltinChannelsAreKnown(t *testing.T) {
+	for _, k := range provider.ChannelDisplayOrder {
+		if !IsKnownChannel(k.String()) {
+			t.Errorf("内建渠道 %s 不在 stats.channelKind 白名单：该渠道 token/请求不会进平台表", k)
+		}
 	}
 }

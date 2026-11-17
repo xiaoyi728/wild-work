@@ -434,6 +434,15 @@ export default function Accounts({ state, actions, knownUids, active }) {
                     onClick={() => actions.promptLogin('monkeycode')}>＋ MonkeyCode</button>
             <button className="btn primary alt raccoon" id="btnAddRaccoon" title="小浣熊：可浏览器授权登录，也可从本机客户端导入"
                     onClick={() => actions.promptLogin('raccoon')}>＋ 小浣熊</button>
+            {/* 豆包：服务端申请二维码 + 手机豆包 App 扫码；手工粘贴 Cookie 为兜底。
+                不走通用确认弹层，直接打开专用弹层（openDoubaoDialog 内含申请 + 轮询）。 */}
+            <button className="btn primary alt doubao" id="btnAddDoubao"
+                    title="豆包（ByteDance）：手机豆包 App 扫码登录，扫码不可用时也可粘贴网页版 Cookie"
+                    onClick={actions.openDoubaoDialog}>＋ 豆包</button>
+            {/* WPS 灵犀：浏览器登录（后端 CDP 捕获 wps_sid）或粘贴 wps_sid；双路径在专用弹层里。 */}
+            <button className="btn primary alt lingxi" id="btnAddLingxi"
+                    title="WPS 灵犀：浏览器登录或粘贴 wps_sid Cookie；须灵犀侧已开通（有智点余额），须为多个独立 WPS 账号各自的 sid"
+                    onClick={actions.promptLingxi}>＋ WPS 灵犀</button>
             <button className="btn primary alt loomy" id="btnAddLoomy" title="从本机已登录的 Loomy 客户端导入凭据"
                     onClick={() => actions.promptLogin('loomy')}>＋ Loomy</button>
           </div>
@@ -475,7 +484,7 @@ export default function Accounts({ state, actions, knownUids, active }) {
                 onRename={actions.openRename} onCheckin={actions.checkin} onRefresh={actions.refreshOne}
                 onToggleDisable={actions.toggleDisable} onRemove={actions.removeAcct}
                 onDetail={show} onDetailLeave={hide}
-                onRelogin={(g) => (g === 'glm' ? actions.startGLMLogin() : actions.startLogin(g))} />
+                onRelogin={actions.relogin} />
         ))}
       </div>
       {/* 提示语只在该账号列表真的加载过之后才出现：vanilla 未登录时 renderAccounts

@@ -137,7 +137,7 @@ export default function App() {
   const [usageNonce, setUsageNonce] = useState(0);
   const [sinceText, setSinceText] = useState('');
   const [busy, setBusy] = useState({ refreshAll: false, checkinAll: false, refreshFees: false });
-  const [flow, setFlow] = useState({ confirm: null, pending: null, glm: null, cline: null });
+  const [flow, setFlow] = useState({ confirm: null, pending: null, glm: null, cline: null, doubao: null, lingxi: null });
 
   const [theme, toggleTheme] = useTheme();
   const knownUids = useRef(new Set());
@@ -333,6 +333,9 @@ export default function App() {
   // ④ 粘贴型（Cline）：Key 的创建动作发生在 app.cline.bot 网页里，本工具无法代劳，
   //    所以这条没有轮询/回调，只有一次「验证 + 落盘」（后端只调 /api-keys，零 token 消耗）。
   function promptLogin(channel) {
+    // 豆包 / 灵犀各有专用弹层（扫码 / 双路径），不走通用确认弹层。
+    if (channel === 'doubao') { openDoubaoDialog(); return; }
+    if (channel === 'lingxi') { promptLingxi(); return; }
     if (isPasteKey(channel)) {
       setFlow((f) => ({ ...f, cline: { key: '', err: '', busy: false } }));
       return;
@@ -483,7 +486,184 @@ export default function App() {
     }
   }
 
-  useEffect(() => () => { stopLoginPoll(); stopGLMPoll(); clearTimeout(glmTimer.current); }, []);
+  // ---------- 豆包：服务端申请二维码 + 手机 App 扫码，手工 Cookie 兜底 ----------
+  // 二维码由后端向豆包 passport 申请并自己换登录态 —— 全程不需要本机浏览器/桌面客户端，
+  // WSL / NAS / systemd 部署同样可用。前端只做「申请 → 1.5s 轮询 → 成功/失败」。
+  const doubaoPoll = useRef(null);
+  const doubaoTimer = useRef(null);
+  function stopDoubaoPoll() { if (doubaoPoll.current) { clearInterval(doubaoPoll.current); doubaoPoll.current = null; } }
+  function clearDoubaoTimer() { clearTimeout(doubaoTimer.current); doubaoTimer.current = null; }
+
+  // 把 status 响应合并进弹层状态：二维码换新、扫码进度、失败原因。
+  // 只在字段真的存在时覆盖，避免响应缺字段把已有二维码/提示清空。
+  function applyDoubaoStatus(st) {
+    if (!st) return;
+    setFlow((f) => {
+      if (!f.doubao) return f;
+      const next = { ...f.doubao };
+      if (st.qr) next.qr = st.qr;
+      if (st.state) next.state = st.state;
+      if (st.state === 'scanned') next.status = st.hint || '已扫码，请在手机上确认登录';
+      else if (st.state === 'pending') next.status = '用手机豆包 App「扫一扫」扫描二维码';
+      else if (st.state === 'success') next.status = `✅ 已添加账号${st.uid ? `：${st.uid}` : ''}`;
+      if (st.state === 'failed') {
+        next.status = '';
+        next.err = st.error || '登录失败';
+        next.manualOpen = true;
+      }
+      return { ...f, doubao: next };
+    });
+  }
+
+  // startDoubaoQr 申请（或重新申请）一张二维码并开始轮询扫码状态。
+  function startDoubaoQr() {
+    stopDoubaoPoll();
+    clearDoubaoTimer();
+    setFlow((f) => (f.doubao ? {
+      ...f,
+      doubao: { ...f.doubao, state: 'pending', qr: '', status: '正在申请二维码…', err: '', busy: false },
+    } : f));
+    api('/api/login/doubao_qr', {})
+      .then((st) => {
+        applyDoubaoStatus(st);
+        // 申请请求本身回了 failed（HTTP 200 + state=failed）：不启动轮询，直接展开手工方式。
+        if (st && st.state === 'failed') return;
+        startDoubaoPoll();
+      })
+      .catch((e) => {
+        setFlow((f) => (f.doubao ? {
+          ...f,
+          doubao: {
+            ...f.doubao, state: 'failed', qr: '', status: '',
+            err: (e.message || '申请二维码失败') + '（可用下方手工粘贴 Cookie）',
+            manualOpen: true,
+          },
+        } : f));
+      });
+  }
+
+  function startDoubaoPoll() {
+    stopDoubaoPoll();
+    doubaoPoll.current = setInterval(async () => {
+      try {
+        const st = await api('/api/login/doubao_qr_status');
+        applyDoubaoStatus(st);
+        if (!st) return;
+        if (st.state === 'success') {
+          stopDoubaoPoll();
+          toast('豆包账号已添加');
+          await loadState();
+          refreshFees();
+          clearDoubaoTimer();
+          doubaoTimer.current = setTimeout(() => {
+            stopDoubaoPoll();
+            setFlow((f) => ({ ...f, doubao: null }));
+          }, 1200);
+        } else if (st.state === 'failed' || st.state === 'cancelled' || st.state === 'idle') {
+          stopDoubaoPoll();
+        }
+      } catch (e) { /* 忽略瞬时错误 */ }
+    }, 1500);
+  }
+
+  function openDoubaoDialog() {
+    stopDoubaoPoll();
+    clearDoubaoTimer();
+    setFlow((f) => ({
+      ...f,
+      // 每次打开都重置：不带上一次的二维码/Cookie/错误
+      doubao: { state: 'pending', qr: '', status: '正在申请二维码…', err: '', manualOpen: false, cookie: '', busy: false },
+    }));
+    startDoubaoQr();
+  }
+
+  // closeDoubaoDialog：cancel=true 时通知后端取消进行中的扫码会话
+  // （没有进行中的会话时后端回 400，属正常情况，静默即可）。
+  function closeDoubaoDialog(cancel) {
+    stopDoubaoPoll();
+    clearDoubaoTimer();
+    setFlow((f) => ({ ...f, doubao: null }));
+    if (cancel) api('/api/login/doubao_qr_cancel', {}).catch(() => {});
+  }
+
+  // 手工粘贴 Cookie：与扫码走后端同一条校验/落盘通道。
+  async function submitDoubaoCookie(rawCookie) {
+    const cookie = (rawCookie || '').trim();
+    if (!cookie) {
+      setFlow((f) => (f.doubao ? { ...f, doubao: { ...f.doubao, err: '请粘贴豆包网页版的完整 Cookie（须含 sessionid）' } } : f));
+      return;
+    }
+    setFlow((f) => (f.doubao ? { ...f, doubao: { ...f.doubao, busy: true, err: '' } } : f));
+    try {
+      const r = await api('/api/login/doubao_cookie', { cookie });
+      stopDoubaoPoll();
+      clearDoubaoTimer();
+      setFlow((f) => ({ ...f, doubao: null }));
+      // warning（如 Cookie 里缺可选字段）必须透出；合并成一条 toast —— 连续两次 toast
+      // 在同一 tick 内会互相覆盖，告警等于从未出现（与 Cline 同一条教训）。
+      toast(r && r.warning ? `豆包账号已添加。${r.warning}` : '豆包账号已添加');
+      await loadState();
+      refreshFees();
+    } catch (e) {
+      setFlow((f) => (f.doubao ? { ...f, doubao: { ...f.doubao, busy: false, err: e.message || '验证失败' } } : f));
+    }
+  }
+
+  const doubaoView = flow.doubao ? {
+    ...flow.doubao,
+    setCookie: (v) => setFlow((f) => (f.doubao ? { ...f, doubao: { ...f.doubao, cookie: v } } : f)),
+    toggleManual: () => setFlow((f) => (f.doubao ? { ...f, doubao: { ...f.doubao, manualOpen: !f.doubao.manualOpen } } : f)),
+  } : null;
+
+  // ---------- WPS 灵犀：浏览器登录（CDP 捕获 wps_sid）或手工粘贴 ----------
+  function promptLingxi() {
+    setFlow((f) => ({ ...f, lingxi: { sid: '', err: '', busy: false } }));
+  }
+
+  function closeLingxi() { setFlow((f) => ({ ...f, lingxi: null })); }
+
+  // 后端只做「灵犀侧 plans 验证 + 落盘」，零智点消耗；验证阶段就能发现
+  // 「灵犀侧未开通」（UserUnauthorized）。warning 语义：同账号重复添加不扩智点。
+  async function submitLingxiSID(rawSid) {
+    const sid = (rawSid || '').trim();
+    if (!sid) {
+      setFlow((f) => (f.lingxi ? { ...f, lingxi: { ...f.lingxi, err: '请粘贴 wps_sid Cookie' } } : f));
+      return;
+    }
+    setFlow((f) => (f.lingxi ? { ...f, lingxi: { ...f.lingxi, busy: true, err: '' } } : f));
+    try {
+      const r = await api('/api/login/lingxi_sid', { sid });
+      setFlow((f) => ({ ...f, lingxi: null }));
+      toast(r && r.warning ? `WPS 灵犀账号已添加。${r.warning}` : 'WPS 灵犀账号已添加');
+      await loadState();
+      refreshFees();
+    } catch (e) {
+      setFlow((f) => (f.lingxi ? { ...f, lingxi: { ...f.lingxi, busy: false, err: e.message || '验证失败' } } : f));
+    }
+  }
+
+  const lingxiView = flow.lingxi ? {
+    ...flow.lingxi,
+    setSid: (v) => setFlow((f) => (f.lingxi ? { ...f, lingxi: { ...f.lingxi, sid: v } } : f)),
+  } : null;
+
+  // 账号卡片「⟳ 重登」的路由：各渠道补号形态不同，统一在这里分流。
+  // 不走通用确认弹层的两个渠道（豆包扫码 / 灵犀双路径）必须单独路由，
+  // 否则会弹出一个只能「登录」、没有扫码/粘贴入口的通用确认框。
+  function relogin(g) {
+    if (g === 'glm') { startGLMLogin(); return; }
+    if (g === 'doubao') { openDoubaoDialog(); return; }
+    if (g === 'lingxi') { promptLingxi(); return; }
+    startLogin(g);
+  }
+
+  useEffect(() => () => {
+    stopLoginPoll();
+    stopGLMPoll();
+    clearTimeout(glmTimer.current);
+    stopDoubaoPoll();
+    clearDoubaoTimer();
+  }, []);
 
   const glmView = flow.glm ? {
     ...flow.glm,
@@ -509,6 +689,11 @@ export default function App() {
     cancelLogin, confirmLogin: () => flow.confirm && startLogin(flow.confirm.channel),
     importLocal,
     closeConfirm: () => setFlow((f) => ({ ...f, confirm: null })),
+    // 豆包 / 灵犀专用弹层的动作（卡片按钮与 ⟳ 重登都走这里）
+    openDoubaoDialog, promptLingxi, submitDoubaoCookie, submitLingxiSID,
+    restartDoubaoQr: () => startDoubaoQr(),
+    cancelDoubao: () => closeDoubaoDialog(true),
+    closeLingxi, relogin,
     busy,
   }), [state, flow.confirm, busy]);
   actionsRef.current = actions;
@@ -608,11 +793,16 @@ export default function App() {
                     catch (e) { toast(e.message); }
                   }} />
       ) : null}
-      <LoginFlow flow={{ ...flow, glm: glmView, cline: clineView }} actions={{
+      <LoginFlow flow={{ ...flow, glm: glmView, cline: clineView, doubao: doubaoView, lingxi: lingxiView }} actions={{
         closeConfirm: () => setFlow((f) => ({ ...f, confirm: null })),
         confirmLogin: () => flow.confirm && startLogin(flow.confirm.channel),
         confirmImport: () => flow.confirm && importLocal(flow.confirm.channel),
         cancelLogin, copyUrl: (u) => copyText(u, '链接', toast),
+        // 专用弹层的动作
+        startLogin, submitDoubaoCookie, submitLingxiSID,
+        restartDoubaoQr: () => startDoubaoQr(),
+        cancelDoubao: () => closeDoubaoDialog(true),
+        closeLingxi,
       }} />
       <Confirm open={!!confirmBox} msg={confirmBox && confirmBox.msg}
                onOk={() => { const fn = confirmBox.onOk; setConfirmBox(null); fn(); }}

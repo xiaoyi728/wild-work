@@ -122,7 +122,10 @@ const stubActions = new Proxy({}, { get: () => (() => {}) });
 const busy = { refreshAll: false, checkinAll: false, refreshFees: false };
 
 const PANEL_ACTIONS = ['btnRefreshAll', 'btnCheckinAll', 'btnAddWB', 'btnAddQoderCN', 'btnAddTrae',
-  'btnAddWBAI', 'btnAddQoderCOM', 'btnAddQwen', 'btnAddGLM', 'btnAddCline'];
+  'btnAddWBAI', 'btnAddQoderCOM', 'btnAddQwen', 'btnAddGLM', 'btnAddCline',
+  // 2026-11-17 新增内建渠道：豆包（扫码）与 WPS 灵犀（双路径），
+  // 两个入口都必须真渲染出来（少一个就等于该渠道没有添加入口）。
+  'btnAddDoubao', 'btnAddLingxi'];
 
 const server = await createServer({
   configFile: false, root: ROOT, logLevel: 'silent',
@@ -355,6 +358,39 @@ try {
   results.push({ name: '降级链别名', visible: visibleControls(aliasHtml).length, missing: v9 });
   if (v9.length) console.error(`✗ 降级链别名：${v9.join('；')}`);
   else console.log('✓ 降级链别名（行内别名输入、回显、复制、草稿别名输入）均通过');
+
+  // 10) 豆包 / WPS 灵犀专用弹层（2026-11-17）。
+  //     这两个渠道不走通用确认弹层，弹层里各路径的入口与限制文案都必须真渲染：
+  //     少一个按钮 = 该路径不可达；少一句限制 = 用户误判「为什么没额度」。
+  const LoginFlow = (await load('/src/components/LoginFlow.jsx')).default;
+  const lfFlow = {
+    confirm: null, pending: null, glm: null, cline: null,
+    doubao: {
+      state: 'pending', qr: 'data:image/png;base64,AA', status: '用手机豆包 App「扫一扫」扫描二维码',
+      err: '', manualOpen: true, cookie: '', busy: false,
+    },
+    lingxi: { sid: '', err: '', busy: false },
+  };
+  const lfHtml = renderToStaticMarkup(React.createElement(LoginFlow, { flow: lfFlow, actions: stubActions }));
+  const v10 = [];
+  const needIds = ['doubaoOverlay', 'doubaoQrImg', 'doubaoQrStatus', 'btnDoubaoQrStart',
+    'btnDoubaoManualToggle', 'doubaoCookieInput', 'btnDoubaoCookie', 'btnDoubaoCancel',
+    'lingxiOverlay', 'btnLingxiBrowser', 'lingxiSidInput', 'btnLingxiSubmit', 'btnLingxiCancel'];
+  for (const id of needIds) if (!new RegExp(`id="${id}"`).test(lfHtml)) v10.push(`#${id} 没渲染`);
+  if (!/灵犀与 Comate 是同一 WPS 账号体系的两个独立产品/.test(lfHtml)) v10.push('灵犀弹层缺少「与 Comate 同一账号体系、须灵犀侧开通」的说明');
+  if (!/智点按 WPS 账号计/.test(lfHtml)) v10.push('灵犀弹层缺少「智点按 WPS 账号计、重复添加不增额度」的说明');
+  // 二维码申请失败：占位块 + 手工方式自动展开 + 错误原文必须同时出现。
+  const lfFail = {
+    ...lfFlow,
+    doubao: { ...lfFlow.doubao, state: 'failed', qr: '', status: '', err: '二维码申请失败（可用下方手工粘贴 Cookie）', manualOpen: true },
+  };
+  const failHtml = renderToStaticMarkup(React.createElement(LoginFlow, { flow: lfFail, actions: stubActions }));
+  if (!/id="doubaoQrEmpty"/.test(failHtml)) v10.push('二维码为空时应渲染占位块 #doubaoQrEmpty，不得留破图');
+  if (!/二维码申请失败/.test(failHtml)) v10.push('二维码申请失败的错误原文没渲染');
+  if (!/id="doubaoCookieInput"/.test(failHtml)) v10.push('二维码申请失败时应自动展开手工粘贴方式');
+  results.push({ name: '豆包 / 灵犀弹层', visible: visibleControls(lfHtml).length, missing: v10 });
+  if (v10.length) console.error(`✗ 豆包 / 灵犀弹层：${v10.join('；')}`);
+  else console.log('✓ 豆包扫码/手工 Cookie 与灵犀双路径入口、限制文案、二维码失败降级均通过');
 } finally {
   await server.close();
 }

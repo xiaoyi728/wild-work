@@ -35,9 +35,11 @@ import (
 	"wild-work/internal/config"
 	"wild-work/internal/custom"
 	"wild-work/internal/devdump"
+	"wild-work/internal/doubao"
 	"wild-work/internal/gateway"
 	"wild-work/internal/glm"
 	"wild-work/internal/ledger"
+	"wild-work/internal/lingxi"
 	"wild-work/internal/loomy"
 	"wild-work/internal/loopguard"
 	"wild-work/internal/monkeycode"
@@ -180,6 +182,11 @@ func main() {
 	if err != nil {
 		fatal("读取小浣熊账号目录失败：%v", err)
 	}
+	// 豆包：扫码/粘贴型渠道，凭据是网页登录 Cookie（doubao-*.json）。
+	dbAuths, err := auth.LoadDoubaoDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取豆包账号目录失败：%v", err)
+	}
 	// Loomy：导入型渠道，凭据由面板「从本机客户端导入」写入 auths/。
 	lmAuths, err := auth.LoadLoomyDir(cfg.AuthDir)
 	if err != nil {
@@ -191,11 +198,16 @@ func main() {
 	if err != nil {
 		fatal("读取 Cline 账号目录失败：%v", err)
 	}
+	// 灵犀：粘贴型渠道，凭据同为 WPS 账号的 wps_sid Cookie（灵犀侧门禁独立，须灵犀已开通）。
+	lxAuths, err := auth.LoadLingxiDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 Lingxi 账号目录失败：%v", err)
+	}
 	// OpenCodeZen 匿名通道无凭证文件：全程只有一个虚拟账号，
 	// 不经目录扫描、不参与 reload（见 app.reloadAccounts 的说明）。
 	ocAuths := []*auth.Auth{oczen.AnonymousAuth()}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, cline=%d, oczen=%d(匿名) from %s",
-		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(clAuths), len(ocAuths), cfg.AuthDir)
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, doubao=%d, loomy=%d, cline=%d, lingxi=%d, oczen=%d(匿名) from %s",
+		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(dbAuths), len(lmAuths), len(clAuths), len(lxAuths), len(ocAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -243,6 +255,10 @@ func main() {
 	for _, a := range rcAuths {
 		rcPool.Add(a)
 	}
+	dbPool := pool.New(filepath.Join(stateDir, "state-doubao.json"))
+	for _, a := range dbAuths {
+		dbPool.Add(a)
+	}
 	lmPool := pool.New(filepath.Join(stateDir, "state-loomy.json"))
 	for _, a := range lmAuths {
 		lmPool.Add(a)
@@ -252,6 +268,11 @@ func main() {
 	clPool := pool.New(filepath.Join(stateDir, "state-cline.json"))
 	for _, a := range clAuths {
 		clPool.Add(a)
+	}
+	// Lingxi：真多账号池（一份 wps_sid = 一个 WPS 账号，灵犀侧开通），不置 SingleAccount。
+	lxPool := pool.New(filepath.Join(stateDir, "state-lingxi.json"))
+	for _, a := range lxAuths {
+		lxPool.Add(a)
 	}
 	// oczen：整池只有一个匿名虚拟账号，state 仅用于记冷却（无积分、无签到）
 	ocPool := pool.New(filepath.Join(stateDir, "state-oczen.json"))
@@ -284,6 +305,12 @@ func main() {
 	mcUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	// 等响应头上限由 NewWithTimeout 统一算（≥180s，R118）；总超时仍取 upstream.timeout_seconds。
 	rcUp := raccoon.NewWithTimeout(time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second)
+	dbUp := doubao.New()
+	dbUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	// 会话焚化：按 UID 反查凭据（焚化在后台 goroutine，不能持 pool 锁）。
+	doubao.SetAuthLookup(func(uid string) *auth.Auth {
+		return dbPool.AuthByUID(uid)
+	})
 	lmUp := loomy.New()
 	lmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	clUp := cline.New()
@@ -292,6 +319,10 @@ func main() {
 	// 长回答必被从中间掐断。共用 Transport 以复用连接池。
 	clUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	clUp.StreamHTTP.Transport = clUp.HTTP.Transport
+	lxUp := lingxi.New()
+	// Lingxi：与 cline 同款——非流式 client 保留总超时；StreamHTTP 不设 Timeout（R35）。
+	lxUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	lxUp.StreamHTTP.Transport = lxUp.HTTP.Transport
 	ocUp := oczen.New()
 	glmUp := glm.New()
 	// ⚠️ 只改 HTTP（非流式）的 Timeout。
@@ -330,8 +361,10 @@ func main() {
 		provider.QwenWork.String():    {qwUp.HTTP, qwUp.StreamHTTP},
 		provider.MonkeyCode.String():  {mcUp.HTTP, mcUp.StreamHTTP},
 		provider.Raccoon.String():     {rcUp.HTTP, rcUp.StreamHTTP},
+		provider.Doubao.String():      {dbUp.HTTP, dbUp.StreamHTTP},
 		provider.Loomy.String():       {lmUp.HTTP, lmUp.StreamHTTP},
 		provider.Cline.String():       {clUp.HTTP, clUp.StreamHTTP},
+		provider.Lingxi.String():      {lxUp.HTTP, lxUp.StreamHTTP},
 		provider.Oczen.String():       {ocUp.HTTP, ocUp.StreamHTTP},
 		provider.GLM.String():         {glmUp.HTTP, glmUp.StreamHTTP},
 	})
@@ -393,6 +426,11 @@ func main() {
 	// 故**不设 CheckinRetryUntil**（窗口重试是为「活动尚未创建」设计的，本渠道无此语义）。
 	rcSch := scheduler.New(scheduler.Config{Pool: rcPool, Upstream: rcUp, Name: "raccoon", FollowGlobalCheckin: true,
 		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{1, 5, 9, 13, 17, 21}, Ledger: lg})
+	// 豆包：签到走工作模式活动（pc_incentive_task_mvp_v3），积分是「窗口限额」口径。
+	// 上游无 refresh 端点 ⇒ KeepaliveHours 显式空切片（保活没有可刷的东西，
+	// 空跑只会记噪音；Cookie 失效由请求路径上的 401 → ErrSessionDead 兜底转面板重登）。
+	dbSch := scheduler.New(scheduler.Config{Pool: dbPool, Upstream: dbUp, Name: "doubao", FollowGlobalCheckin: true,
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
 	// Loomy：每日宠物打工奖励签到（按有效对话轮次结算）；上游无 refresh 端点（session 14 天），
 	// 保活关闭（显式空切片）。
 	lmSch := scheduler.New(scheduler.Config{Pool: lmPool, Upstream: lmUp, Name: "loomy", FollowGlobalCheckin: true,
@@ -402,6 +440,10 @@ func main() {
 	// 于是每天空跑一次必然失败的签到，并在面板渲染红色「签到失败」。
 	clSch := scheduler.New(scheduler.Config{Pool: clPool, Upstream: clUp, Name: "cline",
 		CheckinMinutes: []int{}, KeepaliveHours: []int{}, Ledger: lg})
+	// Lingxi：有每日签到（daily_check_in 领智点），但 wps_sid Cookie 不过期、无 refresh token
+	// ⇒ 只开签到、不开保活。签到时刻用全局配置（上游按天去重、无活动上线延迟）。
+	lxSch := scheduler.New(scheduler.Config{Pool: lxPool, Upstream: lxUp, Name: "lingxi", FollowGlobalCheckin: true,
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
 	// OpenCodeZen 匿名：无账号、无签到、无 token 可保活（凭证是常量 public）。
 	// CheckinMinutes/KeepaliveHours 均为显式空切片 → 调度器不发生任何上游调用。
 	ocSch := scheduler.New(scheduler.Config{Pool: ocPool, Upstream: ocUp, Name: "oczen",
@@ -427,9 +469,11 @@ func main() {
 		provider.QwenWork:   {Kind: provider.QwenWork, Pool: qwPool, Upstream: qwUp, StaticModels: qwenwork.StaticModels()},
 		provider.MonkeyCode: {Kind: provider.MonkeyCode, Pool: mcPool, Upstream: mcUp, StaticModels: monkeycode.StaticModels()},
 		provider.Raccoon:    {Kind: provider.Raccoon, Pool: rcPool, Upstream: rcUp, StaticModels: raccoon.StaticModels()},
+		provider.Doubao:     {Kind: provider.Doubao, Pool: dbPool, Upstream: dbUp, StaticModels: doubao.StaticModels()},
 		provider.Loomy:      {Kind: provider.Loomy, Pool: lmPool, Upstream: lmUp, StaticModels: loomy.StaticModels()},
 		provider.GLM:        {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
 		provider.Cline:      {Kind: provider.Cline, Pool: clPool, Upstream: clUp, StaticModels: cline.StaticModels()},
+		provider.Lingxi:     {Kind: provider.Lingxi, Pool: lxPool, Upstream: lxUp, StaticModels: lingxi.StaticModels()},
 		// 注意：GLM **不**置 SingleAccount。
 		//
 		// 早期误判：以为「凭据轮换后不可人工恢复」就该按单账号处理。但
@@ -454,9 +498,11 @@ func main() {
 		provider.QwenWork:    {Kind: provider.QwenWork, Pool: qwPool, Upstream: qwUp, Scheduler: qwSch},
 		provider.MonkeyCode:  {Kind: provider.MonkeyCode, Pool: mcPool, Upstream: mcUp, Scheduler: mcSch},
 		provider.Raccoon:     {Kind: provider.Raccoon, Pool: rcPool, Upstream: rcUp, Scheduler: rcSch},
+		provider.Doubao:      {Kind: provider.Doubao, Pool: dbPool, Upstream: dbUp, Scheduler: dbSch},
 		provider.Loomy:       {Kind: provider.Loomy, Pool: lmPool, Upstream: lmUp, Scheduler: lmSch},
 		provider.GLM:         {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
 		provider.Cline:       {Kind: provider.Cline, Pool: clPool, Upstream: clUp, Scheduler: clSch},
+		provider.Lingxi:      {Kind: provider.Lingxi, Pool: lxPool, Upstream: lxUp, Scheduler: lxSch},
 		provider.Oczen:       {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, Scheduler: ocSch},
 	}
 
@@ -492,6 +538,10 @@ func main() {
 	// 结果必须写日志——面板的「签到成功/失败」标签与 stats 的签到收入都读日志。
 	rcSch.SetCheckinObserver(func(r scheduler.CheckinResult) { appInst.NotifyCheckin("raccoon", r) })
 	rcSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("raccoon", uid, ok, msg) })
+	dbSch.SetCheckinObserver(func(r scheduler.CheckinResult) { appInst.NotifyCheckin("doubao", r) })
+	dbSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("doubao", uid, ok, msg) })
+	lxSch.SetCheckinObserver(func(r scheduler.CheckinResult) { appInst.NotifyCheckin("lingxi", r) })
+	lxSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("lingxi", uid, ok, msg) })
 
 	// HTTP handler：OpenAI 端点 + Web UI + 管理 API
 	// embed 目标只有 web-app/（vite 产物）。cmd/wild-work/web/ 里的 vanilla 面板
@@ -617,6 +667,7 @@ func main() {
 	go qcmSch.Run(sctx)
 	go mcSch.Run(sctx)
 	go rcSch.Run(sctx)
+	go dbSch.Run(sctx)
 	go lmSch.Run(sctx)
 	go ocSch.Run(sctx)
 	// ⚠️ 新增渠道时必须在这里补 Run()。
@@ -626,6 +677,8 @@ func main() {
 	// Cline 的 Run 同样不可漏（R34：漏了不报错，只表现为该渠道定时逻辑从不运行）。
 	// 本渠道任务全关，Run 只会阻塞等 ctx/配置变更，但缺了它将来加任务即静默失效。
 	go clSch.Run(sctx)
+	// Lingxi 的 Run 不可漏（R34）：本渠道有每日签到任务。
+	go lxSch.Run(sctx)
 
 	// 积分自动刷新覆盖全部渠道：
 	// - workbuddyai / qoder 无签到活动，不自动刷就会一直显示旧值或 0；
@@ -641,7 +694,9 @@ func main() {
 		provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.GLM,
 		provider.MonkeyCode,
 		provider.Raccoon,
+		provider.Doubao,
 		provider.Loomy,
+		provider.Lingxi,
 	}, app.CreditRefreshInterval)
 
 	// 启动即刷新「模型列表 + 费率」，之后每 30 分钟。
@@ -669,7 +724,8 @@ func main() {
 		if appInst.PanelAuthEnabled() {
 			fmt.Printf("  Panel auth:    admin_password enabled (cookie session, 7d)\n")
 		}
-		fmt.Printf("  Accounts:      workbuddy=%d traework=%d qoder=%d oczen=%d(匿名)\n", len(wbAuths), len(trAuths), len(qdAuths), len(ocAuths))
+		fmt.Printf("  Accounts:      workbuddy=%d traework=%d qoder=%d qodercn=%d qodercom=%d workbuddyai=%d qwenwork=%d glm=%d monkeycode=%d raccoon=%d doubao=%d loomy=%d cline=%d lingxi=%d oczen=%d(匿名)\n",
+			len(wbAuths), len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(dbAuths), len(lmAuths), len(clAuths), len(lxAuths), len(ocAuths))
 		fmt.Printf("\nPress Ctrl+C to exit\n")
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

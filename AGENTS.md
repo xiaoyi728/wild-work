@@ -1695,8 +1695,16 @@ git tag vX.Y.Z && git push origin vX.Y.Z
   闸门）；`cd cmd/wild-work/webui && npm run build` + `npm run check` 通过（13 场景，新增豆包/灵犀
   弹层场景；`TestPanelAPIRouteContract` Go 50 条路由 / 前端引用 49 条，唯一未引用为白名单
   `POST /api/quit`）。
+- **生产重启（2026-11-17 10:16，所有者点头）**：备份 `/home/incam/Software/_pre-restart-20261117-1015`
+  （`config.json` + `auths/` + `data/ledger` + `data/state-*.json` + 旧二进制）→ stop →
+  `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o dist/wild-work-linux ./cmd/wild-work`
+  → start。新进程 **PID 2152276**，`/api/auth/state` 回 **`version=2.12.0`**、Web UI HTTP 200；
+  启动日志 `loaded accounts: … doubao=0 … lingxi=0 …`（新渠道已注册，尚无账号），
+  重启后 `panic|fatal error|level=error` 命中 **0**。
+- **合并/推送（2026-11-17）**：仓库默认分支是 `main`（无 `master`），`feat/doubao-lingxi`
+  以 `--no-ff` 合并为 **`8ea0cf8`** 并已 `git push origin main` 成功；本 L25 补记随后另起
+  docs commit（远端 head 以 `git ls-remote` 为准）。
 - **未做/待办**：① **未用真实豆包/灵犀账号实盘验证**（§0.1 不碰主力账号）：豆包扫码需手机确认、
-  灵犀 CDP 需本机浏览器，均未在本次环境跑通端到端；② `dist/wild-work-linux` 未重建、生产未重启
-  （运行中会 ETXTBSY；重启需所有者点头，同 L23/L24）；③ 豆包工具协议/会话焚化与灵犀
-  `ppt_outline_text` 的真实上游行为沿用上游实测结论，本仓未复验；④ 前端产物已 `npm run build`，
+  灵犀 CDP 需本机浏览器，均未在本次环境跑通端到端；② 豆包工具协议/会话焚化与灵犀
+  `ppt_outline_text` 的真实上游行为沿用上游实测结论，本仓未复验；③ 前端产物已 `npm run build`，
   但 `web-app/` 是 gitignore 产物，换机/CI 必须重新构建。

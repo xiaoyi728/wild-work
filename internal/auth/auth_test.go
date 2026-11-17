@@ -134,3 +134,42 @@ func TestAdoptJWTExpiry(t *testing.T) {
 		t.Fatalf("expiresAt = %d, want 5（非 JWT 不应改动）", c.ExpiresAt)
 	}
 }
+
+// TestExtraRoundtrip 渠道扩展凭据袋（doubao 的 cookie/device_id/web_id/fp）
+// 必须能跨 SaveAtomic/Parse 往返：否则 daemon 重启后豆包渠道拿到的是空 Extra，
+// 表现为「账号在但对话恒 710020202 / 401」。嵌套形与扁平形两条解析路径都要覆盖。
+func TestExtraRoundtrip(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"nested", `{"auth":{"accessToken":"at","expiresAt":1753600000,"extra":{"cookie":"sessionid=x","device_id":"7558368080707955"}},"account":{"uid":"doubao-u1"}}`},
+		{"flat", `{"accessToken":"at","expiresAt":1753600000,"extra":{"cookie":"sessionid=x","device_id":"7558368080707955"},"uid":"doubao-u1"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := Parse([]byte(tc.raw))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if a.Extra["cookie"] != "sessionid=x" || a.Extra["device_id"] != "7558368080707955" {
+				t.Fatalf("Extra = %#v", a.Extra)
+			}
+			a.FilePath = filepath.Join(t.TempDir(), "doubao-u1.json")
+			if err := a.SaveAtomic(); err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			raw, err := os.ReadFile(a.FilePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := Parse(raw)
+			if err != nil {
+				t.Fatalf("reparse: %v", err)
+			}
+			if b.Extra["cookie"] != "sessionid=x" || b.Extra["device_id"] != "7558368080707955" {
+				t.Fatalf("roundtrip Extra = %#v", b.Extra)
+			}
+		})
+	}
+}

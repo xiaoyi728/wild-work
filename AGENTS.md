@@ -35,7 +35,7 @@ Wild-Work 是 WorkBuddy（国内版+国际版）/TraeWork/Qoder 多渠道账号�
 | R7 | **移除 wails / WebView2 全部依赖** | 省内存与运行时；平台能力封装进 `internal/platform`（build tag 拆分） |
 | R8 | daemon 单进程：一个 `http.Server` 同时服务 OpenAI 端点 + 管理 API + 静态 UI | 沿用 server 现有 ServeMux 扩展 |
 | R9 | 核心业务（pool/scheduler/upstream/traework/server/login/config/auth/provider）**整体复用**，格式零迁移 | config.json / auths/ / data/state.json 兼容旧版；旧 state.json 自动迁移到 state-workbuddy.json |
-| R10 | 新增渠道扩展方式：实现 `provider.Upstream` 接口 + auth 加载器 + 注册 Runtime | 模型前缀 `channel/<model>` 路由；已实现 WorkBuddyCN(国内) + WorkBuddyAI(国际) + TraeWork + TraeCode(与 TraeWork 共账号，function=solo_agent) + QoderCN + QoderCOM(国际) + 千问办公(qwenwork) + MonkeyCode(monkeycode，平台托管模型) + 小浣熊(raccoon) + Loomy(loomy) + 智谱清言(glm) + OpenCodeZen(oczen 匿名) + Cline(cline，官方 sk_ Key 免费池) 十三渠道 + 用户自定义 OpenAI 兼容渠道（custom，R66，面板配置不限个数；名称不得与内建渠道同名）；旧 Qoder（`qoder/*`，QoderWork）已从界面下线但路由保留 |
+| R10 | 新增渠道扩展方式：实现 `provider.Upstream` 接口 + auth 加载器 + 注册 Runtime | 模型前缀 `channel/<model>` 路由；已实现 WorkBuddyCN(国内) + WorkBuddyAI(国际) + TraeWork + TraeCode(与 TraeWork 共账号，function=solo_agent) + QoderCN + QoderCOM(国际) + 千问办公(qwenwork) + MonkeyCode(monkeycode，平台托管模型) + 小浣熊(raccoon) + Loomy(loomy) + 智谱清言(glm) + OpenCodeZen(oczen 匿名) + Cline(cline，官方 sk_ Key 免费池) + WPS 灵犀(lingxi，wps_sid/CDP) + 豆包(doubao，扫码/Cookie) 十五渠道 + 用户自定义 OpenAI 兼容渠道（custom，R66，面板配置不限个数；名称不得与内建渠道同名）；旧 Qoder（`qoder/*`，QoderWork）已从界面下线但路由保留 |
 | R11 | Windows 产物在 WSL 交叉编译（`GOOS=windows CGO_ENABLED=0`，已验证可行）；macOS 产物走 GitHub Actions macos-latest（cgo 必需） | WSL 无法编 darwin cgo；CI 增加 darwin job |
 | R12 | **无桌面 Linux 使用 `--no-tray` 参数** | 无参启动在无 DBus 环境托盘 panic 直接 exit 并提示；`--no-tray` 跳过托盘打印信息阻塞等待 Ctrl+C |
 | R13 | **三接口兼容采用两层结构：内层 handler 不动，新增 `internal/gateway` 边缘层**，经 **in-process 调用**（`io.Pipe` + ResponseWriter 形状）复用内层 | 代码量比内联重构多 20%，但改动面小一个数量级（主链路仅 2 处调用点 + 1 个访问器），回归风险低、可脱离 pool 单测。**不得用 HTTP 自环**（`0.0.0.0` 监听不可作目标、鉴权双份、启动竞态） |
@@ -1655,3 +1655,48 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 - **未做/待办**：`dist/wild-work-linux` 未重建、生产未重启（运行中会 ETXTBSY；重启需所有者点头，
   同 L23 末条）。重建后刷新一次面板即可验收：`state-qodercn.json` 出现 `earliest_expire`、
   积分明细「有效期」列出现日期，且账号按「最早到期优先」参与选号。
+
+### L25 2026-11-17 新增豆包（doubao）与 WPS 灵犀（lingxi）两个内建渠道
+
+- **范围（所有者「1.加上豆包这个渠道 2.增加灵犀」）**：只做这两个渠道，不整体对齐上游 v2.12.0
+  ｜不引入 MiniMax / OfficeAce / Kilo 等其它上游新渠道，也不摘 v2.12.0 的 WorkBuddyAI v2→v3
+  目录回退（当前无 WBAI 账号，且本地 `FetchModels` 仍是 v2 主源；将来加号前需单摘 `574c0a7`）。
+  版本号 `internal/app/app.go` 的 `Version` 由 `2.11.6` → **`2.12.0`**（本仓自用版本，非上游 release）。
+- **豆包后端**：整树移植上游 v2.12.0 的 `internal/doubao`（`7a66a16` 基础 + `7ed7042` 工具协议/会话焚化
+  + `a69a3c8` 阻塞项补修）与 `internal/login_doubao`。对话走桌面客户端身份 `/chat/completion`
+  （`agent_mode=1` + `model_item_key`，免 a_bogus），静态表 9 个真模型；扫码登录为**服务端纯 HTTP**
+  申请二维码 + 轮询（不依赖本机浏览器/桌面客户端），另保留手工粘贴 Cookie；签到走工作模式活动，
+  额度按窗口限额汇总。**已知限制照上游**：身份参数是快照、Cookie 无 refresh、工具调用是文本协议
+  （模型遵从率是上游变量，建议 kimi-k3）、每轮新会话 + 流正常收尾后后台焚化。
+- **灵犀后端**：整树移植上游 v2.12.0 的 `internal/lingxi`（R141）与 `internal/login_lingxi`，其中
+  `ppt_outline_text` 正文帧（R157）已含：流式 `handleFrame` 与非流式 `Aggregate` 两处都按 content
+  增量承接。凭据是 `wps_sid` Cookie（与 comate 共用账号体系但**门禁独立**，uid 前缀 `lxsid-`）；
+  登录双路径：CDP 拉起独立 profile 浏览器捕获 + 面板粘贴；每日签到（`daily_check_in`）+ 余额
+  `credits/balance`；`StaticModels()` 恒 nil，模型面由 plans 的 `data.models` 原样透传。
+- **本仓适配（与上游 v2.12.0 的差异）**：① `auth.Auth` 新增 `Extra map[string]string` 并打通
+  嵌套/扁平两种解析与 `SaveAtomic`（豆包 `cookie` / `device_id` / `web_id` / `fp` 必须跨重启保留，
+  否则表现为「账号在但对话恒 710020202」）；② `provider` 新增 `Kind` 常量 + `builtinKindList` +
+  `DisplayNames`（`WPS 灵犀` / `豆包`；展示序自动按显示名字节序）；③ `cmd/wild-work/main.go` 补
+  `dbAuths/dbPool/dbUp/dbSch` 与 `lxAuths/lxPool/lxUp/lxSch`、`wrapDumps` 接线、runtimes/appRuntimes、
+  `SetCheckinObserver`/`SetRefreshObserver`、**两处 `go dbSch.Run` / `go lxSch.Run`**（R34）、
+  `StartCreditAutoRefresh` 白名单、`doubao.SetAuthLookup`（焚化按 UID 反查凭据）；④ `internal/app` 补
+  豆包扫码三段式（`doubao_qr` / `doubao_qr_status` / `doubao_qr_cancel` / `doubao_cookie`）与灵犀
+  `lingxi_sid` 端点、`StartLoginFor` 的 Lingxi CDP 分支、`loginTimeoutFor`（灵犀 10.5m > 通用 5m）、
+  `completeLingxiLogin` / `SubmitLingxiSID` / `persistLingxiAccount`、豆包 `SubmitDoubaoCookie` /
+  首次签到、`reloadAccounts` 两个分支（漏了就是「日志说已添加、面板没有」）；⑤ React 面板补
+  `CH_LABEL`/`CH_CLASS`/`RESERVED_CHANNEL_NAMES`/`WEB_LOGIN_CHANNELS`/`CH_NAMES`/`CHANNEL_PRESETS`、
+  三套主题 `--lingxi`/`--doubao` 专色、添加按钮、豆包扫码/手工 Cookie 弹层、灵犀双路径弹层、
+  卡片「⟳ 重登」路由（doubao→扫码弹层，lingxi→双路径弹层，glm→GLM 自动登录）。
+- **回归**：`internal/app/new_channels_test.go`（reload 覆盖 / 两渠道可手动签到 / 灵犀登录超时 /
+  豆包不得复用通用登录 / 空凭据本地拒绝）、`internal/auth/auth_test.go` 新增 `TestExtraRoundtrip`；
+  上游整树测试（doubao 4.4s、lingxi 0.01s、login_doubao 6.2s、login_lingxi 0.01s）全绿。
+- **验证（实测）**：`go build ./...`、`go vet ./...`、`go test ./... -count=1` 全绿（含
+  `cmd/wild-work` 的调度器启动/transport 接线闸门与 `internal/app` 的路由契约/颜色变量/嵌入产物
+  闸门）；`cd cmd/wild-work/webui && npm run build` + `npm run check` 通过（13 场景，新增豆包/灵犀
+  弹层场景；`TestPanelAPIRouteContract` Go 50 条路由 / 前端引用 49 条，唯一未引用为白名单
+  `POST /api/quit`）。
+- **未做/待办**：① **未用真实豆包/灵犀账号实盘验证**（§0.1 不碰主力账号）：豆包扫码需手机确认、
+  灵犀 CDP 需本机浏览器，均未在本次环境跑通端到端；② `dist/wild-work-linux` 未重建、生产未重启
+  （运行中会 ETXTBSY；重启需所有者点头，同 L23/L24）；③ 豆包工具协议/会话焚化与灵犀
+  `ppt_outline_text` 的真实上游行为沿用上游实测结论，本仓未复验；④ 前端产物已 `npm run build`，
+  但 `web-app/` 是 gitignore 产物，换机/CI 必须重新构建。

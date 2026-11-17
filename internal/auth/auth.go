@@ -46,6 +46,10 @@ type Auth struct {
 	// 导入器从客户端同一 bundle 目录的 baizhi-cookies.json 取得。
 	// 仅 MonkeyCode 用；其它渠道不用该字段。
 	BaizhiCookie string
+	// Extra 是渠道扩展凭据的通用承载袋（键值均字符串）。首例 doubao：
+	// cookie / device_id / web_id / fp 等；lingxi/comate 只用 AccessToken。
+	// 只增不减、向后兼容（旧凭证无该字段 → nil，各渠道自行判空）。仅该类渠道使用。
+	Extra        map[string]string `json:"extra,omitempty"`
 	UID          string
 	EnterpriseID string
 	Nickname     string
@@ -140,6 +144,8 @@ func Parse(raw []byte) (*Auth, error) {
 				ConsoleCookie string `json:"consoleCookie"`
 				// baizhiCookie 同上：百智云会话 Cookie（控制台会话的上游来源）
 				BaizhiCookie string `json:"baizhiCookie"`
+				// extra 渠道扩展凭据袋（doubao 等；其余渠道空）
+				Extra map[string]string `json:"extra"`
 			} `json:"auth"`
 			Account struct {
 				UID          string `json:"uid"`
@@ -166,6 +172,7 @@ func Parse(raw []byte) (*Auth, error) {
 			ConsoleCookie: n.Auth.ConsoleCookie,
 			// BaizhiCookie 同上（控制台会话的上游来源）
 			BaizhiCookie: n.Auth.BaizhiCookie,
+			Extra:        n.Auth.Extra,
 			UID:          n.Account.UID,
 			EnterpriseID: n.Account.EnterpriseID,
 			Nickname:     n.Account.Nickname,
@@ -187,9 +194,11 @@ func Parse(raw []byte) (*Auth, error) {
 			ConsoleCookie string `json:"consoleCookie"`
 			// baizhiCookie 同上：百智云会话 Cookie（控制台会话的上游来源）
 			BaizhiCookie string `json:"baizhiCookie"`
-			UID          string `json:"uid"`
-			EnterpriseID string `json:"enterpriseId"`
-			Nickname     string `json:"nickname"`
+			// extra 渠道扩展凭据袋（doubao 等；其余渠道空）
+			Extra        map[string]string `json:"extra"`
+			UID          string            `json:"uid"`
+			EnterpriseID string            `json:"enterpriseId"`
+			Nickname     string            `json:"nickname"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -208,6 +217,7 @@ func Parse(raw []byte) (*Auth, error) {
 			SigningSecret: f.SigningSecret,
 			ConsoleCookie: f.ConsoleCookie,
 			BaizhiCookie:  f.BaizhiCookie,
+			Extra:         f.Extra,
 			UID:           f.UID,
 			EnterpriseID:  f.EnterpriseID,
 			Nickname:      f.Nickname,
@@ -250,6 +260,8 @@ func (a *Auth) saveAtomicLocked() error {
 			"consoleCookie": a.ConsoleCookie,
 			// baizhiCookie 同上：仅 MonkeyCode 用（百智云会话 Cookie）
 			"baizhiCookie": a.BaizhiCookie,
+			// extra 仅 doubao 等扩展渠道非空；其余渠道写空 map 无副作用
+			"extra": a.Extra,
 		},
 		"account": map[string]any{
 			"uid":          a.UID,
@@ -464,6 +476,22 @@ func LoadRaccoonDir(dir string) ([]*Auth, error) {
 // 凭据不来自本工具的登录编排，而是由面板「从本机客户端导入」生成（见 app.ImportLocalCredentials）。
 func LoadLoomyDir(dir string) ([]*Auth, error) {
 	return loadPrefixed(dir, "loomy")
+}
+
+// LoadDoubaoDir 扫描豆包渠道凭证（doubao-*.json）。
+//
+// 凭据来自面板「扫码登录」（internal/login_doubao）或手工粘贴 Cookie；
+// 与 raccoon 的 glob 边界已核：raccoon- / doubao- 无包含关系。
+func LoadDoubaoDir(dir string) ([]*Auth, error) {
+	return loadPrefixed(dir, "doubao")
+}
+
+// LoadLingxiDir 扫描 WPS 灵犀渠道凭证（lingxi-*.json）。
+// 与 comate 同为「粘贴型」渠道：凭据同为 wps_sid Cookie（面板粘贴，见
+// app.SubmitLingxiSID），存于 AccessToken；Cookie 不轮换 ⇒ 无 refresh/保活，
+// ExpiresAt 恒远期；但灵犀有每日签到（领智点），由调度器走 checkinMinutes。
+func LoadLingxiDir(dir string) ([]*Auth, error) {
+	return loadPrefixed(dir, "lingxi")
 }
 
 // LoadClineDir 扫描 Cline 凭证（cline-*.json）。

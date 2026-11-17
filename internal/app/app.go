@@ -24,9 +24,13 @@ import (
 	"wild-work/internal/cline"
 	"wild-work/internal/config"
 	"wild-work/internal/custom"
+	"wild-work/internal/doubao"
 	"wild-work/internal/ledger"
+	"wild-work/internal/lingxi"
 	"wild-work/internal/login"
+	logindoubao "wild-work/internal/login_doubao"
 	"wild-work/internal/login_glm"
+	loginlingxi "wild-work/internal/login_lingxi"
 	loginqoder "wild-work/internal/login_qoder"
 	loginqodercn "wild-work/internal/login_qodercn"
 	loginqodercom "wild-work/internal/login_qodercom"
@@ -53,14 +57,24 @@ import (
 
 // Version 版本号（面板标题栏与「关于」弹窗直接展示，须与已对齐的上游版本一致）。
 //
-// 2026-11-10 修正：已并入 v2.11.6 的现有渠道与后端修复（refresh 单飞、小浣熊
-// 有效期、千问办公设备流、MonkeyCode 402、Loomy 空余额、DSH 脱敏、临期口径）。
-const Version = "2.11.6"
+// 2026-11-17 修正：在 v2.11.6 基础上摘取 v2.11.7 的 QoderCN 到期，并新增
+// 豆包（doubao）与 WPS 灵犀（lingxi）两个内建渠道（移植上游 v2.12.0 对应包）。
+const Version = "2.12.0"
 
 const (
 	loginTimeout   = 5 * time.Minute
 	loginPollEvery = 2 * time.Second
 )
+
+// loginTimeoutFor 返回该渠道登录轮询的等待上限。
+// 灵犀的 CDP 等待上限是 10 分钟（login_lingxi.PollTimeout），通用 5 分钟会先到、
+// 把还在等用户登录的浏览器连同流程一起关掉（R97 同款教训）。
+func loginTimeoutFor(k provider.Kind) time.Duration {
+	if k == provider.Lingxi {
+		return loginlingxi.PollTimeout()
+	}
+	return loginTimeout
+}
 
 // Runtime 一个渠道的运行时资源。
 type Runtime struct {
@@ -136,6 +150,11 @@ type App struct {
 	// 它不轮询 state 文件，而是经 CDP 从浏览器 Cookie 捕获凭据）。
 	muGLMLogin sync.Mutex
 	glmLogin   *loginglm.AutoSession
+
+	// 豆包扫码登录会话（独立于通用 OAuth/ CDP 登录流程：服务端纯 HTTP 申请二维码
+	// 并轮询扫码状态，与部署环境无关）。
+	muDoubaoLogin sync.Mutex
+	doubaoLogin   *logindoubao.QRSession
 
 	// auth 管理面板会话（cookie）；详见 session.go
 	auth *authState
@@ -364,7 +383,7 @@ func (a *App) runtimesSnapshot() []*Runtime {
 func (a *App) firstRuntime() *Runtime {
 	// oczen 排在末位：它无调度器活动，不应成为「签到时间/下次签到」的展示来源。
 	// 顺序即展示优先级：新渠道追加在 Oczen 之前（Oczen 恒末位）。
-	for _, k := range []provider.Kind{provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.GLM, provider.MonkeyCode, provider.Raccoon, provider.Loomy, provider.Oczen} {
+	for _, k := range []provider.Kind{provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.GLM, provider.MonkeyCode, provider.Raccoon, provider.Loomy, provider.Lingxi, provider.Doubao, provider.Oczen} {
 		if rt := a.runtime(k); rt != nil {
 			return rt
 		}
@@ -711,15 +730,21 @@ func (a *App) Quit() {
 // 账号操作
 // ---------------------------------------------------------------------------
 
-// StartLoginFor 发起指定渠道登录：workbuddy / workbuddyai / traework / qoder / qodercn。
+// StartLoginFor 发起指定渠道登录：workbuddy / workbuddyai / traework / qoder /
+// qodercn / qodercom / qwenwork / lingxi（CDP）。豆包走独立的扫码登录弹层
+// （StartDoubaoQRLogin + /api/login/doubao_qr*），不在本函数的编排范围内。
 func (a *App) StartLoginFor(kind string) (string, error) {
 	k := provider.Kind(strings.TrimSpace(kind))
 	if k == "" {
 		k = provider.WorkBuddy
 	}
 	switch k {
-	case provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork:
+	case provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.Lingxi:
 		// 这些渠道已有登录编排
+	case provider.Doubao:
+		// 豆包走独立的「扫码登录」弹层（服务端申请二维码 + 轮询扫码状态），
+		// 不复用通用 OAuth 流程；这里给出可行动提示。
+		return "", errors.New("豆包请使用「扫码登录」弹层（或手工粘贴 Cookie）添加账号")
 	case provider.MonkeyCode:
 		// 导入型渠道：凭据来自本机已登录的官方客户端，上游没有可复现的 OAuth 流程。
 		return "", fmt.Errorf("%s 渠道无需登录：请在面板点「从本机客户端导入」（复用本机已登录的官方客户端凭据）", k)
@@ -763,6 +788,8 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		a.loginClient = loginqwenwork.NewClient()
 	case provider.Raccoon:
 		// 网页版登录靠 CDP，不用 HTTP client；置 nil 即可（pollLogin 里也不再用它）。
+	case provider.Lingxi:
+		// 灵犀网页版登录同样靠 CDP 捕获 wps_sid，不用 HTTP client。
 	default:
 		a.loginClient = login.NewClient()
 	}
@@ -788,6 +815,10 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.Raccoon:
 		// 网页版登录：拉起独立 profile 的浏览器并返回登录页地址（跨平台，无需注册表/客户端）。
 		authURL, err = loginraccoon.Start()
+	case provider.Lingxi:
+		// 灵犀网页版登录：拉起独立 profile 的浏览器打开 WPS 官网，
+		// 用户在网页登录后由 CDP 捕获 wps_sid 并验证（灵犀侧门禁）。
+		authURL, err = loginlingxi.Start(nil, "")
 	default:
 		ep := login.EndpointsForRegion(a.cfg.Region)
 		authURL, err = login.Start(a.loginClient, a.loginStateFP, ep)
@@ -826,6 +857,10 @@ func (a *App) CancelLogin() error {
 	if kind == provider.Raccoon {
 		loginraccoon.Shutdown()
 	}
+	// 灵犀网页版登录：取消时关闭浏览器（幂等；pollLogin 的 defer 还会再兜一次）
+	if kind == provider.Lingxi {
+		loginlingxi.Shutdown()
+	}
 	log.Printf("登录已取消")
 	return nil
 }
@@ -841,9 +876,12 @@ func (a *App) pollLogin(ctx context.Context) {
 		if a.loginKind == provider.Raccoon {
 			loginraccoon.Shutdown()
 		}
+		if a.loginKind == provider.Lingxi {
+			loginlingxi.Shutdown()
+		}
 		a.finishLogin()
 	}()
-	deadline := time.Now().Add(loginTimeout)
+	deadline := time.Now().Add(loginTimeoutFor(a.loginKind))
 	log.Printf("登录流程已发起，等待浏览器完成…")
 	t := time.NewTicker(loginPollEvery)
 	defer t.Stop()
@@ -945,6 +983,24 @@ func (a *App) pollLogin(ctx context.Context) {
 			}
 			continue
 		}
+		if a.loginKind == provider.Lingxi {
+			r, err := loginlingxi.Poll(nil, "")
+			if err == nil {
+				if cerr := a.completeLingxiLogin(r); cerr != nil {
+					log.Printf("lingxi login persist failed: %v", cerr)
+					a.setLoginError("登录失败：" + cerr.Error())
+				}
+				return
+			}
+			if !errors.Is(err, loginlingxi.ErrPending) {
+				// 终态错误（未捕获到账号 / 灵犀侧未开通 / 已取消）：立即结束轮询，
+				// 由 defer 关闭浏览器；继续轮询只会重复报同一个错。
+				log.Printf("lingxi login poll failed: %v", err)
+				a.setLoginError("登录失败：" + err.Error())
+				return
+			}
+			continue
+		}
 		r, err := login.Poll(a.loginClient, a.loginStateFP, login.EndpointsForRegion(a.cfg.Region))
 		if err == nil {
 			a.completeLogin(r)
@@ -1015,6 +1071,271 @@ func (a *App) firstCheckinRaccoon(uid string) {
 	if _, err := a.RefreshCredits(uid); err != nil {
 		log.Printf("raccoon 新账号积分兜底失败 %s: %v", uid, err)
 	}
+}
+
+// completeLingxiLogin CDP 自动登录（login_lingxi）成功后的收尾：入库。
+//
+// 与其它 CDP 渠道的 complete*Login 同构；落盘走 persistLingxiAccount，
+// 与粘贴路径 SubmitLingxiSID 完全一致，避免两条路径写出不同格式的凭据。
+func (a *App) completeLingxiLogin(r loginlingxi.Result) error {
+	warn, err := a.persistLingxiAccount(r.SID, r.UID)
+	if err != nil {
+		// persist 内部（SaveAtomic 失败）已带「保存 Lingxi 凭据失败」前缀，这里不再重复包装。
+		return err
+	}
+	// 日志零 token（不变量 2）：只打 uid，绝不打完整 sid。
+	log.Printf("lingxi 账号已添加（自动登录）uid=%s 同账号告警=%v", r.UID, warn != "")
+	// 首次签到：让当日智点马上落账（与 raccoon/doubao 登录后补签同思路）。
+	a.safeGo(func() { a.firstCheckinLingxi(r.UID) })
+	return nil
+}
+
+// SubmitLingxiSID 提交用户粘贴的 wps_sid Cookie（灵犀渠道）：验证 → 落盘 → 重载账号池。
+//
+// 验证走 GET plans 端点（零智点消耗），且能在验证阶段就发现「灵犀侧未开通」——
+// 同一个 wps_sid 在 comate 与灵犀是两道独立门禁，提前拦在这里可避免入库一个
+// 必然空目录的账号。
+func (a *App) SubmitLingxiSID(sid string) (string, string, error) {
+	s := strings.TrimSpace(sid)
+	if s == "" {
+		return "", "", errors.New("wps_sid 不能为空")
+	}
+	uid, err := lingxi.ValidateSID(s)
+	if err != nil {
+		return "", "", err
+	}
+	warn, err := a.persistLingxiAccount(s, uid)
+	if err != nil {
+		return "", "", err
+	}
+	// 日志零 token（不变量 2）：只打 uid，绝不打完整 sid。
+	log.Printf("lingxi 账号已添加（粘贴 wps_sid）uid=%s 同账号告警=%v", uid, warn != "")
+	// 首次签到：让当日智点马上落账（与 CDP 自动登录路径同款）。
+	a.safeGo(func() { a.firstCheckinLingxi(uid) })
+	return uid, warn, nil
+}
+
+// persistLingxiAccount lingxi 账号入库的唯一路径：同账号检测 → 落盘 → 重载账号池。
+// 返回同账号告警文案（空串=无告警）与入库错误。
+func (a *App) persistLingxiAccount(sid string, uid string) (string, error) {
+	// 同账号检测：与已入库 lingxi 账号的 sid 逐字比对（智点按 WPS 账号计）。
+	warn := ""
+	if existing, lerr := auth.LoadLingxiDir(a.cfg.AuthDir); lerr == nil {
+		for _, e := range existing {
+			if e.AccessTokenValue() == sid {
+				warn = fmt.Sprintf("这个 wps_sid 与已添加的账号 %s 相同（智点按 WPS 账号计），"+
+					"重复添加不会增加可用智点。请换一个 WPS 账号的 wps_sid。", e.UID)
+				break
+			}
+		}
+	}
+
+	_ = os.MkdirAll(a.cfg.AuthDir, 0o755)
+	nick := "WPS 账号"
+	if len(uid) >= 6 {
+		nick += " " + uid[len(uid)-6:]
+	}
+	la := &auth.Auth{
+		Kind:        "lingxi",
+		UID:         uid,
+		Nickname:    nick,
+		AccessToken: sid,
+		// Cookie 无过期概念：ExpiresAt 必须远期，0 会让 NeedsRefresh 恒真（不变量 21 同款陷阱）。
+		ExpiresAt: lingxi.FarFutureExpiry(),
+		FilePath:  filepath.Join(a.cfg.AuthDir, "lingxi-"+uid+".json"),
+	}
+	if err := la.SaveAtomic(); err != nil {
+		return "", fmt.Errorf("保存 Lingxi 凭据失败：%w", err)
+	}
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.Lingxi)
+	return warn, nil
+}
+
+// firstCheckinLingxi 新账号首次签到（领智点；异步，失败只记日志不阻塞）。
+func (a *App) firstCheckinLingxi(uid string) {
+	rt := a.runtime(provider.Lingxi)
+	if rt == nil || rt.Pool == nil {
+		return
+	}
+	acct := rt.Pool.AuthByUID(uid)
+	if acct == nil {
+		return
+	}
+	rep, ok := rt.Upstream.(provider.CheckinReporter)
+	if !ok {
+		return
+	}
+	r, err := rep.DailyCheckinReport(acct)
+	if err != nil {
+		log.Printf("lingxi 首次签到失败 uid=%s err=%v", uid, err)
+		return
+	}
+	log.Printf("lingxi 首次签到完成 uid=%s status=%s msg=%s", uid, r.Status, r.Msg)
+}
+
+// ---------- 豆包：扫码登录 ----------
+
+// StartDoubaoQRLogin 发起豆包「扫码登录」：服务端向 passport 申请二维码，
+// 面板用 <img> 显示，用户用豆包 App 扫码确认后服务端自己收 Cookie 并落盘。
+//
+// 为什么不像 raccoon 那样用 CDP 拉浏览器：CDP 只能拉起「运行 wild-work 的那台机器」
+// 的浏览器，WSL / NAS / systemd 没有桌面时窗口永远弹不出来；豆包的扫码链路是纯 HTTP，
+// 与部署环境无关（与 Comate 二维码登录同范式）。
+func (a *App) StartDoubaoQRLogin() error {
+	a.muDoubaoLogin.Lock()
+	defer a.muDoubaoLogin.Unlock()
+	if a.doubaoLogin != nil {
+		switch a.doubaoLogin.State() {
+		case logindoubao.StatePending, logindoubao.StateScanned:
+			return errors.New("已有豆包扫码登录进行中，请在手机上完成确认，或先取消")
+		}
+	}
+	sess, err := logindoubao.Start(func(r logindoubao.Result) error {
+		_, _, werr := a.SubmitDoubaoCookie(r.Cookie)
+		return werr
+	})
+	if err != nil {
+		return err
+	}
+	a.doubaoLogin = sess
+	return nil
+}
+
+// GetDoubaoQRLoginStatus 查询扫码登录状态。
+func (a *App) GetDoubaoQRLoginStatus() map[string]any {
+	a.muDoubaoLogin.Lock()
+	sess := a.doubaoLogin
+	a.muDoubaoLogin.Unlock()
+	if sess == nil {
+		return map[string]any{"state": "idle"}
+	}
+	return sess.Snapshot()
+}
+
+// CancelDoubaoQRLogin 取消扫码登录。
+func (a *App) CancelDoubaoQRLogin() error {
+	a.muDoubaoLogin.Lock()
+	sess := a.doubaoLogin
+	a.muDoubaoLogin.Unlock()
+	if sess == nil {
+		return errors.New("没有进行中的豆包登录")
+	}
+	sess.Cancel()
+	return nil
+}
+
+// SubmitDoubaoCookie 校验并保存一份豆包登录 Cookie（扫码与手工粘贴共用）。
+//
+// 返回 (uid, warn, error)。校验判据是**额度接口能通**（doubao.VerifyCookie），
+// 不是「Cookie 里有没有 sessionid」——后者可能拿到预登录凭据（R128 同款纪律）。
+func (a *App) SubmitDoubaoCookie(raw string) (string, string, error) {
+	cookie := doubao.NormalizeCookie(raw)
+	if cookie == "" {
+		return "", "", errors.New("Cookie 不能为空")
+	}
+	if doubao.SessionIDOf(cookie) == "" {
+		return "", "", errors.New("Cookie 里没有 sessionid（请从豆包网页登录态里复制完整 Cookie）")
+	}
+	uid := doubao.UIDOfCookie(cookie)
+
+	// 同账号检测：与已入库豆包账号的 uid 比对（uid 由 sessionid 派生，
+	// 同一账号重复扫码会落到同一个 uid，提示而不重复入账）。
+	warn := ""
+	if existing, lerr := auth.LoadDoubaoDir(a.cfg.AuthDir); lerr == nil {
+		for _, e := range existing {
+			if e.UID == uid {
+				warn = fmt.Sprintf("这个豆包账号（%s）已经添加过了，本次会用新 Cookie 更新它。", shortUID(uid))
+				break
+			}
+		}
+	}
+
+	// 昵称优先保留用户改过的；上游没有可用的身份端点，故取不到就退回 uid 尾号，不编造。
+	prevNick := ""
+	if existing, lerr := auth.LoadDoubaoDir(a.cfg.AuthDir); lerr == nil {
+		for _, e := range existing {
+			if e.UID == uid {
+				prevNick = e.Nickname
+				break
+			}
+		}
+	}
+	nick := prevNick
+	if strings.HasPrefix(nick, doubaoNickPrefix) || nick == "" {
+		nick = doubaoNickname(uid)
+	}
+
+	if verr := doubao.VerifyCookie(cookie); verr != nil {
+		return "", "", fmt.Errorf("豆包登录态校验未通过：%v", verr)
+	}
+
+	_ = os.MkdirAll(a.cfg.AuthDir, 0o755)
+	// 设备指纹：每次登录生成**新**的一套（不复用旧身份的风控分），并随凭据持久化，
+	// 保证同一账号每次请求是同一套设备。三个字段的形状上游会校验，
+	// 不对直接回 710020202（2026-11-15 实测）。
+	devID, webID, fp := doubao.GenerateDeviceParams()
+	da := &auth.Auth{
+		Kind:        "doubao",
+		UID:         uid,
+		Nickname:    nick,
+		AccessToken: cookie,
+		// Cookie 无过期概念：远期值，0 会让 NeedsRefresh 恒真（不变量 21 同款陷阱）。
+		ExpiresAt: farFutureExpiry(),
+		FilePath:  filepath.Join(a.cfg.AuthDir, "doubao-"+uid+".json"),
+		Extra: map[string]string{
+			doubao.ExtraCookie:   cookie,
+			doubao.ExtraDeviceID: devID,
+			doubao.ExtraWebID:    webID,
+			doubao.ExtraFP:       fp,
+		},
+	}
+	if err := da.SaveAtomic(); err != nil {
+		return "", "", fmt.Errorf("保存豆包凭据失败：%w", err)
+	}
+	// 日志零 token（不变量 2）：只打 uid，绝不打 Cookie。
+	log.Printf("doubao 账号已添加（扫码/粘贴）uid=%s", uid)
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.Doubao)
+	// 首次签到：让当日额度马上落账（与 raccoon/comate 登录后补签同思路）。
+	a.safeGo(func() { a.firstCheckinDoubao(uid) })
+	return uid, warn, nil
+}
+
+// farFutureExpiry 远期过期时间（Cookie 无过期概念；0 会让 NeedsRefresh 恒真）。
+func farFutureExpiry() int64 { return time.Now().AddDate(80, 0, 0).Unix() }
+
+// doubaoNickPrefix 占位昵称前缀。
+const doubaoNickPrefix = "豆包账号"
+
+// doubaoNickname 兜底昵称（uid 尾号 6 位）。
+func doubaoNickname(uid string) string {
+	if len(uid) <= 6 {
+		return doubaoNickPrefix
+	}
+	return doubaoNickPrefix + " " + uid[len(uid)-6:]
+}
+
+// firstCheckinDoubao 登录后补一次签到（异步，失败只记日志不阻塞）。
+func (a *App) firstCheckinDoubao(uid string) {
+	rt := a.runtime(provider.Doubao)
+	if rt == nil || rt.Pool == nil {
+		return
+	}
+	acct := rt.Pool.AuthByUID(uid)
+	if acct == nil {
+		return
+	}
+	rep, ok := rt.Upstream.(provider.CheckinReporter)
+	if !ok {
+		return
+	}
+	r, err := rep.DailyCheckinReport(acct)
+	if err != nil {
+		log.Printf("doubao 首次签到失败 uid=%s err=%v", uid, err)
+		return
+	}
+	log.Printf("doubao 首次签到完成 uid=%s status=%s msg=%s", uid, r.Status, r.Msg)
 }
 
 // completeLogin 登录成功：写 auth 文件、重载账号池，异步签到。
@@ -1553,11 +1874,31 @@ func (a *App) reloadAccounts() {
 			rt.Pool.SyncToDir(auths)
 		}
 	}
+	// 豆包：扫码/粘贴落盘后必须在这里重新入池，否则账号在面板上不出现
+	// （2026-11-15 上游漏过：只在 main.go 启动路径加了加载，reloadAccounts 漏掉，
+	// 表现为「日志说账号已添加，面板就是没有」）。
+	if rt := a.runtime(provider.Doubao); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadDoubaoDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload doubao accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
 	// Cline：一把官方 API Key = 一个账号，凭据由面板「粘贴 API Key」写入。
 	if rt := a.runtime(provider.Cline); rt != nil && rt.Pool != nil {
 		auths, err := auth.LoadClineDir(a.cfg.AuthDir)
 		if err != nil {
 			log.Printf("reload cline accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	// Lingxi：一个 WPS 账号一份 wps_sid（灵犀侧开通），凭据由面板「粘贴 wps_sid」写入。
+	if rt := a.runtime(provider.Lingxi); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadLingxiDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload lingxi accounts: %v", err)
 		} else {
 			rt.Pool.SyncToDir(auths)
 		}
@@ -3276,6 +3617,58 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warning": warn})
+	})
+	// WPS 灵犀：粘贴 wps_sid Cookie（浏览器自动登录走通用 /api/login/start + CDP）。
+	mux.HandleFunc("POST /api/login/lingxi_sid", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			SID string `json:"sid"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		uid, warn, err := a.SubmitLingxiSID(req.SID)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warning": warn})
+	})
+	// 豆包扫码登录（服务端申请二维码，手机 App 确认后自动拿 Cookie 并落盘）：三段式。
+	mux.HandleFunc("POST /api/login/doubao_qr", func(w http.ResponseWriter, r *http.Request) {
+		if err := a.StartDoubaoQRLogin(); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, a.GetDoubaoQRLoginStatus())
+	})
+	mux.HandleFunc("GET /api/login/doubao_qr_status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, a.GetDoubaoQRLoginStatus())
+	})
+	mux.HandleFunc("POST /api/login/doubao_qr_cancel", func(w http.ResponseWriter, r *http.Request) {
+		if err := a.CancelDoubaoQRLogin(); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	// 手工粘贴 Cookie 兜底：扫码不可用（如面板打不开图片）时，用户可从浏览器
+	// DevTools 复制完整 Cookie 粘进来。校验与扫码共用 SubmitDoubaoCookie。
+	mux.HandleFunc("POST /api/login/doubao_cookie", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Cookie string `json:"cookie"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		uid, warn, err := a.SubmitDoubaoCookie(req.Cookie)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		out := map[string]any{"ok": true, "uid": uid}
+		if warn != "" {
+			out["warning"] = warn
+		}
+		writeJSON(w, http.StatusOK, out)
 	})
 
 	mux.HandleFunc("POST /api/account/checkin", func(w http.ResponseWriter, r *http.Request) {

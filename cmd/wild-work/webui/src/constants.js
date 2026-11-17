@@ -8,12 +8,13 @@ export const CH_LABEL = {
   traecode: 'TraeCode', qoder: 'Qoder', qodercn: 'QoderCN', qodercom: 'QoderCOM',
   qwenwork: '千问办公', glm: '智谱清言', monkeycode: 'MonkeyCode', raccoon: '小浣熊',
   loomy: 'Loomy', oczen: 'OpenCodeZen', cline: 'Cline',
+  lingxi: 'WPS 灵犀', doubao: '豆包',
 };
 export const CH_CLASS = {
   workbuddy: 'wb', workbuddyai: 'wbai', traework: 'trae', traecode: 'traecode',
   qoder: 'qoder', qodercn: 'qodercn', qodercom: 'qodercom', qwenwork: 'qwenwork',
   glm: 'glm', monkeycode: 'monkeycode', raccoon: 'raccoon', loomy: 'loomy',
-  oczen: 'oczen', cline: 'cline',
+  oczen: 'oczen', cline: 'cline', lingxi: 'lingxi', doubao: 'doubao',
 };
 export const chLabel = (k) => CH_LABEL[k] || k;
 export const chClass = (k) => CH_CLASS[k] || 'custom';
@@ -24,6 +25,7 @@ export const chClass = (k) => CH_CLASS[k] || 'custom';
 export const RESERVED_CHANNEL_NAMES = new Set([
   'workbuddy', 'workbuddyai', 'traework', 'traecode', 'qoder', 'qodercn', 'qodercom',
   'qwenwork', 'monkeycode', 'raccoon', 'loomy', 'oczen', 'glm', 'cline', 'cline-free',
+  'lingxi', 'doubao',
 ]);
 
 // 不支持显式签到（手动按钮）的渠道：国际版是自动对话保活领日活；千问办公无签到活动；
@@ -45,7 +47,9 @@ export const isImportLocal = (ch) => IMPORT_LOCAL_CHANNELS.has(ch);
 // 授权码（R41），仅 Windows 可用、要求本机装官方客户端、且与客户端抢协议；
 // R44 实测网页版凭据与桌面端同一套，故改用网页版流程，桌面协议代码只留作注册表残留的自愈。
 // 小浣熊同时命中导入型 —— 弹窗里给「网页版登录」与「从客户端导入」两个动作。
-export const WEB_LOGIN_CHANNELS = new Set(['raccoon']);
+// WPS 灵犀同走 CDP 捕获（internal/login_lingxi）：浏览器由后端拉起，主按钮是
+// 「浏览器登录」，等价入口「粘贴 wps_sid」放在专用弹层里（不占通用确认弹层）。
+export const WEB_LOGIN_CHANNELS = new Set(['raccoon', 'lingxi']);
 export const hasWebLogin = (ch) => WEB_LOGIN_CHANNELS.has(ch);
 
 // 粘贴凭据型渠道：没有浏览器登录编排，凭据由用户从官方站点自行创建后粘贴进来。
@@ -82,6 +86,7 @@ export const NO_CHECKIN_LOGIN_HINT = {
   loomy: '（凭据来自本机已登录的 Loomy 客户端；上游无续期接口，约 14 天后需重新登录并再次导入）',
   cline: '（无需登录：在 app.cline.bot 自行注册账号并创建 API Key，粘贴即可；Key 不过期也不轮换）',
   glm: '（登录后请按下方指引复制 refresh_token 粘贴回来）',
+  lingxi: '（浏览器登录会拉起独立 profile 捕获 wps_sid；也可粘贴 lingxi.kdocs.cn 的 wps_sid，须灵犀侧已开通、有智点余额）',
 };
 
 // 注：渠道级上游代理（PROXY_CHANNELS / PROXY_HINT）已于 R57 删除——
@@ -92,7 +97,7 @@ export const CH_NAMES = {
   workbuddy: 'WorkBuddyCN', workbuddyai: 'WorkBuddyAI', traework: 'TraeWork',
   qoder: 'Qoder', qodercn: 'QoderCN', qodercom: 'QoderCOM', qwenwork: '千问办公',
   glm: '智谱清言', monkeycode: 'MonkeyCode', raccoon: '小浣熊', loomy: 'Loomy',
-  oczen: 'OpenCodeZen', cline: 'Cline',
+  oczen: 'OpenCodeZen', cline: 'Cline', lingxi: 'WPS 灵犀', doubao: '豆包',
 };
 
 // 各渠道的缺省建议映射：未绑定该渠道账号、或不知道该渠道有哪些模型时给个起点。
@@ -110,6 +115,11 @@ export const CHANNEL_PRESETS = {
   raccoon: { label: '→ raccoon (小浣熊)', items: ['gpt-* = raccoon/GLM-4.6', 'claude-* = raccoon/DeepSeek-V3.2'] },
   loomy: { label: '→ loomy', items: ['gpt-* = loomy/gpt-5.2', 'claude-* = loomy/claude-sonnet-4.5'] },
   oczen: { label: '→ oczen (匿名免费)', items: ['claude-* = oczen/mimo-v2.6-flash-free', 'gpt-* = oczen/big-pickle'] },
+  // 灵犀：上游目录由灵犀侧动态下发（DeepSeek / Qwen / GLM / Kimi / MiniMax 等），
+  // 这里给几个起点，避免用户照着不存在的模型名去配。
+  lingxi: { label: '→ lingxi (WPS 灵犀)', items: ['gpt-* = lingxi/kimi-k3.1-pro', 'claude-* = lingxi/deepseek-v4.1-flash', 'gemini-* = lingxi/qwen3.8_flash'] },
+  // 豆包：扫码登录后的对话模型。模型名以上游实际下发为准（见「渠道费率」）。
+  doubao: { label: '→ doubao (豆包)', items: ['gpt-* = doubao/deepseek-v4-flash', 'claude-* = doubao/kimi-k3', 'gemini-* = doubao/glm-5.3'] },
 };
 
 export const DETAIL_PAGE_SIZE = 8;

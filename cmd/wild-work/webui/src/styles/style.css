@@ -885,3 +885,39 @@ html[data-theme="paper"] .shiny {
 .fee-access-v { font-family: ui-monospace, "SF Mono", monospace; overflow-wrap: anywhere; cursor: pointer; }
 .fee-access-v:hover { color: var(--accent); text-decoration: underline dotted; }
 .import-row:hover { background: var(--code-bg); border-radius: 8px; }
+
+/* ============================================================
+   豆包 / WPS 灵犀（内建渠道，2026-11-17）
+   只追加新规则，不改既有规则；色值全部走 tokens.css 的 --lingxi / --doubao
+   （三套主题各一值，暗色/纸色是可读变体）。
+   ============================================================ */
+
+/* 添加按钮 / 账号徽章 / 汇总条 chip / 费率标题 —— 与既有渠道同构 */
+.btn.primary.alt.lingxi { background: var(--lingxi); }
+.btn.primary.alt.doubao { background: var(--doubao); }
+.badge.lingxi { background: var(--lingxi); }
+.badge.doubao { background: var(--doubao); }
+.cs-chip.lingxi.active { border-color: var(--lingxi); }
+.cs-chip.doubao.active { border-color: var(--doubao); }
+.fees .ch-header.lingxi td { color: var(--lingxi); }
+.fees .ch-header.doubao td { color: var(--doubao); }
+
+/* 豆包扫码区：二维码由服务端申请，前端只负责展示（图片地址可能为空 ⇒ 占位块）。
+   不给 display:none —— 折叠由 React 条件渲染完成。 */
+.doubao-qr-box { display: flex; justify-content: center; margin: 10px 0 6px; }
+.doubao-qr {
+  width: 180px; height: 180px; object-fit: contain;
+  background: #fff; border: 1px solid var(--hairline); border-radius: 12px;
+  image-rendering: pixelated;
+}
+.doubao-qr-empty {
+  width: 180px; height: 180px;
+  display: flex; align-items: center; justify-content: center; text-align: center;
+  padding: 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6;
+  background: var(--code-bg); border: 1px dashed var(--hairline); border-radius: 12px;
+}
+/* 手工 Cookie 是多行文本，行高与等宽字体按「整段粘贴」优化 */
+.doubao-cookie-input {
+  width: 100%; resize: vertical; min-height: 92px;
+  font-family: ui-monospace, "SF Mono", monospace; font-size: 12.5px; line-height: 1.6;
+}

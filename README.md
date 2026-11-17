@@ -1,6 +1,6 @@
 # wild-work
 
-> 多渠道账号聚合桌面工具——把 WorkBuddy(CodeBuddy) 国内版/国际版、TraeWork、TraeCode、QoderCN、QoderCOM（国际版）、千问办公、智谱清言、MonkeyCode、小浣熊、Loomy、Cline 的多个账号聚合成一个 OpenAI 兼容 API，并额外提供**无需账号**的 OpenCodeZen 匿名免费通道；单进程常驻、双击启动、浏览器管理。
+> 多渠道账号聚合桌面工具——把 WorkBuddy(CodeBuddy) 国内版/国际版、TraeWork、TraeCode、QoderCN、QoderCOM（国际版）、千问办公、智谱清言、MonkeyCode、小浣熊、Loomy、Cline、WPS 灵犀、豆包的多个账号聚合成一个 OpenAI 兼容 API，并额外提供**无需账号**的 OpenCodeZen 匿名免费通道；单进程常驻、双击启动、浏览器管理。
 
 ## 本仓库说明
 
@@ -8,7 +8,7 @@
 
 | 本地能力 | 说明 |
 |---------|------|
-| **React 面板** | 管理面板已从 vanilla JS 重构为 React + Vite（`cmd/wild-work/webui/`），产物 `web-app/` 由 `//go:embed` 打进二进制；带自研渲染闸门 `npm run check`（8 个场景断言可见控件、完整模型 ID、缓存三态、思考档位标注、思考强度与自定义渠道）。`cmd/wild-work/web/` 保留本地视觉层与桌宠，不参与 embed |
+| **React 面板** | 管理面板已从 vanilla JS 重构为 React + Vite（`cmd/wild-work/webui/`），产物 `web-app/` 由 `//go:embed` 打进二进制；带自研渲染闸门 `npm run check`（13 个场景断言可见控件、完整模型 ID、缓存三态、思考档位标注、思考强度与自定义渠道）。`cmd/wild-work/web/` 保留本地视觉层与桌宠，不参与 embed |
 | **桌宠** | 面板内可开关的桌面宠物（`webui/src/pet.js` + `webui/public/pet/` 资源），读取面板下发的流量计数（`GET /api/pulse`）做互动反馈 |
 | **运行统计面板** | 第三个 tab（见下），30s 自动刷新，接 `/api/stats` 与 `/api/stats/logs` |
 | **面板端点防护** | 管理接口的跨源写请求校验、账号列表仅返回本实例自有账号（`ownAccounts`） |
@@ -21,8 +21,8 @@
 
 - **多协议兼容**：`/v1/chat/completions`（OpenAI Chat）、`/v1/models`、`/v1/responses`（OpenAI Responses）、`/v1/messages` 与 `/v1/messages/count_tokens`（Anthropic Messages）、`/v1/systemone`（Jev 结构化决策），可直接接入 `codex` CLI、`claude` CLI 与需要语义决策的自动化流程
 - **模型前缀路由**：模型 ID 带 `<渠道>/` 前缀（唯一例外是 Cline 免费池：对外直接用上游命名空间 `cline-free/*`，旧写法 `cline/cline-free/*` 仍兼容），粘性路由优先复用账号以提升会话缓存利用率，临期积分优先消耗
-- **十三渠道聚合**：WorkBuddyCN + WorkBuddyAI + TraeWork + TraeCode + QoderCN + QoderCOM + 千问办公 + 智谱清言（`glm/*`）+ Cline（`cline-free/*`，官方 `sk_` API Key 免费池；面板复制出的就是客户端要填的 ID）+ MonkeyCode（`monkeycode/*`）+ 小浣熊（`raccoon/*`）+ Loomy（`loomy/*`）+ OpenCodeZen（`oczen/*`，匿名免费、无需账号）；旧 Qoder（`qoder/*`）路由保留但已从界面下线；另可在面板自行接入任意 OpenAI 兼容渠道（见下）
-- **三种添加形态**：浏览器授权登录 / **网页版自动登录**（小浣熊：拉起独立 profile 的 Edge/Chrome，登录后经 CDP 捕获凭据，Win/mac/Linux 通用，不再依赖注册表或本机客户端）/ **导入本机客户端凭据**（MonkeyCode / 小浣熊 / Loomy，Windows 与 macOS 路径均已探测）；Cline 走第四种——粘贴官方 API Key（只调 `/api-keys` 验证，零 token 消耗）
+- **十五渠道聚合**：WorkBuddyCN + WorkBuddyAI + TraeWork + TraeCode + QoderCN + QoderCOM + 千问办公 + 智谱清言（`glm/*`）+ Cline（`cline-free/*`，官方 `sk_` API Key 免费池；面板复制出的就是客户端要填的 ID）+ MonkeyCode（`monkeycode/*`）+ 小浣熊（`raccoon/*`）+ Loomy（`loomy/*`）+ WPS 灵犀（`lingxi/*`，`wps_sid` 粘贴或 CDP 捕获；每日签到领智点）+ 豆包（`doubao/*`，扫码/Cookie 登录；工作模式 9 个真模型）+ OpenCodeZen（`oczen/*`，匿名免费、无需账号）；旧 Qoder（`qoder/*`）路由保留但已从界面下线；另可在面板自行接入任意 OpenAI 兼容渠道（见下）
+- **多种添加形态**：浏览器授权登录 / **网页版自动登录**（小浣熊：拉起独立 profile 的 Edge/Chrome，登录后经 CDP 捕获凭据，Win/mac/Linux 通用，不再依赖注册表或本机客户端）/ **导入本机客户端凭据**（MonkeyCode / 小浣熊 / Loomy，Windows 与 macOS 路径均已探测）；Cline 走第四种——粘贴官方 API Key（只调 `/api-keys` 验证，零 token 消耗）；豆包走第五种——**服务端扫码登录**（纯 HTTP 申请二维码并换登录态，WSL/NAS/无桌面环境同样可用），手工 Cookie 兜底；WPS 灵犀同时支持 CDP 网页登录与 `wps_sid` 粘贴
 - **账号池调度**：请求级重试 + 粘性路由、账号级错误**在同一请求内换号**（不再一错即禁整号）、**模型级冷却**（429 只冷却命中的模型而非整个账号）、分级冷却状态机（软限流 / 风控 / 账号故障分别处理）
 - **流空闲监控**：连续 300 秒读不到任何字节即判定上游卡死并断流，避免请求无限挂起
 - **思考链防癫检测**：逐帧监测思维链复读/空转，命中即中断 SSE 并返回 `upstream_reasoning_loop`，**不罚账号**（死循环是模型级问题，换号必然复现）；设置里可热切换，默认开启

@@ -12,12 +12,17 @@ import { chLabel, hasWebLogin, isImportLocal, isPasteKey, NO_CHECKIN_LOGIN_HINT 
 //   ③ 网页版自动登录 + 导入两条路都有（raccoon，AGENTS.md R44）——浏览器由后端拉起
 //      （独立 profile + CDP），弹窗给两个按钮，并必须写明「登录态互踢」的风险；
 //   ④ 粘贴凭据型（cline）：Key 在官方站点创建，本工具只做一次「验证 + 落盘」。
+// 另外两个渠道不走通用确认弹层，各自有专用弹层：
+//   豆包（doubao）：服务端申请二维码 + 手机 App 扫码，手工粘贴 Cookie 为兜底；
+//   WPS 灵犀（lingxi）：CDP 浏览器登录（复用通用 pending）或粘贴 wps_sid。
 export default function LoginFlow({ flow, actions }) {
   const {
     confirm, // {channel} 待确认
     pending, // {channel, url, web} 进行中（web=true ⇒ 浏览器已由后端拉起）
     glm, // null | {status, uid, nickname, error, manualOpen}
     cline, // null | {key, err, busy} 粘贴官方 API Key
+    doubao, // null | {state, qr, status, err, manualOpen, cookie, busy} 扫码/粘贴 Cookie
+    lingxi, // null | {sid, err, busy} 粘贴 wps_sid
   } = flow;
 
   const ch = confirm && confirm.channel;
@@ -174,6 +179,8 @@ export default function LoginFlow({ flow, actions }) {
         </div>
       ) : null}
       {cline ? <ClineModal cline={cline} /> : null}
+      {doubao ? <DoubaoModal doubao={doubao} actions={actions} /> : null}
+      {lingxi ? <LingxiModal lingxi={lingxi} actions={actions} /> : null}
     </>
   );
 }
@@ -252,6 +259,171 @@ function ClineModal({ cline }) {
           <button className="btn primary" id="btnClineSubmit" disabled={cline.busy} onClick={cline.submit}>
             {cline.busy ? '验证中…' : '添加'}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 豆包：扫码登录（服务端纯 HTTP 申请二维码并换登录态）为主，手工粘贴 Cookie 兜底。
+// 关键点：
+//   · 二维码由**后端**申请，NAS / WSL / 无桌面环境同样可用（不依赖本机浏览器）；
+//   · 二维码图片地址可能为空（正在申请/申请失败），此时渲染占位块而不是破图；
+//   · 申请失败或扫码失败时自动展开手工方式并把错误原文露出来，不让用户卡在空白弹层里。
+function DoubaoModal({ doubao, actions }) {
+  const cookieRef = useRef(null);
+  useEffect(() => { if (doubao.manualOpen && cookieRef.current) cookieRef.current.focus(); }, [doubao.manualOpen]);
+  const failed = doubao.state === 'failed';
+  return (
+    <div className="overlay" id="doubaoOverlay"
+         onClick={(e) => { if (e.target.id === 'doubaoOverlay') actions.cancelDoubao(); }}>
+      <div className="modal modal-wide">
+        <div className="modal-title">添加豆包账号</div>
+        <div className="modal-body settings-body">
+
+          <div className="cfg-section" id="doubaoQr">
+            <div className="cfg-heading">扫码登录（推荐）</div>
+            <ol className="glm-steps">
+              <li>用手机上的 <b>豆包 App</b> 扫下方二维码。</li>
+              <li>手机上点「确认登录」，这里会自动完成，<b>不需要复制任何 Cookie</b>。</li>
+              <li>二维码由服务器自己申请、自己换登录态，NAS / 服务器部署同样有效。</li>
+            </ol>
+            <div className="doubao-qr-box">
+              {doubao.qr
+                ? <img className="doubao-qr" id="doubaoQrImg" src={doubao.qr}
+                       alt="豆包登录二维码" width="180" height="180" />
+                : <div className="doubao-qr-empty" id="doubaoQrEmpty">
+                    {failed ? '二维码申请失败' : '正在申请二维码…'}
+                  </div>}
+            </div>
+            {doubao.status && !doubao.err
+              ? <div className="hint" id="doubaoQrStatus">{doubao.status}</div>
+              : null}
+            <div className="hint" style={{ marginTop: 8 }}>
+              <button className="btn small primary" id="btnDoubaoQrStart"
+                      disabled={doubao.busy} onClick={actions.restartDoubaoQr}>重新申请二维码</button>
+            </div>
+            <div className="hint">每个账号单独扫一次；二维码过期后点「重新申请二维码」换新。</div>
+          </div>
+
+          {/* 手工兜底：校验/落盘与扫码走后端同一条通道（sessionid 必须在内）。 */}
+          <div className="cfg-section">
+            <div className="cfg-heading">手工粘贴 Cookie（兜底）</div>
+            <div className="hint" style={{ marginBottom: 6 }}>
+              扫码不可用（例如面板打不开二维码图片）时用这条路：在已登录豆包网页版的浏览器里按
+              <code> F12 </code> → <code>Application</code> → <code>Cookies</code> →
+              <code> https://www.doubao.com </code>，整行复制（<b>必须含 sessionid</b>）后粘进来，
+              效果与扫码等价。
+            </div>
+            {doubao.manualOpen ? (
+              <div id="doubaoManual">
+                <textarea className="input grow doubao-cookie-input" id="doubaoCookieInput" rows={4}
+                          ref={cookieRef} spellCheck="false" autoComplete="off"
+                          placeholder="sessionid=…; ttwid=…; s_v_web_id=…"
+                          value={doubao.cookie}
+                          onChange={(e) => doubao.setCookie(e.target.value)} />
+                <div className="hint" style={{ marginTop: 8 }}>
+                  <button className="btn small primary" id="btnDoubaoCookie"
+                          disabled={doubao.busy} onClick={() => actions.submitDoubaoCookie(doubao.cookie)}>
+                    {doubao.busy ? '验证中…' : '验证并添加'}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            <div className="hint" style={{ marginTop: 8 }}>
+              <button className="btn small" id="btnDoubaoManualToggle" onClick={doubao.toggleManual}>
+                {doubao.manualOpen ? '收起手工方式' : '展开手工方式'}
+              </button>
+            </div>
+          </div>
+
+        </div>
+        <div className="modal-actions">
+          <div className="hint" id="doubaoErr"
+               style={{ color: 'var(--danger)', marginRight: 'auto', marginTop: 0 }}>{doubao.err}</div>
+          <button className="btn" id="btnDoubaoCancel" onClick={actions.cancelDoubao}>取消</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// WPS 灵犀：两条等价路径 —— ① 浏览器登录（后端拉起独立 profile + CDP 捕获 wps_sid，
+// 关闭本弹层后走通用 pending 弹层）；② 手工粘贴 wps_sid。
+// 弹层里必须写清三条约束（缺一条都会让用户误判「为什么没额度」）：
+//   ① 灵犀与 Comate 是同一 WPS 账号体系的两个独立产品，须灵犀侧已开通；
+//   ② 智点按 WPS 账号计，重复添加不增加额度；
+//   ③ wps_sid 不参与自动续期，失效后需重新登录或重新粘贴。
+function LingxiModal({ lingxi, actions }) {
+  const sidRef = useRef(null);
+  useEffect(() => { if (sidRef.current) sidRef.current.focus(); }, []);
+  return (
+    <div className="overlay" id="lingxiOverlay"
+         onClick={(e) => { if (e.target.id === 'lingxiOverlay') actions.closeLingxi(); }}>
+      <div className="modal modal-wide">
+        <div className="modal-title">添加 WPS 灵犀账号</div>
+        <div className="modal-body settings-body">
+
+          <div className="cfg-section">
+            <div className="cfg-heading">方式一：浏览器登录（推荐）</div>
+            <ol className="glm-steps">
+              <li>点下方「浏览器登录」，本工具会打开一个<b>独立的浏览器窗口</b>并前往 WPS 官网
+                  （不影响你日常浏览器的登录态）。</li>
+              <li>在其中正常登录你的 WPS 账号（扫码 / 手机号 / 微信均可）。</li>
+              <li>登录完成后无需操作，后端会通过 CDP 捕获 <code>wps_sid</code> 并验证灵犀侧是否已开通。</li>
+            </ol>
+            <button className="btn small primary" id="btnLingxiBrowser"
+                    onClick={() => { actions.closeLingxi(); actions.startLogin('lingxi'); }}>
+              浏览器登录
+            </button>
+          </div>
+
+          <div className="cfg-section">
+            <div className="cfg-heading">方式二：粘贴 wps_sid</div>
+            <ol className="glm-steps">
+              <li>用浏览器登录 <a href="https://lingxi.kdocs.cn/" target="_blank" rel="noopener noreferrer">lingxi.kdocs.cn</a>
+                  （须为已开通灵犀的 WPS 账号，能看到智点余额）。</li>
+              <li>按 <code>F12</code> → <code>Application</code>（应用）→ <code>Cookies</code> → <code>https://lingxi.kdocs.cn</code>。</li>
+              <li>找到名为 <code>wps_sid</code> 的 Cookie，复制它的<b>值</b>粘贴到下面。</li>
+            </ol>
+            <input id="lingxiSidInput" className="input grow" spellCheck="false" autoComplete="off"
+                   ref={sidRef} placeholder="粘贴 wps_sid Cookie 值"
+                   style={{ width: '100%', fontFamily: 'ui-monospace,monospace' }}
+                   value={lingxi.sid} onChange={(e) => lingxi.setSid(e.target.value)} />
+            <div className="hint" style={{ marginTop: 8 }}>
+              <button className="btn small primary" id="btnLingxiSubmit"
+                      disabled={lingxi.busy} onClick={() => actions.submitLingxiSID(lingxi.sid)}>
+                {lingxi.busy ? '验证中…' : '验证并添加'}
+              </button>
+            </div>
+          </div>
+
+          <div className="glm-warn">
+            <div className="glm-warn-title">⚠️ 必须使用多个独立 WPS 账号各自的 wps_sid</div>
+            <ol>
+              <li><b>灵犀与 Comate 是同一 WPS 账号体系的两个独立产品</b>：同一份 wps_sid 在一侧开通，
+                  不代表另一侧可用 —— 本渠道要求<b>灵犀侧已开通</b>且有智点余额。</li>
+              <li><b>智点按 WPS 账号计</b>：同一个账号重复粘贴同一份 wps_sid <b>共享同一份额度</b>，
+                  重复添加不会增加额度。本工具在检测到重复 sid 时会给出提示。</li>
+              <li>想扩额度请<b>注册多个独立 WPS 账号</b>（各自开通灵犀），逐个粘贴添加。</li>
+              <li><code>wps_sid</code> 是登录 Cookie，<b>不参与自动续期</b>：在官网主动退出或修改密码后可能失效；
+                  失效后账号卡片会出现 ⟳ 入口，点它重新走一遍本流程即可恢复。</li>
+            </ol>
+          </div>
+
+          <div className="hint">
+            模型列表由灵犀侧动态下发（DeepSeek / Qwen / GLM / Kimi / MiniMax 等）；
+            每日签到自动领取智点，余额与临期智点显示在账号卡片。
+            凭据只保存在本机 <code>auths/</code> 目录，不会外传。
+          </div>
+
+          <div className="hint" id="lingxiErr"
+               style={{ color: lingxi.busy ? 'var(--muted)' : 'var(--danger)' }}>
+            {lingxi.busy ? '验证中…' : lingxi.err}
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button className="btn" id="btnLingxiCancel" onClick={actions.closeLingxi}>取消</button>
         </div>
       </div>
     </div>
